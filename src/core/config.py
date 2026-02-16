@@ -360,7 +360,7 @@ class MonitoringConfig(BaseModel):
 
 class AppConfig(BaseModel):
     name: str = "AI Crypto Trading Bot"
-    version: str = "2.0.0"
+    version: str = "3.0.0"
     mode: str = "paper"
     log_level: str = "INFO"
     db_path: str = "data/trading.db"

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import signal
 import sys
 import time
@@ -19,9 +20,8 @@ from pathlib import Path
 
 
 class StressTester:
-    DASHBOARD_URL = "http://localhost:8080"
-
-    def __init__(self, duration_hours: float = 72, interval_minutes: int = 5, api_key: str = ""):
+    def __init__(self, duration_hours: float = 72, interval_minutes: int = 5, api_key: str = "", base_url: str = ""):
+        self.DASHBOARD_URL = base_url or os.environ.get("DASHBOARD_URL", "http://localhost:8080")
         self.duration_hours = duration_hours
         self.interval_minutes = interval_minutes
         self.api_key = (api_key or "").strip()
@@ -205,6 +205,7 @@ async def main():
     parser.add_argument("--interval", type=int, default=5)
     parser.add_argument("--quick", action="store_true")
     parser.add_argument("--api-key", type=str, default="")
+    parser.add_argument("--url", type=str, default="", help="Dashboard URL (default: http://localhost:8080 or DASHBOARD_URL env)")
     args = parser.parse_args()
 
     if args.quick:
@@ -212,7 +213,7 @@ async def main():
         args.interval = 1
 
     api_key = args.api_key or ""
-    t = StressTester(args.hours, args.interval, api_key=api_key)
+    t = StressTester(args.hours, args.interval, api_key=api_key, base_url=args.url)
     await t.run()
     sys.exit(0 if t.tests_failed == 0 else 1)
 

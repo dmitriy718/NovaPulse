@@ -51,6 +51,7 @@ COPY src/ ./src/
 COPY static/ ./static/
 COPY config/ ./config/
 COPY main.py .
+COPY stress_test.py .
 COPY requirements.txt .
 COPY requirements-pi.txt .
 

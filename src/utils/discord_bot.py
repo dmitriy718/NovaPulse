@@ -47,7 +47,8 @@ class DiscordBot:
         if self.allowed_channel_ids and channel_id is not None:
             if str(channel_id) in self.allowed_channel_ids:
                 return True
-        return bool(not self.allowed_channel_ids and not self.allowed_guild_id)
+        # Deny by default when no restrictions are configured (fail closed)
+        return False
 
     async def initialize(self) -> bool:
         """Initialize the Discord bot and register commands."""

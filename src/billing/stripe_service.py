@@ -36,6 +36,7 @@ class StripeService:
         self.currency = currency
         self._db = db
         self._enabled = bool(self.secret_key and self.price_id)
+        self._stripe = None  # cached module ref after one-time init
 
     @property
     def enabled(self) -> bool:
@@ -46,10 +47,12 @@ class StripeService:
         self._db = db
 
     def _api(self):
-        """Lazy import Stripe to avoid import errors when not installed."""
-        import stripe
-        stripe.api_key = self.secret_key
-        return stripe
+        """Lazy import Stripe and set api_key once (thread-safe after first call)."""
+        if self._stripe is None:
+            import stripe
+            stripe.api_key = self.secret_key
+            self._stripe = stripe
+        return self._stripe
 
     # -------------------------------------------------------------------------
     # Create customer and checkout

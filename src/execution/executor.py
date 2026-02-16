@@ -80,6 +80,8 @@ class TradeExecutor:
         self.limit_fallback_to_market = bool(limit_fallback_to_market)
         self._strategy_result_cb = strategy_result_cb
 
+        self.continuous_learner: Optional[ContinuousLearner] = None
+
         self._active_orders: Dict[str, Dict[str, Any]] = {}
         self._pending_signals: asyncio.Queue = asyncio.Queue()
         self._execution_stats = {
@@ -89,6 +91,10 @@ class TradeExecutor:
             "total_slippage": 0.0,
             "total_fees": 0.0,
         }
+
+    def set_continuous_learner(self, learner: ContinuousLearner) -> None:
+        """Attach the continuous learner for online ML updates."""
+        self.continuous_learner = learner
 
     async def reinitialize_positions(self) -> None:
         """Restore position and stop-loss state from database after restart."""

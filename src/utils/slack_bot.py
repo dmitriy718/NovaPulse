@@ -65,7 +65,7 @@ class SlackBot:
 
             @self._app.command("/trading-pause")
             async def pause(ack, command, say):
-                ack()
+                await ack()
                 if not self._is_authorized(command.get("channel_id")):
                     say(text="Not authorized.", channel=command["channel_id"])
                     return
@@ -77,7 +77,7 @@ class SlackBot:
 
             @self._app.command("/trading-resume")
             async def resume(ack, command, say):
-                ack()
+                await ack()
                 if not self._is_authorized(command.get("channel_id")):
                     say(text="Not authorized.", channel=command["channel_id"])
                     return
@@ -89,7 +89,7 @@ class SlackBot:
 
             @self._app.command("/trading-close-all")
             async def close_all(ack, command, say):
-                ack()
+                await ack()
                 if not self._is_authorized(command.get("channel_id")):
                     say(text="Not authorized.", channel=command["channel_id"])
                     return
@@ -104,7 +104,7 @@ class SlackBot:
 
             @self._app.command("/trading-kill")
             async def kill(ack, command, say):
-                ack()
+                await ack()
                 if not self._is_authorized(command.get("channel_id")):
                     say(text="Not authorized.", channel=command["channel_id"])
                     return
@@ -116,7 +116,7 @@ class SlackBot:
 
             @self._app.command("/trading-status")
             async def status(ack, command, say):
-                ack()
+                await ack()
                 if not self._is_authorized(command.get("channel_id")):
                     say(text="Not authorized.", channel=command["channel_id"])
                     return
@@ -135,7 +135,7 @@ class SlackBot:
 
             @self._app.command("/trading-pnl")
             async def pnl(ack, command, say):
-                ack()
+                await ack()
                 if not self._is_authorized(command.get("channel_id")):
                     say(text="Not authorized.", channel=command["channel_id"])
                     return
@@ -153,7 +153,7 @@ class SlackBot:
 
             @self._app.command("/trading-positions")
             async def positions(ack, command, say):
-                ack()
+                await ack()
                 if not self._is_authorized(command.get("channel_id")):
                     say(text="Not authorized.", channel=command["channel_id"])
                     return
@@ -175,7 +175,7 @@ class SlackBot:
 
             @self._app.command("/trading-risk")
             async def risk_cmd(ack, command, say):
-                ack()
+                await ack()
                 if not self._is_authorized(command.get("channel_id")):
                     say(text="Not authorized.", channel=command["channel_id"])
                     return
@@ -208,7 +208,7 @@ class SlackBot:
         """Start the Slack bot (SocketModeHandler runs in thread)."""
         if not self._enabled or not self._handler:
             return
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         try:
             await loop.run_in_executor(None, self._handler.start)
         except Exception as e:

@@ -84,7 +84,7 @@ class KrakenRESTClient:
                 max_connections=20,
                 max_keepalive_connections=10
             ),
-            headers={"User-Agent": "AITradingBot/2.0"},
+            headers={"User-Agent": "AITradingBot/3.0"},
         )
         await self._sync_time()
         logger.info("Kraken REST client initialized", time_offset=self._time_offset)
@@ -446,9 +446,9 @@ class KrakenRESTClient:
     ) -> Dict[str, Any]:
         """Get personal trade history."""
         data: Dict[str, Any] = {}
-        if start:
+        if start is not None:
             data["start"] = start
-        if end:
+        if end is not None:
             data["end"] = end
         return await self._request(
             "POST", "/0/private/TradesHistory", data, authenticated=True

@@ -114,6 +114,7 @@ async def run_bot():
     from src.core.engine import BotEngine
     from src.core.logger import get_logger
     from src.core.runtime_safety import install_asyncio_exception_handler
+    from src.core.error_handler import ErrorSeverity, GracefulErrorHandler
     from src.core.multi_engine import (
         MultiControlRouter,
         MultiEngineHub,
@@ -472,16 +473,17 @@ def main():
 
     logger = get_logger("main")
     install_global_exception_handlers(logger, log_dir="logs")
+    from src import __version__
     logger.info(
         "Starting AI Trading Bot",
-        version="2.0.0",
+        version=__version__,
         python=sys.version,
         mode=config.config.app.mode,
     )
 
-    print("""
+    print(f"""
     ╔══════════════════════════════════════════════╗
-    ║        AI CRYPTO TRADING BOT v2.0.0          ║
+    ║        AI CRYPTO TRADING BOT v{__version__}          ║
     ║   Multi-Strategy • AI-Powered • Self-Learning ║
     ╚══════════════════════════════════════════════╝
     """)
