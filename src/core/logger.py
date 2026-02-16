@@ -209,3 +209,135 @@ def get_logger(name: str = "trading_bot") -> structlog.stdlib.BoundLogger:
 def log_performance(logger: Any, operation: str, **kwargs) -> PerformanceTimer:
     """Create a performance timing context manager."""
     return PerformanceTimer(logger, operation, **kwargs)
+
+
+# ---------------------------------------------------------------------------
+# Telegram Alert Handler - forwards ERROR+ logs to Telegram
+# ---------------------------------------------------------------------------
+
+class TelegramAlertHandler(logging.Handler):
+    """
+    Logging handler that forwards ERROR and CRITICAL log messages to Telegram.
+
+    Features:
+    - Rate-limited to prevent spam (configurable min interval)
+    - Batches multiple errors within a window into a single message
+    - Async-safe: queues messages for a background task to send
+    - Truncates long messages to fit Telegram's 4096 char limit
+    - Suppresses its own errors to avoid infinite recursion
+    """
+
+    MAX_MESSAGE_LEN = 4000  # Telegram limit is 4096; leave room for wrapper
+    MAX_QUEUE_SIZE = 100
+
+    def __init__(
+        self,
+        telegram_bot: Any,
+        min_interval_seconds: float = 10.0,
+        level: int = logging.ERROR,
+    ):
+        super().__init__(level)
+        self._telegram_bot = telegram_bot
+        self._min_interval = min_interval_seconds
+        self._queue: list = []
+        self._last_send_time: float = 0.0
+        self._flush_task: Optional[Any] = None
+        self._loop: Optional[Any] = None
+
+    def emit(self, record: logging.LogRecord) -> None:
+        """Queue a log record for Telegram delivery."""
+        try:
+            # Don't forward our own telegram send errors (avoid infinite loop)
+            if record.name in ("telegram", "httpx", "httpcore"):
+                return
+
+            msg = self.format(record) if self.formatter else record.getMessage()
+            # Strip ANSI color codes that structlog console renderer adds
+            msg = re.sub(r"\x1b\[[0-9;]*m", "", msg)
+            if len(msg) > 300:
+                msg = msg[:300] + "..."
+
+            self._queue.append(msg)
+
+            # Cap queue size to prevent memory issues
+            if len(self._queue) > self.MAX_QUEUE_SIZE:
+                self._queue = self._queue[-self.MAX_QUEUE_SIZE:]
+
+            # Schedule a flush if not already pending
+            self._schedule_flush()
+        except Exception:
+            # Never let the handler itself crash the application
+            pass
+
+    def _schedule_flush(self) -> None:
+        """Schedule an async flush of the message queue."""
+        try:
+            import asyncio
+            loop = asyncio.get_running_loop()
+            if self._flush_task is None or self._flush_task.done():
+                self._flush_task = loop.create_task(self._delayed_flush())
+        except RuntimeError:
+            # No running event loop - can't send async
+            pass
+
+    async def _delayed_flush(self) -> None:
+        """Wait for the rate limit window, then flush all queued messages."""
+        import asyncio
+        try:
+            # Wait for the rate limit interval
+            elapsed = time.time() - self._last_send_time
+            if elapsed < self._min_interval:
+                await asyncio.sleep(self._min_interval - elapsed)
+
+            if not self._queue:
+                return
+
+            # Drain the queue
+            messages = self._queue[:]
+            self._queue.clear()
+
+            # Build a batched Telegram message
+            count = len(messages)
+            if count == 1:
+                header = "🚨 *Error Alert*"
+            else:
+                header = f"🚨 *{count} Error Alerts*"
+
+            body = "\n\n".join(f"```\n{m}\n```" for m in messages[:10])
+            if count > 10:
+                body += f"\n\n_...and {count - 10} more errors_"
+
+            full_msg = f"{header}\n\n{body}"
+            if len(full_msg) > self.MAX_MESSAGE_LEN:
+                full_msg = full_msg[:self.MAX_MESSAGE_LEN] + "\n```\n_...truncated_"
+
+            self._last_send_time = time.time()
+            await self._telegram_bot.send_message(full_msg)
+        except Exception:
+            # Swallow send failures silently
+            pass
+
+
+# Global reference so it can be attached after TelegramBot is initialized
+_telegram_alert_handler: Optional[TelegramAlertHandler] = None
+
+
+def attach_telegram_alerts(telegram_bot: Any, min_interval: float = 10.0) -> None:
+    """
+    Attach a TelegramAlertHandler to the root logger so all ERROR+ logs
+    are forwarded to Telegram.
+
+    Call this after the TelegramBot is initialized and ready to send messages.
+    """
+    global _telegram_alert_handler
+
+    # Remove previous handler if re-attaching
+    if _telegram_alert_handler is not None:
+        logging.getLogger().removeHandler(_telegram_alert_handler)
+
+    _telegram_alert_handler = TelegramAlertHandler(
+        telegram_bot,
+        min_interval_seconds=min_interval,
+        level=logging.ERROR,
+    )
+    logging.getLogger().addHandler(_telegram_alert_handler)

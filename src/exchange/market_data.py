@@ -61,12 +61,24 @@ class MarketDataCache:
     def __init__(self, max_bars: int = 500):
         self.max_bars = max_bars
         self._buffers: Dict[str, Dict[int, RingBuffer]] = defaultdict(dict)
-        self._locks: Dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+        self._locks: Dict[str, asyncio.Lock] = {}
+        self._lock_guard = asyncio.Lock()  # protects _locks creation
         self._last_update: Dict[str, float] = {}
         self._tickers: Dict[str, Dict[str, Any]] = {}
         self._order_books: Dict[str, Dict[str, Any]] = {}
         self._order_book_analysis: Dict[str, Dict[str, Any]] = {}
         self._initialized_pairs: set = set()
+
+    async def _get_lock(self, pair: str) -> asyncio.Lock:
+        """Get or create a per-pair lock, protected against race conditions."""
+        lock = self._locks.get(pair)
+        if lock is not None:
+            return lock
+        async with self._lock_guard:
+            # Double-check after acquiring guard
+            if pair not in self._locks:
+                self._locks[pair] = asyncio.Lock()
+            return self._locks[pair]
 
     def _ensure_buffers(self, pair: str) -> None:
         """Ensure RingBuffers exist for all columns for the pair."""
@@ -89,7 +101,8 @@ class MarketDataCache:
         Returns:
             Number of bars loaded
         """
-        async with self._locks[pair]:
+        lock = await self._get_lock(pair)
+        async with lock:
             self._ensure_buffers(pair)
 
             n_bars = min(len(ohlc_data), self.max_bars)
@@ -99,16 +112,16 @@ class MarketDataCache:
             columns = {col: np.zeros(n_bars) for col in range(self.NUM_COLS)}
             
             write_idx = 0
-            for i, bar in enumerate(data_slice):
+            for bar in data_slice:
                 try:
-                    columns[self.COL_TIME][i] = float(bar[0])
-                    columns[self.COL_OPEN][i] = float(bar[1])
-                    columns[self.COL_HIGH][i] = float(bar[2])
-                    columns[self.COL_LOW][i] = float(bar[3])
-                    columns[self.COL_CLOSE][i] = float(bar[4])
-                    columns[self.COL_VWAP][i] = float(bar[5]) if len(bar) > 5 else 0
-                    columns[self.COL_VOLUME][i] = float(bar[6]) if len(bar) > 6 else 0
-                    columns[self.COL_COUNT][i] = float(bar[7]) if len(bar) > 7 else 0
+                    columns[self.COL_TIME][write_idx] = float(bar[0])
+                    columns[self.COL_OPEN][write_idx] = float(bar[1])
+                    columns[self.COL_HIGH][write_idx] = float(bar[2])
+                    columns[self.COL_LOW][write_idx] = float(bar[3])
+                    columns[self.COL_CLOSE][write_idx] = float(bar[4])
+                    columns[self.COL_VWAP][write_idx] = float(bar[5]) if len(bar) > 5 else 0
+                    columns[self.COL_VOLUME][write_idx] = float(bar[6]) if len(bar) > 6 else 0
+                    columns[self.COL_COUNT][write_idx] = float(bar[7]) if len(bar) > 7 else 0
                     write_idx += 1
                 except (ValueError, IndexError):
                     continue
@@ -138,9 +151,10 @@ class MarketDataCache:
         
         # ENHANCEMENT: Added outlier detection on price updates
         """
-        async with self._locks[pair]:
+        lock = await self._get_lock(pair)
+        async with lock:
             self._ensure_buffers(pair)
-            
+
             time_buf = self._buffers[pair][self.COL_TIME]
             last_ts = time_buf.get_last()
             
@@ -175,6 +189,7 @@ class MarketDataCache:
 
             is_new_bar = False
             # M17 FIX: Tolerance-based comparison
+            # Guard: only update in-place if buffer has data
             if time_buf.size > 0 and abs(last_ts - timestamp) < 1.0:
                 # Update current candle (overwrite last)
                 # RingBuffer doesn't support random access write easily, 
@@ -201,7 +216,8 @@ class MarketDataCache:
 
     async def update_latest_close(self, pair: str, price: float) -> None:
         """S1 FIX: Update ONLY the close price of the current (last) bar in-place."""
-        async with self._locks[pair]:
+        lock = await self._get_lock(pair)
+        async with lock:
             if pair in self._buffers and self._buffers[pair][self.COL_CLOSE].size > 0:
                 # Direct buffer access for O(1) update
                 close_buf = self._buffers[pair][self.COL_CLOSE]
@@ -345,7 +361,8 @@ class MarketDataCache:
             best_bid = _level_price(bids[0])
             best_ask = _level_price(asks[0])
             if best_bid > 0 and best_ask > 0:
-                return (best_ask - best_bid) / best_bid
+                midpoint = (best_ask + best_bid) / 2
+                return (best_ask - best_bid) / midpoint
         return 0.0
 
     # ------------------------------------------------------------------

@@ -76,6 +76,8 @@ class ControlRouter:
             return {"ok": False, "error": "engine not set", "closed": 0}
         if not self._is_tenant_match(tenant_id):
             return {"ok": False, "error": "tenant mismatch", "closed": 0}
+        if not getattr(self._engine, "executor", None):
+            return {"ok": False, "error": "executor not initialized", "closed": 0}
         count = await self._engine.executor.close_all_positions(
             reason, tenant_id=tenant_id
         )
@@ -88,9 +90,11 @@ class ControlRouter:
             return {"ok": False, "error": "engine not set"}
         if not self._is_tenant_match(tenant_id):
             return {"ok": False, "error": "tenant mismatch"}
-        count = await self._engine.executor.close_all_positions(
-            "emergency_kill", tenant_id=self._resolve_tenant(tenant_id)
-        )
+        count = 0
+        if getattr(self._engine, "executor", None):
+            count = await self._engine.executor.close_all_positions(
+                "emergency_kill", tenant_id=self._resolve_tenant(tenant_id)
+            )
         await self._engine.stop()
         logger.warning("Kill via control router", closed=count)
         return {"ok": True, "closed": count}

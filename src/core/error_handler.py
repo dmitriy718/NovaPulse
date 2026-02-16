@@ -156,7 +156,7 @@ class GracefulErrorHandler:
         if self._db_log_fn:
             try:
                 sev_map = {
-                    ErrorSeverity.CRITICAL: "error",
+                    ErrorSeverity.CRITICAL: "critical",
                     ErrorSeverity.DEGRADED: "warning",
                     ErrorSeverity.TRANSIENT: "info",
                 }

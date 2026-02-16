@@ -55,7 +55,7 @@ class CoinbaseWebSocketClient:
 
     @property
     def is_connected(self) -> bool:
-        return self._connected
+        return self._connected and self._ws is not None
 
     async def connect(self) -> None:
         self._running = True
@@ -203,10 +203,13 @@ class CoinbaseWebSocketClient:
 
     async def _route(self, channel: str, data: Dict[str, Any]) -> None:
         for cb in self._callbacks.get(channel, []):
-            if asyncio.iscoroutinefunction(cb):
-                await cb(data)
-            else:
-                cb(data)
+            try:
+                if asyncio.iscoroutinefunction(cb):
+                    await cb(data)
+                else:
+                    cb(data)
+            except Exception as e:
+                logger.error("Callback error", channel=channel, error=str(e))
 
     # ------------------------------------------------------------------
     # Message normalization
@@ -279,13 +282,12 @@ class CoinbaseWebSocketClient:
                 self._books[product_id] = {"bids": {}, "asks": {}}
             book = self._books[product_id]
             event_type = str(ev.get("event_type") or ev.get("type") or "").lower()
-            if event_type == "snapshot":
+            is_snapshot = event_type == "snapshot"
+            if is_snapshot:
                 book["bids"].clear()
                 book["asks"].clear()
-            # Snapshot support (if provided)
-            if ev.get("bids") or ev.get("asks"):
-                book["bids"].clear()
-                book["asks"].clear()
+            # Load full bids/asks arrays only for snapshots
+            if is_snapshot and (ev.get("bids") or ev.get("asks")):
                 for b in ev.get("bids", []):
                     try:
                         book["bids"][float(b.get("price") or b[0])] = float(b.get("size") or b[1])

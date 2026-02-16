@@ -446,6 +446,10 @@ class BotEngine:
                 await self.telegram_bot.initialize()
                 # Wire up Telegram notifications for errors
                 self.error_handler.set_notify_fn(self.telegram_bot.send_message)
+                # Attach Telegram alerts to root logger so ALL ERROR+ logs
+                # are automatically forwarded to Telegram.
+                from src.core.logger import attach_telegram_alerts
+                attach_telegram_alerts(self.telegram_bot, min_interval=10.0)
         except Exception as e:
             await self.error_handler.handle(e, component="telegram", context="init")
 
@@ -546,11 +550,20 @@ class BotEngine:
         logger.info("Stopping bot engine...")
         self._running = False
 
-        # Cancel all tasks and WAIT for them to finish (S10 FIX)
+        # Cancel all tasks and WAIT for them to finish with a timeout
         for task in self._tasks:
             task.cancel()
         if self._tasks:
-            await asyncio.gather(*self._tasks, return_exceptions=True)
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*self._tasks, return_exceptions=True),
+                    timeout=15.0,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "Some tasks did not finish within 15s shutdown timeout",
+                    pending=[t.get_name() for t in self._tasks if not t.done()],
+                )
 
         # Now safe to close resources
         if self.ws_client:
@@ -601,6 +614,10 @@ class BotEngine:
 
                 # Step 2: Run confluence analysis on event-driven pairs
                 pairs_to_scan, from_event = await self._collect_scan_pairs()
+                if not self.confluence:
+                    logger.warning("Confluence detector not initialized, skipping scan")
+                    await asyncio.sleep(self.scan_interval)
+                    continue
                 confluence_signals = await self.confluence.scan_all_pairs(
                     pairs_to_scan
                 )
@@ -688,8 +705,8 @@ class BotEngine:
                         continue
 
                     # Skip trades with poor risk/reward (TP distance should be at least min_rr * SL distance)
-                    sl_dist = abs(signal.entry_price - signal.stop_loss)
-                    tp_dist = abs(signal.take_profit - signal.entry_price) if signal.take_profit else 0
+                    sl_dist = abs(signal.entry_price - (signal.stop_loss or 0))
+                    tp_dist = abs((signal.take_profit or 0) - signal.entry_price) if signal.take_profit else 0
                     min_rr = getattr(self.config.ai, "min_risk_reward_ratio", 0.9)
                     if sl_dist > 0 and tp_dist > 0 and (tp_dist / sl_dist) < min_rr:
                         continue
@@ -857,8 +874,8 @@ class BotEngine:
                             ohlc = await self.rest_client.get_ohlc(pair, interval=1)
                             if ohlc:
                                 await self.market_data.warmup(pair, ohlc)
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.debug("REST refresh for stale pair failed", pair=pair, error=repr(e))
 
                 # Circuit breakers (auto-pause) for safer unattended operation.
                 await self._apply_circuit_breakers(stale_pairs)
@@ -1047,6 +1064,8 @@ class BotEngine:
         self, signal
     ) -> Dict[str, Any]:
         """Build feature dict for AI predictor from confluence signal."""
+        if not self.predictor:
+            return {}
         # S7 FIX: Average overlapping numeric keys instead of overwriting
         metadata = {}
         counts = {}

@@ -11,6 +11,7 @@ L2 FIX: Uses get_running_loop() instead of deprecated get_event_loop().
 from __future__ import annotations
 
 import asyncio
+import atexit
 import os
 import signal as sig
 import sys
@@ -20,6 +21,22 @@ from pathlib import Path
 import random
 
 _INSTANCE_LOCK_FD: int | None = None
+
+
+def _release_instance_lock() -> None:
+    """Release the instance lock file descriptor on process exit."""
+    global _INSTANCE_LOCK_FD
+    if _INSTANCE_LOCK_FD is not None:
+        try:
+            import fcntl
+            fcntl.flock(_INSTANCE_LOCK_FD, fcntl.LOCK_UN)
+        except Exception:
+            pass
+        try:
+            os.close(_INSTANCE_LOCK_FD)
+        except Exception:
+            pass
+        _INSTANCE_LOCK_FD = None
 
 
 def _acquire_instance_lock() -> bool:
@@ -69,6 +86,7 @@ def _acquire_instance_lock() -> bool:
         pass
     global _INSTANCE_LOCK_FD
     _INSTANCE_LOCK_FD = fd
+    atexit.register(_release_instance_lock)
     return True
 
 
@@ -522,6 +540,7 @@ def main():
         "Max restart attempts reached, shutting down",
         failures=failures,
     )
+    _release_instance_lock()
     sys.exit(1)
 
 

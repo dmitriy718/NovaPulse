@@ -12,6 +12,7 @@ This is intentionally non-fatal: handlers should never raise.
 from __future__ import annotations
 
 import asyncio
+import atexit
 import faulthandler
 import sys
 import threading
@@ -46,6 +47,17 @@ def install_global_exception_handlers(logger: Any, log_dir: str = "logs") -> Non
         _FAULT_FH = open(fault_path, "a", encoding="utf-8")
         fh = _FAULT_FH
         faulthandler.enable(file=fh, all_threads=True)
+
+        def _close_fault_fh():
+            global _FAULT_FH
+            if _FAULT_FH is not None:
+                try:
+                    _FAULT_FH.close()
+                except Exception:
+                    pass
+                _FAULT_FH = None
+
+        atexit.register(_close_fault_fh)
         # Also dump on SIGUSR1 if available (manual debug trigger).
         if hasattr(signal := __import__("signal"), "SIGUSR1"):
             faulthandler.register(signal.SIGUSR1, file=fh, all_threads=True)

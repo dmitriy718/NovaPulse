@@ -12,13 +12,14 @@ performance metrics, and ML training data storage.
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 import json
 import math
 import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
 import aiosqlite
 import hashlib
@@ -35,7 +36,7 @@ def _truthy_env(name: str) -> bool:
 class DatabaseManager:
     """
     Async SQLite database manager with WAL mode for production use.
-    
+
     Features:
     - WAL mode for concurrent read/write
     - Auto-migration on schema changes
@@ -43,11 +44,32 @@ class DatabaseManager:
     - Query batching for bulk inserts
     """
 
+    # Timeout for acquiring the DB lock to prevent deadlocks.
+    _LOCK_TIMEOUT: float = 30.0
+
     def __init__(self, db_path: str = "data/trading.db"):
         self.db_path = db_path
         self._db: Optional[aiosqlite.Connection] = None
         self._lock = asyncio.Lock()
         self._initialized = False
+
+    @asynccontextmanager
+    async def _timed_lock(self) -> AsyncIterator[None]:
+        """Acquire the DB lock with a timeout to prevent deadlocks."""
+        try:
+            await asyncio.wait_for(self._lock.acquire(), timeout=self._LOCK_TIMEOUT)
+        except asyncio.TimeoutError:
+            logger.error(
+                "Database lock acquisition timed out - possible deadlock",
+                timeout=self._LOCK_TIMEOUT,
+            )
+            raise RuntimeError(
+                f"Database lock timeout after {self._LOCK_TIMEOUT}s"
+            )
+        try:
+            yield
+        finally:
+            self._lock.release()
 
     async def initialize(self) -> None:
         """Initialize database connection and create schema."""
@@ -410,7 +432,7 @@ class DatabaseManager:
             except Exception:
                 payload = None
 
-        async with self._lock:
+        async with self._timed_lock():
             await self._db.execute(
                 """INSERT INTO order_book_snapshots
                    (pair, timestamp, bid_volume, ask_volume, obi, spread, whale_detected, snapshot_data, trade_id, tenant_id)
@@ -482,7 +504,7 @@ class DatabaseManager:
     ) -> int:
         """Insert a new trade record. Optional tenant_id for multi-tenant."""
         self._ensure_ready()
-        async with self._lock:
+        async with self._timed_lock():
             cursor = await self._db.execute(
                 """INSERT INTO trades 
                 (trade_id, pair, side, entry_price, quantity, status, strategy,
@@ -518,7 +540,7 @@ class DatabaseManager:
         Optional tenant_id for multi-tenant defense in depth."""
         if not self._initialized:
             raise RuntimeError("Database not initialized")
-        async with self._lock:
+        async with self._timed_lock():
             set_clauses = []
             values = []
             for key, value in updates.items():
@@ -553,7 +575,7 @@ class DatabaseManager:
         """Close a trade with final P&L calculation.
         Optional tenant_id for multi-tenant defense in depth."""
         now = datetime.now(timezone.utc).isoformat()
-        async with self._lock:
+        async with self._timed_lock():
             # Get entry time to calculate duration
             select_sql = "SELECT entry_time FROM trades WHERE trade_id = ?"
             select_params: List[Any] = [trade_id]
@@ -666,7 +688,7 @@ class DatabaseManager:
         self, signal: Dict[str, Any], tenant_id: Optional[str] = "default"
     ) -> int:
         """Insert a strategy signal."""
-        async with self._lock:
+        async with self._timed_lock():
             cursor = await self._db.execute(
                 """INSERT INTO signals
                 (timestamp, pair, strategy, direction, strength,
@@ -692,7 +714,7 @@ class DatabaseManager:
         self, name: str, value: float, tags: Optional[Dict] = None
     ) -> None:
         """Insert a performance metric data point."""
-        async with self._lock:
+        async with self._timed_lock():
             await self._db.execute(
                 "INSERT INTO metrics (timestamp, metric_name, metric_value, tags) VALUES (?, ?, ?, ?)",
                 (datetime.now(timezone.utc).isoformat(), name, value,
@@ -727,7 +749,7 @@ class DatabaseManager:
         tenant_id: Optional[str] = "default",
     ) -> None:
         """Log an AI thought/decision for the dashboard. Optional tenant_id."""
-        async with self._lock:
+        async with self._timed_lock():
             await self._db.execute(
                 """INSERT INTO thought_log (timestamp, category, message, severity, metadata, tenant_id)
                 VALUES (?, ?, ?, ?, ?, ?)""",
@@ -786,7 +808,7 @@ class DatabaseManager:
         tenant_id: Optional[str] = "default",
     ) -> None:
         """Insert ML feature vector for training."""
-        async with self._lock:
+        async with self._timed_lock():
             await self._db.execute(
                 """INSERT INTO ml_features (timestamp, pair, features, label, trade_id, tenant_id)
                 VALUES (?, ?, ?, ?, ?, ?)""",
@@ -830,7 +852,7 @@ class DatabaseManager:
         """
         if not trade_id:
             return 0
-        async with self._lock:
+        async with self._timed_lock():
             sql = "UPDATE ml_features SET label = ? WHERE trade_id = ?"
             params: List[Any] = [float(label), trade_id]
             if tenant_id:
@@ -881,7 +903,7 @@ class DatabaseManager:
 
     async def set_state(self, key: str, value: Any) -> None:
         """Set a system state key-value pair."""
-        async with self._lock:
+        async with self._timed_lock():
             await self._db.execute(
                 """INSERT OR REPLACE INTO system_state (key, value, updated_at)
                 VALUES (?, ?, datetime('now'))""",
@@ -910,7 +932,7 @@ class DatabaseManager:
         self, date: str, stats: Dict[str, Any], tenant_id: Optional[str] = "default"
     ) -> None:
         """Update or insert daily performance summary."""
-        async with self._lock:
+        async with self._timed_lock():
             await self._db.execute(
                 """INSERT OR REPLACE INTO daily_summary
                 (date, total_trades, winning_trades, losing_trades,
@@ -1013,7 +1035,7 @@ class DatabaseManager:
         rows = await cursor.fetchall()
         pnls = [r[0] for r in rows if r[0] is not None]
         if len(pnls) >= 5:
-            import math
+
             mean_pnl = sum(pnls) / len(pnls)
             variance = sum((x - mean_pnl) ** 2 for x in pnls) / len(pnls)
             std_dev = math.sqrt(variance) if variance > 0 else 0.0
@@ -1025,7 +1047,7 @@ class DatabaseManager:
             # Sortino: only downside deviation
             downside = [x for x in pnls if x < 0]
             if downside:
-                down_var = sum(x ** 2 for x in downside) / len(pnls)
+                down_var = sum(x ** 2 for x in downside) / len(downside)
                 down_dev = math.sqrt(down_var) if down_var > 0 else 0.0
                 stats["sortino_ratio"] = round(
                     (mean_pnl / down_dev * annual_factor) if down_dev > 0 else 0.0, 3
@@ -1102,7 +1124,7 @@ class DatabaseManager:
         status: str = "active",
     ) -> None:
         """Create or update tenant."""
-        async with self._lock:
+        async with self._timed_lock():
             await self._db.execute(
                 """INSERT INTO tenants (id, name, stripe_customer_id, stripe_subscription_id, status, updated_at)
                    VALUES (?, ?, ?, ?, ?, datetime('now'))
@@ -1118,7 +1140,7 @@ class DatabaseManager:
 
     async def set_tenant_status(self, tenant_id: str, status: str) -> None:
         """Update tenant subscription status (active, past_due, canceled, etc.)."""
-        async with self._lock:
+        async with self._timed_lock():
             await self._db.execute(
                 "UPDATE tenants SET status = ?, updated_at = datetime('now') WHERE id = ?",
                 (status, tenant_id),
@@ -1161,7 +1183,7 @@ class DatabaseManager:
 
     async def cleanup_old_data(self, retention_hours: int = 72) -> None:
         """Remove old metrics and thought logs past retention period."""
-        async with self._lock:
+        async with self._timed_lock():
             # Use datetime parsing that tolerates ISO8601 + 'T' timestamps.
             await self._db.execute(
                 "DELETE FROM metrics WHERE " + self._sql_dt("timestamp") + " < datetime('now', ?)",
