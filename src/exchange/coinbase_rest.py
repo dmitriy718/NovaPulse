@@ -375,9 +375,11 @@ class CoinbaseRESTClient:
                 "base_size": str(volume),
             }
         else:
+            if price is None or price <= 0:
+                raise ValueError(f"Limit orders require a positive price, got: {price}")
             order_conf["limit_limit_gtc"] = {
                 "base_size": str(volume),
-                "limit_price": str(price if price is not None else 0),
+                "limit_price": str(price),
                 "post_only": bool(post_only),
             }
         body: Dict[str, Any] = {

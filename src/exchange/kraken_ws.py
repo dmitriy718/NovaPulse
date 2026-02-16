@@ -15,9 +15,9 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Optional, Set
+from typing import Any, Callable, Deque, Dict, List, Optional, Set
 
 import websockets
 from websockets.exceptions import ConnectionClosed
@@ -60,8 +60,7 @@ class KrakenWebSocketClient:
         self._last_heartbeat: float = 0
         self._subscriptions: Dict[str, Dict[str, Any]] = {}
         self._callbacks: Dict[str, List[Callable]] = defaultdict(list)
-        self._latency_samples: List[float] = []  # recent heartbeat RTT samples
-        self._max_latency_samples: int = 50
+        self._latency_samples: Deque[float] = deque(maxlen=50)  # recent heartbeat RTT samples
 
     # ------------------------------------------------------------------
     # Connection Management
@@ -161,8 +160,7 @@ class KrakenWebSocketClient:
                     if self._last_heartbeat > 0:
                         rtt_ms = (now - self._last_heartbeat) * 1000.0
                         self._latency_samples.append(rtt_ms)
-                        if len(self._latency_samples) > self._max_latency_samples:
-                            self._latency_samples = self._latency_samples[-self._max_latency_samples:]
+                        # deque(maxlen=50) auto-evicts oldest
                     continue
                 elif channel == "status":
                     await self._handle_status(message)

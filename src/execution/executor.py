@@ -15,6 +15,7 @@ both paper and live trading modes.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import math
 import time
@@ -456,8 +457,8 @@ class TradeExecutor:
                 trade_id=trade_id,
                 tenant_id=self.tenant_id,
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Order book snapshot failed (non-fatal)", trade_id=trade_id, error=repr(e))
 
         # Initialize stop loss tracking
         self.risk_manager.initialize_stop_loss(
@@ -549,8 +550,11 @@ class TradeExecutor:
                         strategy=trade.get("strategy"),
                     )
                     return
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(
+                    "Max duration check failed",
+                    trade_id=trade_id, error=repr(e),
+                )
 
         # Update trailing stop
         state = self.risk_manager.update_stop_loss(
@@ -650,12 +654,18 @@ class TradeExecutor:
                 try:
                     # Use Limit Order for closing if possible, but Market is safer for stops
                     # For now, sticking to Market for stops/TP to ensure exit
+                    # Only pass reduce_only for exchanges that support it (Kraken).
+                    # Coinbase does not accept this kwarg.
+                    place_sig = inspect.signature(self.rest_client.place_order)
+                    extra_kwargs = {}
+                    if "reduce_only" in place_sig.parameters:
+                        extra_kwargs["reduce_only"] = True
                     result = await self.rest_client.place_order(
                         pair=pair,
                         side=close_side,
                         order_type="market",
                         volume=quantity,
-                        reduce_only=True,
+                        **extra_kwargs,
                     )
                     txid = None
                     if isinstance(result, dict):
@@ -705,8 +715,11 @@ class TradeExecutor:
                     "quantity": actual_quantity,
                     "notes": f"Partial exit fill: {actual_quantity:.8f}/{quantity:.8f}",
                 }, tenant_id=tid)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(
+                    "Failed to update partial fill quantity in DB",
+                    trade_id=trade_id, error=repr(e),
+                )
 
         entry_fee = abs(entry_price * actual_quantity) * entry_fee_rate
         if exit_fee <= 0:
@@ -735,16 +748,16 @@ class TradeExecutor:
                 1.0 if pnl > 0 else 0.0,
                 tenant_id=tid,
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("ML label update failed (non-fatal)", trade_id=trade_id, error=repr(e))
 
         # Update risk manager
         self.risk_manager.close_position(trade_id, pnl)
         if self._strategy_result_cb and strategy:
             try:
                 self._strategy_result_cb(strategy, pnl)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Strategy result callback failed (non-fatal)", strategy=strategy, error=repr(e))
 
         # Log thought
         emoji = "✅" if pnl > 0 else "❌"
@@ -1103,16 +1116,13 @@ class TradeExecutor:
         self, reason: str = "manual", tenant_id: Optional[str] = None
     ) -> int:
         """
-        Emergency close all open positions.
-        
-        # ENHANCEMENT: Added parallel closing for speed
+        Emergency close all open positions in parallel for speed.
         Optional tenant_id for API-scoped close (e.g. multi-tenant) - defaults to self.tenant_id.
         """
         tid = tenant_id if tenant_id is not None else self.tenant_id
         open_trades = await self.db.get_open_trades(tenant_id=tid)
-        closed_count = 0
 
-        for trade in open_trades:
+        async def _close_one(trade: Dict[str, Any]) -> bool:
             try:
                 current_price = self.market_data.get_latest_price(trade["pair"])
                 if current_price > 0:
@@ -1128,13 +1138,20 @@ class TradeExecutor:
                         strategy=trade.get("strategy"),
                         tenant_id=tid,
                     )
-                    closed_count += 1
+                    return True
             except Exception as e:
                 logger.error(
                     "Emergency close failed",
                     trade_id=trade["trade_id"],
-                    error=str(e)
+                    error=str(e),
                 )
+            return False
+
+        results = await asyncio.gather(
+            *[_close_one(t) for t in open_trades],
+            return_exceptions=True,
+        )
+        closed_count = sum(1 for r in results if r is True)
 
         logger.warning(
             "Emergency close all completed",

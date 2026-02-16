@@ -16,9 +16,10 @@ from __future__ import annotations
 import asyncio
 import math
 import time
+from collections import deque
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Deque, Dict, List, Optional
 
 import numpy as np
 
@@ -51,13 +52,24 @@ class StopLossState:
     trailing_low: float = float("inf")  # H6 FIX: inf default so shorts work
 
     def to_dict(self) -> Dict[str, Any]:
-        """Serialize state to dict."""
-        return asdict(self)
+        """Serialize state to dict (JSON-safe: replaces inf with None)."""
+        d = asdict(self)
+        for k, v in d.items():
+            if isinstance(v, float) and not math.isfinite(v):
+                d[k] = None
+        return d
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> StopLossState:
         """Deserialize state from dict."""
-        return cls(**data)
+        clean = {}
+        for k, v in data.items():
+            if k in cls.__dataclass_fields__:
+                if v is None and k == "trailing_low":
+                    clean[k] = float("inf")
+                else:
+                    clean[k] = v
+        return cls(**clean)
 
 
 class RiskManager:
@@ -124,7 +136,7 @@ class RiskManager:
         self._strategy_cooldowns: Dict[tuple, float] = {}
         self._peak_bankroll: float = initial_bankroll
         self._max_drawdown: float = 0.0
-        self._trade_history: List[Dict[str, float]] = []
+        self._trade_history: Deque[Dict[str, float]] = deque(maxlen=5000)
         self._daily_reset_date: str = ""
         self._global_cooldown_until: float = 0.0
         self._consecutive_wins: int = 0
@@ -284,8 +296,9 @@ class RiskManager:
             return False
 
         # C3 FIX: Check only negative PnL, not absolute value
+        # Use initial_bankroll so the limit is fixed and not eroded by intraday losses
         self._check_daily_reset()
-        if self._daily_pnl <= -(self.current_bankroll * self.max_daily_loss):
+        if self._daily_pnl <= -(self.initial_bankroll * self.max_daily_loss):
             result.reason = f"Daily loss limit reached: ${self._daily_pnl:.2f}"
             logger.warning("Daily loss limit reached", daily_pnl=self._daily_pnl)
             return False
@@ -383,11 +396,11 @@ class RiskManager:
                 # Trail from the highest price
                 new_sl = state.trailing_high * (1 - self.trailing_step_pct)
 
-                # Acceleration: tighter trail on larger profits
+                # Acceleration: tighter trail on larger profits (larger multiplier = closer stop)
                 if pnl_pct > 0.05:  # 5%+ profit — lock in gains aggressively
-                    new_sl = state.trailing_high * (1 - self.trailing_step_pct * 0.3)
+                    new_sl = state.trailing_high * (1 - self.trailing_step_pct * 3.0)
                 elif pnl_pct > 0.03:  # 3%+ profit
-                    new_sl = state.trailing_high * (1 - self.trailing_step_pct * 0.5)
+                    new_sl = state.trailing_high * (1 - self.trailing_step_pct * 2.0)
 
                 # Only move stop up, never down
                 if new_sl > state.current_sl:
@@ -407,10 +420,11 @@ class RiskManager:
                 state.trailing_activated = True
                 new_sl = state.trailing_low * (1 + self.trailing_step_pct)
 
+                # Acceleration: tighter trail on larger profits (larger multiplier = closer stop)
                 if pnl_pct > 0.05:  # 5%+ profit — lock in gains aggressively
-                    new_sl = state.trailing_low * (1 + self.trailing_step_pct * 0.3)
+                    new_sl = state.trailing_low * (1 + self.trailing_step_pct * 3.0)
                 elif pnl_pct > 0.03:
-                    new_sl = state.trailing_low * (1 + self.trailing_step_pct * 0.5)
+                    new_sl = state.trailing_low * (1 + self.trailing_step_pct * 2.0)
 
                 if new_sl < state.current_sl:
                     state.current_sl = new_sl
@@ -553,9 +567,7 @@ class RiskManager:
             drawdown = 0.0
         self._max_drawdown = max(self._max_drawdown, drawdown)
 
-        # Keep history manageable
-        if len(self._trade_history) > 10000:
-            self._trade_history = self._trade_history[-5000:]
+        # deque(maxlen=5000) automatically evicts oldest entries
 
     def is_strategy_on_cooldown(
         self, pair: str, strategy: Optional[str], side: Optional[str]

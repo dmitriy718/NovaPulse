@@ -1339,7 +1339,10 @@ class DashboardServer:
                             tenant_id=tenant_id
                         )
                         self._ws_cache_time_by_tenant[tenant_id] = now
-                    await websocket.send_json(self._ws_cache_by_tenant[tenant_id])
+                    try:
+                        await websocket.send_json(self._ws_cache_by_tenant[tenant_id])
+                    except (WebSocketDisconnect, RuntimeError):
+                        break
                     await asyncio.sleep(1)
             except WebSocketDisconnect:
                 pass

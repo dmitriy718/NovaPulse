@@ -87,10 +87,13 @@ class SecureVault:
         encrypted_data = envelope["data"].encode()
 
         checksum = envelope.get("checksum")
-        if checksum:
+        if checksum and len(checksum) >= 8:
             actual = hashlib.sha256(encrypted_data).hexdigest()[: len(checksum)]
             if actual != checksum:
                 raise ValueError("Vault file checksum mismatch (corrupted)")
+        elif "checksum" in envelope:
+            # Empty or too-short checksum is suspicious - reject it
+            raise ValueError("Vault file has invalid checksum (possibly tampered)")
 
         key = self._derive_key(password, salt)
         self._fernet = Fernet(key)
