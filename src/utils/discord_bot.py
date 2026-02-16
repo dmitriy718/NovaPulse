@@ -34,6 +34,11 @@ class DiscordBot:
         self._control_router = None
         self._bot = None
         self._enabled = bool(self.token)
+        if self._enabled and not self.allowed_channel_ids and not self.allowed_guild_id:
+            logger.warning(
+                "Discord bot enabled but no channel/guild restrictions configured; "
+                "all commands will be denied (fail-closed)"
+            )
 
     def set_control_router(self, router) -> None:
         """Inject the control router for pause/resume/close_all/kill."""
@@ -187,7 +192,13 @@ class DiscordBot:
             @self._bot.event
             async def on_ready():
                 try:
-                    synced = await self._bot.tree.sync()
+                    # Sync to specific guild if configured (faster, no global rate limit)
+                    if self.allowed_guild_id:
+                        import discord as _dc
+                        guild = _dc.Object(id=int(self.allowed_guild_id))
+                        synced = await self._bot.tree.sync(guild=guild)
+                    else:
+                        synced = await self._bot.tree.sync()
                     logger.info("Discord bot ready", synced=len(synced))
                 except Exception as e:
                     logger.warning("Discord tree sync failed", error=str(e))

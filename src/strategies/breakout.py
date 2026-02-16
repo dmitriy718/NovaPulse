@@ -224,5 +224,4 @@ class BreakoutStrategy(BaseStrategy):
             }
         )
 
-        self._last_signal = signal
         return signal

@@ -103,7 +103,7 @@ def ema(data: np.ndarray, period: int) -> np.ndarray:
 
 def sma(data: np.ndarray, period: int) -> np.ndarray:
     """Simple Moving Average."""
-    if len(data) < period:
+    if period < 1 or len(data) < period:
         return np.full_like(data, np.nan)
     
     cumsum = np.cumsum(data, dtype=float)
@@ -123,7 +123,7 @@ def rsi(closes: np.ndarray, period: int = 14) -> np.ndarray:
     # ENHANCEMENT: Added edge case handling for zero-change periods
     """
     if len(closes) < period + 1:
-        return np.full(len(closes), 50.0)  # Neutral default
+        return np.full(len(closes), np.nan)
 
     deltas = np.diff(closes)
     gains = np.where(deltas > 0, deltas, 0.0)

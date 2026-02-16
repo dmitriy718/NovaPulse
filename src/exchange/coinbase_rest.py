@@ -137,7 +137,8 @@ class CoinbaseRESTClient:
         authenticated: bool = False,
         use_market_client: bool = False,
     ) -> Dict[str, Any]:
-        client = self._market_client if use_market_client and self._market_client else self._client
+        use_market = use_market_client and self._market_client is not None
+        client = self._market_client if use_market else self._client
         if not client:
             raise RuntimeError("Client not initialized. Call initialize() first.")
 
@@ -147,7 +148,8 @@ class CoinbaseRESTClient:
                 headers: Dict[str, str] = {}
                 if authenticated:
                     # Build JWT inside semaphore so it doesn't expire while waiting
-                    host_override = self._market_host if use_market_client else None
+                    # Only override host when actually using the market client
+                    host_override = self._market_host if use_market else None
                     token = self._build_jwt(method, path, host_override=host_override)
                     headers["Authorization"] = f"Bearer {token}"
                 try:
@@ -421,10 +423,11 @@ class CoinbaseRESTClient:
             return {"cancelled": 0}
 
     async def get_trades_history(self, start: int, end: int) -> Dict[str, Any]:
+        from datetime import datetime, timezone
         path = "/api/v3/brokerage/orders/historical/fills"
         params = {
-            "start_sequence_timestamp": str(start),
-            "end_sequence_timestamp": str(end),
+            "start_sequence_timestamp": datetime.fromtimestamp(start, tz=timezone.utc).isoformat(),
+            "end_sequence_timestamp": datetime.fromtimestamp(end, tz=timezone.utc).isoformat(),
         }
         data = await self._request("GET", path, params=params, authenticated=True)
         fills = data.get("fills", []) if isinstance(data, dict) else []
@@ -466,7 +469,13 @@ class CoinbaseRESTClient:
         path = "/api/v3/brokerage/orders/historical/batch"
         params: Dict[str, Any] = {"limit": "100"}
         if statuses:
-            params["order_status"] = ",".join(statuses)
+            # Coinbase API expects repeated query params for multi-status
+            for s in statuses:
+                params.setdefault("order_status", [])
+                if isinstance(params["order_status"], list):
+                    params["order_status"].append(s)
+                else:
+                    params["order_status"] = [params["order_status"], s]
         data = await self._request("GET", path, params=params, authenticated=True)
         return data.get("orders", []) if isinstance(data, dict) else []
 

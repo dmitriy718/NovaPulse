@@ -53,6 +53,10 @@ class DatabaseManager:
         self._lock = asyncio.Lock()
         self._initialized = False
 
+    @property
+    def is_initialized(self) -> bool:
+        return self._initialized
+
     @asynccontextmanager
     async def _timed_lock(self) -> AsyncIterator[None]:
         """Acquire the DB lock with a timeout to prevent deadlocks."""

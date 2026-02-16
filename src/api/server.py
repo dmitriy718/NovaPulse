@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import csv
 import hashlib
+import html
 import io
 import json
 import os
@@ -638,7 +639,7 @@ class DashboardServer:
                     "<div class='card'>"
                     "<h1>NovaPulse Command Center</h1>"
                     "<form method='post' action='/login'>"
-                    f"<label>Username</label><input name='username' autocomplete='username' value='{self._admin_username}'/>"
+                    f"<label>Username</label><input name='username' autocomplete='username' value='{html.escape(self._admin_username)}'/>"
                     "<label>Password</label><input name='password' type='password' autocomplete='current-password'/>"
                     "<button type='submit'>Login</button>"
                     "</form>"
@@ -1362,7 +1363,7 @@ class DashboardServer:
         if not engines:
             return {"type": "status", "data": {"status": "initializing"}}
         primary = self._get_primary_engine()
-        if not primary or not getattr(primary, "db", None) or not primary.db._initialized:
+        if not primary or not getattr(primary, "db", None) or not getattr(primary.db, "is_initialized", False):
             return {"type": "status", "data": {"status": "initializing"}}
 
         # Build compact update
