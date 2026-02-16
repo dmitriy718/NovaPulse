@@ -273,6 +273,13 @@ class DashboardServer:
         if total_losses > 0:
             agg["avg_loss"] = sum_loss / total_losses
 
+        # Pass through Sharpe/Sortino from first engine (computed on full PnL series)
+        for s in stats_list:
+            if s and "sharpe_ratio" in s:
+                agg["sharpe_ratio"] = s["sharpe_ratio"]
+                agg["sortino_ratio"] = s.get("sortino_ratio", 0.0)
+                break
+
         return agg
 
     def _aggregate_risk_reports(self, reports: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -967,6 +974,22 @@ class DashboardServer:
                     combined.append(s)
             return combined
 
+        @self.app.get("/api/v1/strategy-performance")
+        async def get_strategy_performance(
+            request: Request,
+            x_api_key: str = Header(default="", alias="X-API-Key"),
+            tenant_id: str = Depends(_resolve_tenant_id_read),
+        ):
+            """Get per-strategy win rate and PnL stats from trade history."""
+            await _require_read_access(request, x_api_key=x_api_key)
+            engines = self._get_engines()
+            if not engines:
+                return {}
+            for eng in engines:
+                if getattr(eng, "db", None):
+                    return await eng.db.get_strategy_stats(tenant_id=tenant_id)
+            return {}
+
         @self.app.get("/api/v1/risk")
         async def get_risk(
             request: Request,
@@ -1294,6 +1317,12 @@ class DashboardServer:
                     code=1008,
                     reason=str(exc.detail) if exc.detail else "Forbidden",
                 )
+                return
+
+            # Limit concurrent WebSocket connections to prevent resource exhaustion
+            if len(self._ws_connections) >= 50:
+                await websocket.accept()
+                await websocket.close(code=1013, reason="Too many connections")
                 return
 
             await websocket.accept()

@@ -262,8 +262,10 @@ class ModelTrainer:
             result["message"] = f"Training failed: {str(e)}"
             logger.error("Training failed", error=str(e))
 
-        # Log results
+        # Log results (keep bounded)
         self._training_history.append(result)
+        if len(self._training_history) > 100:
+            self._training_history = self._training_history[-50:]
         await self.db.log_thought(
             "ml",
             f"🤖 Model Training: {result['message']}",

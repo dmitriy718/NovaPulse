@@ -314,6 +314,17 @@ class CoinbaseWebSocketClient:
                     target.pop(p, None)
                 else:
                     target[p] = s
+            # Trim internal book to prevent unbounded memory growth
+            MAX_BOOK_LEVELS = 200
+            if len(book["bids"]) > MAX_BOOK_LEVELS:
+                sorted_bids = sorted(book["bids"].keys(), reverse=True)
+                for stale_p in sorted_bids[MAX_BOOK_LEVELS:]:
+                    del book["bids"][stale_p]
+            if len(book["asks"]) > MAX_BOOK_LEVELS:
+                sorted_asks = sorted(book["asks"].keys())
+                for stale_p in sorted_asks[MAX_BOOK_LEVELS:]:
+                    del book["asks"][stale_p]
+
             bids = [[p, sz] for p, sz in sorted(book["bids"].items(), key=lambda x: x[0], reverse=True)[:50]]
             asks = [[p, sz] for p, sz in sorted(book["asks"].items(), key=lambda x: x[0])[:50]]
             data_list.append({"symbol": pair, "bids": bids, "asks": asks})

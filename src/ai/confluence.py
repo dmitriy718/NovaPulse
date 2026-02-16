@@ -654,6 +654,12 @@ class ConfluenceDetector:
         confluence_bonus = min((confluence_count - 1) * 0.1, 0.3)
         weighted_confidence = min(weighted_confidence + confluence_bonus, 1.0)
 
+        # Opposing signal penalty: if strategies actively disagree, reduce confidence
+        opposing_count = len(short_signals) if direction == SignalDirection.LONG else len(long_signals)
+        if opposing_count > 0:
+            opposition_penalty = min(opposing_count * 0.08, 0.25)
+            weighted_confidence = max(weighted_confidence - opposition_penalty, 0.0)
+
         # Legacy: when OBI is not counted as confluence, still add small confidence bump when it agrees
         if not self.obi_counts_as_confluence and obi_agrees:
             weighted_confidence = min(weighted_confidence + 0.05, 1.0)

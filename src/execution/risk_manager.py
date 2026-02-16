@@ -127,6 +127,8 @@ class RiskManager:
         self._trade_history: List[Dict[str, float]] = []
         self._daily_reset_date: str = ""
         self._global_cooldown_until: float = 0.0
+        self._consecutive_wins: int = 0
+        self._consecutive_losses: int = 0
 
     # ------------------------------------------------------------------
     # Position Sizing (Kelly Criterion)
@@ -141,6 +143,7 @@ class RiskManager:
         win_rate: float = 0.5,
         avg_win_loss_ratio: float = 1.5,
         confidence: float = 0.5,
+        spread_pct: float = 0.0,
     ) -> PositionSizeResult:
         """
         Calculate optimal position size using Kelly Criterion.
@@ -192,8 +195,8 @@ class RiskManager:
         if sl_distance > 0:
             result.risk_reward_ratio = tp_distance / sl_distance
         
-        if result.risk_reward_ratio < 0.8:
-            result.reason = f"R:R ratio too low: {result.risk_reward_ratio:.2f}"
+        if result.risk_reward_ratio < 1.2:
+            result.reason = f"R:R ratio too low: {result.risk_reward_ratio:.2f} (min 1.2)"
             return result
 
         # ============================================================
@@ -226,6 +229,19 @@ class RiskManager:
         # Apply drawdown scaling
         drawdown_factor = self._get_drawdown_factor()
         position_size_usd *= drawdown_factor
+
+        # Streak-based sizing: slight bonus on win streaks, harder reduction on loss streaks
+        if self._consecutive_losses >= 3:
+            streak_factor = max(0.4, 1.0 - (self._consecutive_losses - 2) * 0.15)
+            position_size_usd *= streak_factor
+        elif self._consecutive_wins >= 3:
+            streak_factor = min(1.2, 1.0 + (self._consecutive_wins - 2) * 0.05)
+            position_size_usd *= streak_factor
+
+        # Spread-adjusted sizing: reduce size when spread is wide (eats into edge)
+        if spread_pct > 0.001:
+            spread_penalty = max(0.5, 1.0 - (spread_pct - 0.001) * 50)
+            position_size_usd *= spread_penalty
 
         # Apply maximum position cap
         position_size_usd = min(position_size_usd, self.max_position_usd)
@@ -368,7 +384,9 @@ class RiskManager:
                 new_sl = state.trailing_high * (1 - self.trailing_step_pct)
 
                 # Acceleration: tighter trail on larger profits
-                if pnl_pct > 0.03:  # 3%+ profit
+                if pnl_pct > 0.05:  # 5%+ profit — lock in gains aggressively
+                    new_sl = state.trailing_high * (1 - self.trailing_step_pct * 0.3)
+                elif pnl_pct > 0.03:  # 3%+ profit
                     new_sl = state.trailing_high * (1 - self.trailing_step_pct * 0.5)
 
                 # Only move stop up, never down
@@ -389,7 +407,9 @@ class RiskManager:
                 state.trailing_activated = True
                 new_sl = state.trailing_low * (1 + self.trailing_step_pct)
 
-                if pnl_pct > 0.03:
+                if pnl_pct > 0.05:  # 5%+ profit — lock in gains aggressively
+                    new_sl = state.trailing_low * (1 + self.trailing_step_pct * 0.3)
+                elif pnl_pct > 0.03:
                     new_sl = state.trailing_low * (1 + self.trailing_step_pct * 0.5)
 
                 if new_sl < state.current_sl:
@@ -507,7 +527,15 @@ class RiskManager:
         self.current_bankroll += pnl
         self._trade_history.append({"pnl": pnl, "time": time.time()})
 
-        # Global cooldown: 30 mins after a loss to prevent churn
+        # Track win/loss streaks
+        if pnl > 0:
+            self._consecutive_wins += 1
+            self._consecutive_losses = 0
+        elif pnl < 0:
+            self._consecutive_losses += 1
+            self._consecutive_wins = 0
+
+        # Global cooldown after a loss to prevent churn
         if pnl < 0 and self.global_cooldown_seconds_on_loss > 0:
             self._global_cooldown_until = time.time() + self.global_cooldown_seconds_on_loss
             logger.warning(
@@ -617,4 +645,6 @@ class RiskManager:
             "drawdown_factor": round(self._get_drawdown_factor(), 2),
             "remaining_capacity_usd": round(self._get_remaining_capacity(), 2),
             "trade_count": len(self._trade_history),
+            "consecutive_wins": self._consecutive_wins,
+            "consecutive_losses": self._consecutive_losses,
         }
