@@ -27,6 +27,7 @@ from src.api.server import DashboardServer
 from src.core.control_router import ControlRouter
 from src.core.config import ConfigManager, get_config
 from src.core.database import DatabaseManager
+from src.core.error_handler import ErrorSeverity, GracefulErrorHandler
 from src.core.logger import get_logger, setup_logging
 from src.exchange.kraken_rest import KrakenRESTClient
 from src.exchange.kraken_ws import KrakenWebSocketClient
@@ -81,6 +82,7 @@ class BotEngine:
         self.dashboard: Optional[DashboardServer] = None
         self.control_router: Optional[ControlRouter] = None
         self.telegram_bot: Optional[TelegramBot] = None
+        self.error_handler: GracefulErrorHandler = GracefulErrorHandler()
 
         # State
         self._running = False
@@ -167,18 +169,30 @@ class BotEngine:
                 await self._auto_pause_trading("ws_disconnected", detail=f">{limit_s}s")
 
     async def initialize(self) -> None:
-        """Initialize all subsystems."""
-        logger.info("Initializing AI Trading Bot", mode=self.mode, version="2.0.0")
+        """Initialize all subsystems with graceful error handling.
 
-        # Database
+        CRITICAL subsystems (DB, REST client): failure aborts startup.
+        NON-CRITICAL subsystems (Telegram, Dashboard, ML, Billing): failure
+        is logged and skipped — the bot keeps trading.
+        """
+        from src import __version__
+        logger.info("Initializing AI Trading Bot", mode=self.mode, version=__version__)
+
+        # ---- CRITICAL: Database ----
         db_path = self.config.app.db_path
         self.db = DatabaseManager(db_path)
         await self.db.initialize()
         logger.info("Database initialized", path=db_path)
 
-        # REST + WebSocket Clients
+        # Wire up error handler's DB logging now that DB is ready.
+        self.error_handler.set_db_log_fn(
+            lambda cat, msg, severity="info": self.db.log_thought(
+                cat, msg, severity=severity, tenant_id=self.tenant_id,
+            )
+        )
+
+        # ---- CRITICAL: REST + WebSocket Clients ----
         if self.exchange_name == "coinbase":
-            # Lazy imports so deployments that don't use Coinbase don't need its deps.
             from src.exchange.coinbase_rest import CoinbaseAuthConfig, CoinbaseRESTClient
             from src.exchange.coinbase_ws import CoinbaseWebSocketClient
 
@@ -269,37 +283,43 @@ class BotEngine:
             max_bars=self.config.trading.warmup_bars,
         )
 
-        # AI Components
-        self.confluence = ConfluenceDetector(
-            market_data=self.market_data,
-            confluence_threshold=self.config.ai.confluence_threshold,
-            obi_threshold=self.config.ai.obi_threshold,
-            book_score_threshold=getattr(self.config.ai, "book_score_threshold", 0.2),
-            book_score_max_age_seconds=getattr(self.config.ai, "book_score_max_age_seconds", 5),
-            min_confidence=self.config.ai.min_confidence,
-            obi_counts_as_confluence=getattr(
-                self.config.ai, "obi_counts_as_confluence", False
-            ),
-            obi_weight=getattr(self.config.ai, "obi_weight", 0.4),
-            round_trip_fee_pct=self.config.exchange.taker_fee * 2,
-            use_closed_candles_only=getattr(self.config.trading, "use_closed_candles_only", False),
-            regime_config=getattr(self.config.ai, "regime", None),
-            timeframes=getattr(self.config.trading, "timeframes", [1]),
-            multi_timeframe_min_agreement=getattr(self.config.ai, "multi_timeframe_min_agreement", 1),
-            primary_timeframe=getattr(self.config.ai, "primary_timeframe", 1),
-        )
-        self.confluence.configure_strategies(
-            self.config.strategies.model_dump(),
-            single_strategy_mode=getattr(
-                self.config.trading, "single_strategy_mode", None
-            ),
-        )
+        # ---- NON-CRITICAL: AI Components ----
+        try:
+            self.confluence = ConfluenceDetector(
+                market_data=self.market_data,
+                confluence_threshold=self.config.ai.confluence_threshold,
+                obi_threshold=self.config.ai.obi_threshold,
+                book_score_threshold=getattr(self.config.ai, "book_score_threshold", 0.2),
+                book_score_max_age_seconds=getattr(self.config.ai, "book_score_max_age_seconds", 5),
+                min_confidence=self.config.ai.min_confidence,
+                obi_counts_as_confluence=getattr(
+                    self.config.ai, "obi_counts_as_confluence", False
+                ),
+                obi_weight=getattr(self.config.ai, "obi_weight", 0.4),
+                round_trip_fee_pct=self.config.exchange.taker_fee * 2,
+                use_closed_candles_only=getattr(self.config.trading, "use_closed_candles_only", False),
+                regime_config=getattr(self.config.ai, "regime", None),
+                timeframes=getattr(self.config.trading, "timeframes", [1]),
+                multi_timeframe_min_agreement=getattr(self.config.ai, "multi_timeframe_min_agreement", 1),
+                primary_timeframe=getattr(self.config.ai, "primary_timeframe", 1),
+            )
+            self.confluence.configure_strategies(
+                self.config.strategies.model_dump(),
+                single_strategy_mode=getattr(
+                    self.config.trading, "single_strategy_mode", None
+                ),
+            )
+        except Exception as e:
+            await self.error_handler.handle(e, component="confluence", context="init")
 
-        self.predictor = TFLitePredictor(
-            model_path=self.config.ai.tflite_model_path,
-            feature_names=self.config.ml.features,
-        )
-        self.predictor.load_model()
+        try:
+            self.predictor = TFLitePredictor(
+                model_path=self.config.ai.tflite_model_path,
+                feature_names=self.config.ml.features,
+            )
+            self.predictor.load_model()
+        except Exception as e:
+            await self.error_handler.handle(e, component="predictor", context="init")
 
         enabled = (os.getenv("CONTINUOUS_LEARNING_ENABLED", "true") or "").strip().lower() not in (
             "0",
@@ -317,13 +337,16 @@ class BotEngine:
                 )
                 logger.info("Continuous learner enabled", model_path=str(Path("models") / "continuous_sgd.joblib"))
             except Exception as e:
-                logger.warning("Continuous learner disabled (init failed)", error=repr(e))
+                await self.error_handler.handle(e, component="continuous_learner", context="init")
                 self.continuous_learner = None
 
-        self.order_book_analyzer = OrderBookAnalyzer(
-            whale_threshold_usd=self.config.ai.whale_threshold_usd,
-            depth=self.config.ai.order_book_depth,
-        )
+        try:
+            self.order_book_analyzer = OrderBookAnalyzer(
+                whale_threshold_usd=self.config.ai.whale_threshold_usd,
+                depth=self.config.ai.order_book_depth,
+            )
+        except Exception as e:
+            await self.error_handler.handle(e, component="order_book_analyzer", context="init")
 
         # Risk Manager
         initial_bankroll = float(self.config.risk.initial_bankroll)
@@ -340,7 +363,6 @@ class BotEngine:
             trailing_activation_pct=self.config.risk.trailing_activation_pct,
             trailing_step_pct=self.config.risk.trailing_step_pct,
             breakeven_activation_pct=self.config.risk.breakeven_activation_pct,
-            # ENHANCEMENT: Shorter cooldown in paper mode for faster testing
             cooldown_seconds=60 if self.mode == "paper" else self.config.trading.cooldown_seconds,
             max_concurrent_positions=self.config.trading.max_concurrent_positions,
             strategy_cooldowns=self.config.trading.strategy_cooldowns_seconds,
@@ -370,19 +392,24 @@ class BotEngine:
         if self.continuous_learner:
             self.executor.set_continuous_learner(self.continuous_learner)
 
-        # AI Training Components
-        self.ml_trainer = ModelTrainer(
-            db=self.db,
-            min_samples=self.config.ml.min_samples,
-            epochs=self.config.ml.epochs,
-            batch_size=self.config.ml.batch_size,
-            feature_names=self.config.ml.features,
-            tenant_id=self.tenant_id,
-        )
-        self.retrainer = AutoRetrainer(
-            trainer=self.ml_trainer,
-            interval_hours=self.config.ml.retrain_interval_hours,
-        )
+        # ---- NON-CRITICAL: ML Training Components ----
+        try:
+            self.ml_trainer = ModelTrainer(
+                db=self.db,
+                min_samples=self.config.ml.min_samples,
+                epochs=self.config.ml.epochs,
+                batch_size=self.config.ml.batch_size,
+                feature_names=self.config.ml.features,
+                tenant_id=self.tenant_id,
+            )
+            self.retrainer = AutoRetrainer(
+                trainer=self.ml_trainer,
+                interval_hours=self.config.ml.retrain_interval_hours,
+            )
+        except Exception as e:
+            await self.error_handler.handle(e, component="ml", context="init")
+            # Provide a no-op retrainer so background loops don't crash.
+            self.retrainer = type("_NoOp", (), {"run": staticmethod(lambda: asyncio.sleep(3600))})()
 
         # Restore open positions state
         await self.executor.reinitialize_positions()
@@ -390,13 +417,16 @@ class BotEngine:
         # Control Router (always available)
         self.control_router = ControlRouter(self)
 
-        # Dashboard (optional)
+        # ---- NON-CRITICAL: Dashboard ----
         if self._enable_dashboard:
-            self.dashboard = DashboardServer()
-            self.dashboard.set_bot_engine(self)
-            self.dashboard.set_control_router(self.control_router)
+            try:
+                self.dashboard = DashboardServer()
+                self.dashboard.set_bot_engine(self)
+                self.dashboard.set_control_router(self.control_router)
+            except Exception as e:
+                await self.error_handler.handle(e, component="dashboard", context="init")
 
-        # Telegram (optional)
+        # ---- NON-CRITICAL: Telegram ----
         try:
             tcfg = getattr(self.config, "control", None)
             tcfg = getattr(tcfg, "telegram", None) if tcfg else None
@@ -411,22 +441,27 @@ class BotEngine:
                 self.telegram_bot.set_bot_engine(self)
                 self.telegram_bot.set_control_router(self.control_router)
                 await self.telegram_bot.initialize()
+                # Wire up Telegram notifications for errors
+                self.error_handler.set_notify_fn(self.telegram_bot.send_message)
         except Exception as e:
-            logger.error("Telegram bot setup failed", error=str(e))
+            await self.error_handler.handle(e, component="telegram", context="init")
 
-        # Billing (Stripe) - optional
-        billing = getattr(self.config, "billing", None)
-        if billing and getattr(billing.stripe, "enabled", False):
-            from src.billing.stripe_service import StripeService
-            stripe_cfg = billing.stripe
-            stripe_svc = StripeService(
-                secret_key=stripe_cfg.secret_key,
-                webhook_secret=stripe_cfg.webhook_secret,
-                price_id=stripe_cfg.price_id,
-                currency=stripe_cfg.currency,
-                db=self.db,
-            )
-            self.dashboard.set_stripe_service(stripe_svc)
+        # ---- NON-CRITICAL: Billing (Stripe) ----
+        try:
+            billing = getattr(self.config, "billing", None)
+            if billing and getattr(billing.stripe, "enabled", False) and self.dashboard:
+                from src.billing.stripe_service import StripeService
+                stripe_cfg = billing.stripe
+                stripe_svc = StripeService(
+                    secret_key=stripe_cfg.secret_key,
+                    webhook_secret=stripe_cfg.webhook_secret,
+                    price_id=stripe_cfg.price_id,
+                    currency=stripe_cfg.currency,
+                    db=self.db,
+                )
+                self.dashboard.set_stripe_service(stripe_svc)
+        except Exception as e:
+            await self.error_handler.handle(e, component="billing", context="init")
 
         await self.db.log_thought(
             "system",

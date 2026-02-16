@@ -33,34 +33,52 @@ Control Plane + Observability:
 22. Secure-by-default auth: web login session (httpOnly cookie) or API keys
 23. Key scoping: separate read key vs admin/control key (admin-only by default)
 24. CSRF protection for cookie-auth control actions (double-submit token)
-25. Rate limiting (token bucket; per-IP)
+25. Rate limiting (token bucket; per-IP with stale eviction)
 26. Security headers + `Cache-Control: no-store` for API responses
 27. Audit log stream ("thought log") for decisions and operator actions
 28. Telegram command center (status, pause/resume, close_all, kill) + scheduled check-ins
 29. CSV export of trades for reconciliation
 30. 72-96 hour stress monitor (API/WS/data freshness/activity) with auth support
 
+Resilience:
+- **Graceful Error Handler** ("Trade or Die"): classifies errors as CRITICAL / DEGRADED / TRANSIENT. Only exchange-auth or database failures stop trading. All other subsystem failures (Telegram, Discord, Slack, dashboard, ML, billing) are logged and skipped so the bot keeps trading.
+
 ## Security Notes (Reality Check)
 
 This repo is hardened with fail-closed defaults and multiple safety nets, but no software can guarantee "zero risk." Treat any system that can place real orders as high-risk: run behind a firewall/VPN, rotate keys, and use exchange API key restrictions (IP allowlists, no-withdrawal keys).
 
-## Quick Start (Local)
+## Quick Start (Docker -- Recommended)
 
 ```bash
+git clone https://github.com/dmitriy718/NovaPulse.git
 cd NovaPulse
 cp .env.example .env
-# Edit .env (start in paper mode)
+# Edit .env with your API keys (paper mode by default)
 
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-
-python main.py
+./SuperStart.sh
 ```
 
-Dashboard: `http://127.0.0.1:8080` (default).
+This builds the Docker image, starts the container, and waits for it to become healthy.
 
-## Docker (Recommended)
+Dashboard: `http://127.0.0.1:8090` (default host binding).
+
+## SuperStart.sh Commands
+
+| Command | Description |
+|---------|-------------|
+| `./SuperStart.sh` | Build & start the trading bot |
+| `./SuperStart.sh --stress` | Quick 5-minute stress test |
+| `./SuperStart.sh --stress72` | Full 72-hour stress monitor |
+| `./SuperStart.sh --stop` | Stop all containers |
+| `./SuperStart.sh --logs` | Follow live container logs |
+| `./SuperStart.sh --status` | Show container health & status |
+| `./SuperStart.sh --rebuild` | Force rebuild image (no cache) |
+| `./SuperStart.sh --shell` | Open shell in running container |
+| `./SuperStart.sh --help` | Show help |
+
+Set `FAST_SETUP=1` to skip `git pull` on start.
+
+## Docker Compose (Manual)
 
 ```bash
 cd NovaPulse
@@ -69,12 +87,42 @@ docker compose up -d --build
 docker compose logs -f trading-bot
 ```
 
-## Stress Monitor (72-96h)
+## Stress Test
+
+The stress monitor is a non-disruptive, observation-only resilience checker. It periodically hits the bot's API, WebSocket, and data freshness endpoints to verify the bot is alive and trading.
+
+```bash
+# Quick 5-minute test (via Docker)
+./SuperStart.sh --stress
+
+# Full 72-hour monitor (via Docker)
+./SuperStart.sh --stress72
+
+# Manual (local Python)
+python stress_test.py --hours 96 --interval 5 --api-key "$DASHBOARD_READ_KEY"
+```
+
+## Quick Start (Local -- No Docker)
 
 ```bash
 cd NovaPulse
+cp .env.example .env
+python3 -m venv venv
 source venv/bin/activate
-python stress_test.py --hours 96 --interval 5 --api-key "$DASHBOARD_READ_KEY"
+pip install -r requirements.txt
+python main.py
+```
+
+## Health Monitoring
+
+Automated health checks and log watchers with Telegram notifications:
+
+```bash
+# One-shot health check (cron-friendly)
+./scripts/health_check.sh
+
+# Live error log watcher
+./scripts/log_watch.sh
 ```
 
 ## Live Trading Checklist (Do Not Skip)
@@ -85,3 +133,41 @@ python stress_test.py --hours 96 --interval 5 --api-key "$DASHBOARD_READ_KEY"
 4. Keep dashboard bound to localhost, expose only via VPN/reverse-proxy auth if needed.
 5. Enable live mode only after backtests + paper performance gates pass.
 
+## Architecture
+
+```
+main.py (lifecycle supervisor with retry + jitter)
+  |
+  +-- GracefulErrorHandler ("Trade or Die" error classification)
+  +-- BotEngine (single-exchange) or MultiEngineHub (multi-exchange)
+       |
+       +-- KrakenRESTClient / CoinbaseRESTClient
+       +-- KrakenWebSocketClient / CoinbaseWebSocketClient
+       +-- MarketDataCache (RingBuffer-backed OHLCV per pair)
+       +-- ConfluenceDetector (8 strategies + regime detection)
+       +-- TFLitePredictor (optional AI gating)
+       +-- ContinuousLearner (online SGD)
+       +-- OrderBookAnalyzer (microstructure scoring)
+       +-- RiskManager (Kelly, trailing stops, circuit breakers)
+       +-- TradeExecutor (limit orders, paper/live, partial fills)
+       +-- DatabaseManager (SQLite WAL, multi-tenant)
+       +-- DashboardServer (FastAPI + WebSocket)
+       +-- ControlRouter -> TelegramBot / DiscordBot / SlackBot
+       +-- ModelTrainer + AutoRetrainer (ProcessPoolExecutor)
+       +-- StripeService (billing webhooks)
+```
+
+## v3.0.0 Changelog
+
+- Graceful Error Handler: "Trade or Die" error classification (CRITICAL / DEGRADED / TRANSIENT)
+- Non-critical subsystem failures no longer prevent bot startup or trading
+- Fixed: Coinbase WS sync callback crash
+- Fixed: Discord bot open authorization (now deny-by-default)
+- Fixed: Stripe global API key thread-safety
+- Fixed: Kraken/Coinbase REST truthiness bugs (`start=0`, `since=0`)
+- Fixed: Rate limiter memory leak (stale IP eviction)
+- Fixed: Slack bot deprecated API + missing await
+- Fixed: Version string consistency (single source of truth)
+- Fixed: Kraken WS latency tracking
+- Docker-first deployment via SuperStart.sh
+- Stress test containerized (runs via docker compose)

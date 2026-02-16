@@ -17,7 +17,7 @@ build
 node_modules
 *.md
 tests/
-stress_test.py
+# stress_test.py is included for in-container stress testing
 .env.example
 data/
 logs/

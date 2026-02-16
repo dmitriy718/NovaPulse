@@ -74,14 +74,14 @@ class CoinbaseRESTClient:
             base_url=self.rest_url,
             timeout=float(self.timeout),
             limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
-            headers={"User-Agent": "AITradingBot/2.0"},
+            headers={"User-Agent": "AITradingBot/3.0"},
         )
         if self.market_data_url != self.rest_url:
             self._market_client = httpx.AsyncClient(
                 base_url=self.market_data_url,
                 timeout=float(self.timeout),
                 limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
-                headers={"User-Agent": "AITradingBot/2.0"},
+                headers={"User-Agent": "AITradingBot/3.0"},
             )
         if self._auth_config:
             self._private_key = self._load_private_key(self._auth_config.private_key_pem)
@@ -234,7 +234,7 @@ class CoinbaseRESTClient:
         product_id = self._pair_to_product_id(pair)
         granularity = self._interval_to_granularity(interval)
         end_ts = int(time.time())
-        if since:
+        if since is not None:
             start_ts = int(since)
         else:
             start_ts = end_ts - int(interval * 60 * max(1, limit))

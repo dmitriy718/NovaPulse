@@ -43,6 +43,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
+from src import __version__
 from src.core.logger import get_logger
 
 logger = get_logger("api_server")
@@ -73,7 +74,7 @@ class DashboardServer:
     def __init__(self):
         self.app = FastAPI(
             title="NovaPulse Command Center",
-            version="3.0.0",
+            version=__version__,
             docs_url="/api/docs",
         )
         # Control plane auth:
@@ -370,6 +371,9 @@ class DashboardServer:
 
         # Lightweight in-memory rate limiter (per-client IP token bucket).
         buckets: Dict[str, tuple[float, float]] = {}  # ip -> (tokens, last_ts)
+        _last_eviction: List[float] = [0.0]  # mutable container for closure
+        _EVICTION_INTERVAL = 60.0  # seconds between eviction sweeps
+        _STALE_AGE = 600.0  # evict entries older than 10 minutes
 
         @self.app.middleware("http")
         async def _rate_limit_mw(request: Request, call_next):
@@ -392,6 +396,17 @@ class DashboardServer:
 
             ip = request.client.host if request.client else "unknown"
             now = time.monotonic()
+
+            # Periodic eviction of stale entries to prevent memory leak
+            if (now - _last_eviction[0]) > _EVICTION_INTERVAL:
+                stale_ips = [
+                    k for k, (_, ts) in buckets.items()
+                    if (now - ts) > _STALE_AGE
+                ]
+                for k in stale_ips:
+                    del buckets[k]
+                _last_eviction[0] = now
+
             tokens, last = buckets.get(ip, (float(burst), now))
             rate = float(rpm) / 60.0
             tokens = min(float(burst), tokens + (now - last) * rate)
@@ -707,7 +722,7 @@ class DashboardServer:
                 "mode": mode,
                 "uptime_seconds": time.time() - start_time if start_time else 0.0,
                 "scan_count": scan_count,
-                "version": "3.0.0",
+                "version": __version__,
                 "pairs": pairs,
                 "scan_interval": min(
                     (getattr(e, "scan_interval", 0) for e in engines),

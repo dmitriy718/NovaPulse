@@ -60,7 +60,8 @@ class KrakenWebSocketClient:
         self._last_heartbeat: float = 0
         self._subscriptions: Dict[str, Dict[str, Any]] = {}
         self._callbacks: Dict[str, List[Callable]] = defaultdict(list)
-        # L8/L9/L10 FIX: Removed dead code (_message_queue, _tasks, _latency_samples)
+        self._latency_samples: List[float] = []  # recent heartbeat RTT samples
+        self._max_latency_samples: int = 50
 
     # ------------------------------------------------------------------
     # Connection Management
@@ -155,6 +156,13 @@ class KrakenWebSocketClient:
                 channel = message.get("channel", "")
 
                 if channel == "heartbeat":
+                    # Track round-trip latency from heartbeat timestamps
+                    now = time.time()
+                    if self._last_heartbeat > 0:
+                        rtt_ms = (now - self._last_heartbeat) * 1000.0
+                        self._latency_samples.append(rtt_ms)
+                        if len(self._latency_samples) > self._max_latency_samples:
+                            self._latency_samples = self._latency_samples[-self._max_latency_samples:]
                     continue
                 elif channel == "status":
                     await self._handle_status(message)
@@ -337,8 +345,10 @@ class KrakenWebSocketClient:
 
     @property
     def latency_ms(self) -> float:
-        """Get average message latency in milliseconds."""
-        return 0.0  # L9: Placeholder; requires server-side timestamp support
+        """Get average heartbeat interval in milliseconds (proxy for connection health)."""
+        if not self._latency_samples:
+            return 0.0
+        return sum(self._latency_samples) / len(self._latency_samples)
 
     @property
     def seconds_since_heartbeat(self) -> float:

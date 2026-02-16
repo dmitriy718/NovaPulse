@@ -203,7 +203,10 @@ class CoinbaseWebSocketClient:
 
     async def _route(self, channel: str, data: Dict[str, Any]) -> None:
         for cb in self._callbacks.get(channel, []):
-            await cb(data)
+            if asyncio.iscoroutinefunction(cb):
+                await cb(data)
+            else:
+                cb(data)
 
     # ------------------------------------------------------------------
     # Message normalization
