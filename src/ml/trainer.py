@@ -73,6 +73,8 @@ def _run_training_process(
     ])
 
     # Compile with class weights
+    # Ensure binary labels for class weight calculation
+    y_train = (y_train > 0.5).astype(np.float32)
     pos_weight = len(y_train) / (2 * max(np.sum(y_train), 1))
     neg_weight = len(y_train) / (2 * max(np.sum(1 - y_train), 1))
     class_weights = {0: neg_weight, 1: pos_weight}

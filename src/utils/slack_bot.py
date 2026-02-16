@@ -60,41 +60,47 @@ class SlackBot:
             from slack_bolt import App
             from slack_bolt.adapter.socket_mode import SocketModeHandler
 
-            self._app = App(token=self.token, signing_secret=self.signing_secret or " ")
+            if not self.signing_secret:
+                logger.warning("Slack signing_secret not configured; webhook verification disabled")
+            self._app = App(token=self.token, signing_secret=self.signing_secret or None)
             router = self._control_router
 
             @self._app.command("/trading-pause")
-            async def pause(ack, command, say):
-                await ack()
+            def pause(ack, command, say):
+                ack()
                 if not self._is_authorized(command.get("channel_id")):
                     say(text="Not authorized.", channel=command["channel_id"])
                     return
                 if router:
-                    await router.pause()
+                    asyncio.run_coroutine_threadsafe(router.pause(), asyncio.get_event_loop())
                     say(text="Trading *paused*.", channel=command["channel_id"])
                 else:
                     say(text="Control router not set.", channel=command["channel_id"])
 
             @self._app.command("/trading-resume")
-            async def resume(ack, command, say):
-                await ack()
+            def resume(ack, command, say):
+                ack()
                 if not self._is_authorized(command.get("channel_id")):
                     say(text="Not authorized.", channel=command["channel_id"])
                     return
                 if router:
-                    await router.resume()
+                    asyncio.run_coroutine_threadsafe(router.resume(), asyncio.get_event_loop())
                     say(text="Trading *resumed*.", channel=command["channel_id"])
                 else:
                     say(text="Control router not set.", channel=command["channel_id"])
 
             @self._app.command("/trading-close-all")
-            async def close_all(ack, command, say):
-                await ack()
+            def close_all(ack, command, say):
+                ack()
                 if not self._is_authorized(command.get("channel_id")):
                     say(text="Not authorized.", channel=command["channel_id"])
                     return
                 if router:
-                    result = await router.close_all("slack")
+                    fut = asyncio.run_coroutine_threadsafe(router.close_all("slack"), asyncio.get_event_loop())
+                    try:
+                        result = fut.result(timeout=30)
+                    except Exception:
+                        result = {}
                     say(
                         text=f"Closed *{result.get('closed', 0)}* positions.",
                         channel=command["channel_id"],
@@ -103,20 +109,20 @@ class SlackBot:
                     say(text="Control router not set.", channel=command["channel_id"])
 
             @self._app.command("/trading-kill")
-            async def kill(ack, command, say):
-                await ack()
+            def kill(ack, command, say):
+                ack()
                 if not self._is_authorized(command.get("channel_id")):
                     say(text="Not authorized.", channel=command["channel_id"])
                     return
                 if router:
                     say(text="Emergency shutdown initiated.", channel=command["channel_id"])
-                    await router.kill()
+                    asyncio.run_coroutine_threadsafe(router.kill(), asyncio.get_event_loop())
                 else:
                     say(text="Control router not set.", channel=command["channel_id"])
 
             @self._app.command("/trading-status")
-            async def status(ack, command, say):
-                await ack()
+            def status(ack, command, say):
+                ack()
                 if not self._is_authorized(command.get("channel_id")):
                     say(text="Not authorized.", channel=command["channel_id"])
                     return
@@ -134,13 +140,17 @@ class SlackBot:
                     say(text="Control router not set.", channel=command["channel_id"])
 
             @self._app.command("/trading-pnl")
-            async def pnl(ack, command, say):
-                await ack()
+            def pnl(ack, command, say):
+                ack()
                 if not self._is_authorized(command.get("channel_id")):
                     say(text="Not authorized.", channel=command["channel_id"])
                     return
                 if router:
-                    data = await router.get_pnl()
+                    fut = asyncio.run_coroutine_threadsafe(router.get_pnl(), asyncio.get_event_loop())
+                    try:
+                        data = fut.result(timeout=10)
+                    except Exception:
+                        data = {}
                     msg = (
                         f"*P&L:* ${data.get('total_pnl', 0):.2f}\n"
                         f"*Today:* ${data.get('today_pnl', 0):.2f}\n"
@@ -152,13 +162,17 @@ class SlackBot:
                     say(text="Control router not set.", channel=command["channel_id"])
 
             @self._app.command("/trading-positions")
-            async def positions(ack, command, say):
-                await ack()
+            def positions(ack, command, say):
+                ack()
                 if not self._is_authorized(command.get("channel_id")):
                     say(text="Not authorized.", channel=command["channel_id"])
                     return
                 if router:
-                    positions_list = await router.get_positions()
+                    fut = asyncio.run_coroutine_threadsafe(router.get_positions(), asyncio.get_event_loop())
+                    try:
+                        positions_list = fut.result(timeout=10)
+                    except Exception:
+                        positions_list = []
                     if not positions_list:
                         say(text="No open positions.", channel=command["channel_id"])
                         return
@@ -174,8 +188,8 @@ class SlackBot:
                     say(text="Control router not set.", channel=command["channel_id"])
 
             @self._app.command("/trading-risk")
-            async def risk_cmd(ack, command, say):
-                await ack()
+            def risk_cmd(ack, command, say):
+                ack()
                 if not self._is_authorized(command.get("channel_id")):
                     say(text="Not authorized.", channel=command["channel_id"])
                     return

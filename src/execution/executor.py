@@ -189,14 +189,15 @@ class TradeExecutor:
             signal_age_seconds = (datetime.now(timezone.utc) - sig_ts).total_seconds()
         except Exception:
             pass
+        effective_confidence = signal.confidence
         if signal_age_seconds > 5:
             # Decay: lose 2% confidence per second over 5s, max 30% penalty
             decay = min((signal_age_seconds - 5) * 0.02, 0.30)
-            signal.confidence = max(signal.confidence - decay, 0.0)
+            effective_confidence = max(signal.confidence - decay, 0.0)
         if signal_age_seconds > 60:
             return None  # Signal too old, discard entirely
 
-        if signal.confidence < 0.50:
+        if effective_confidence < 0.50:
             return None
 
         # Quiet hours filter: skip new entries during low-liquidity periods

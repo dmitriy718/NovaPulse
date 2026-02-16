@@ -225,17 +225,17 @@ class TelegramBot:
             return
 
         try:
+            # Rate limit per message, not per recipient
+            elapsed = time.time() - self._last_message_time
+            if elapsed < self.rate_limit_seconds:
+                await asyncio.sleep(self.rate_limit_seconds - elapsed)
+            self._last_message_time = time.time()
             for cid in list(self.chat_ids or []):
-                # Rate limiting across recipients
-                elapsed = time.time() - self._last_message_time
-                if elapsed < self.rate_limit_seconds:
-                    await asyncio.sleep(self.rate_limit_seconds - elapsed)
                 await self._app.bot.send_message(
                     chat_id=cid,
                     text=text,
                     parse_mode=parse_mode,
                 )
-                self._last_message_time = time.time()
         except Exception as e:
             logger.debug("Telegram send failed", error=str(e))
 
@@ -417,6 +417,8 @@ class TelegramBot:
         msg = "📊 *Open Positions*\n\n"
         for pos in positions:
             current_price = self._bot_engine.market_data.get_latest_price(pos["pair"])
+            if not current_price or current_price <= 0:
+                continue
             if pos["side"] == "buy":
                 pnl = (current_price - pos["entry_price"]) * pos["quantity"]
             else:

@@ -58,9 +58,10 @@ class KrakenWebSocketClient:
         self._running = False
         self._reconnect_count = 0
         self._last_heartbeat: float = 0
+        self._last_heartbeat_received: float = 0  # timestamp of previous heartbeat msg
         self._subscriptions: Dict[str, Dict[str, Any]] = {}
         self._callbacks: Dict[str, List[Callable]] = defaultdict(list)
-        self._latency_samples: Deque[float] = deque(maxlen=50)  # recent heartbeat RTT samples
+        self._latency_samples: Deque[float] = deque(maxlen=50)  # heartbeat interval samples
 
     # ------------------------------------------------------------------
     # Connection Management
@@ -106,7 +107,7 @@ class KrakenWebSocketClient:
                 if not self._running:
                     break
 
-                delay = min(2 ** self._reconnect_count, 60)
+                delay = min(2 ** min(self._reconnect_count, 6), 60)
                 logger.warning(
                     "WebSocket disconnected, reconnecting",
                     error=str(e),
@@ -155,12 +156,12 @@ class KrakenWebSocketClient:
                 channel = message.get("channel", "")
 
                 if channel == "heartbeat":
-                    # Track round-trip latency from heartbeat timestamps
+                    # Track interval between consecutive heartbeat messages
                     now = time.time()
-                    if self._last_heartbeat > 0:
-                        rtt_ms = (now - self._last_heartbeat) * 1000.0
-                        self._latency_samples.append(rtt_ms)
-                        # deque(maxlen=50) auto-evicts oldest
+                    if self._last_heartbeat_received > 0:
+                        interval_ms = (now - self._last_heartbeat_received) * 1000.0
+                        self._latency_samples.append(interval_ms)
+                    self._last_heartbeat_received = now
                     continue
                 elif channel == "status":
                     await self._handle_status(message)
@@ -244,7 +245,10 @@ class KrakenWebSocketClient:
                     "symbol": pairs,
                 },
             }
-            await self._ws.send(json.dumps(message))
+            try:
+                await self._ws.send(json.dumps(message))
+            except Exception as e:
+                logger.error("Unsubscribe failed", channel=channel, error=str(e))
 
     async def _resubscribe(self) -> None:
         """Resubscribe to all channels after reconnection."""
@@ -331,10 +335,10 @@ class KrakenWebSocketClient:
         result = message.get("result", {})
 
         if success:
-            logger.debug(f"Subscription {method} confirmed", result=result)
+            logger.debug("Subscription confirmed", method=method, result=result)
         else:
             error = message.get("error", "Unknown error")
-            logger.error(f"Subscription {method} failed", error=error)
+            logger.error("Subscription failed", method=method, error=error)
 
     @property
     def is_connected(self) -> bool:

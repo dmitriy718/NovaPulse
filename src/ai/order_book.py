@@ -369,21 +369,21 @@ class OrderBookAnalyzer:
         if time_diff > 10:  # Only check recent snapshots
             return False
 
-        # Check if large bid orders disappeared
-        last_bids = {p: v for p, v in last["bids"][:5]}
-        curr_bids = dict(zip(bid_prices[:5].tolist(), bid_volumes[:5].tolist()))
+        # Check if large bid orders disappeared (use list of tuples to avoid float key dedup)
+        last_bids = last["bids"][:5]
+        curr_bid_prices = set(round(p, 10) for p in bid_prices[:5].tolist())
 
         disappeared_volume = 0
-        for price, volume in last_bids.items():
-            if price not in curr_bids and volume > np.mean(bid_volumes) * 3:
+        for price, volume in last_bids:
+            if round(price, 10) not in curr_bid_prices and volume > np.mean(bid_volumes) * 3:
                 disappeared_volume += volume
 
         # Same for asks
-        last_asks = {p: v for p, v in last["asks"][:5]}
-        curr_asks = dict(zip(ask_prices[:5].tolist(), ask_volumes[:5].tolist()))
+        last_asks = last["asks"][:5]
+        curr_ask_prices = set(round(p, 10) for p in ask_prices[:5].tolist())
 
-        for price, volume in last_asks.items():
-            if price not in curr_asks and volume > np.mean(ask_volumes) * 3:
+        for price, volume in last_asks:
+            if round(price, 10) not in curr_ask_prices and volume > np.mean(ask_volumes) * 3:
                 disappeared_volume += volume
 
         # If large volume disappeared quickly, possible spoofing

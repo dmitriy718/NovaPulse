@@ -73,7 +73,7 @@ class BreakoutStrategy(BaseStrategy):
         curr_low = lows[-1]
         # S5 FIX: Use actual opens data when available
         opens = kwargs.get("opens", closes)
-        curr_open = opens[-1] if len(opens) >= len(closes) else closes[-2]
+        curr_open = opens[-1] if len(opens) >= len(closes) else (closes[-2] if len(closes) > 1 else closes[-1])
 
         cache = kwargs.get("indicator_cache")
         if cache:

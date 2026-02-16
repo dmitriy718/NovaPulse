@@ -32,9 +32,9 @@ class RSIMeanReversionStrategy(BaseStrategy):
         rsi_oversold: int = 30,
         rsi_overbought: int = 70,
         trend_adjust: int = 5,
-        range_adjust: int = -5,
+        range_adjust: int = 5,
         high_vol_adjust: int = 3,
-        low_vol_adjust: int = -2,
+        low_vol_adjust: int = 2,
         weight: float = 0.12,
         enabled: bool = True,
     ):

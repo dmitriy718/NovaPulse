@@ -406,7 +406,7 @@ class ConfluenceDetector:
         for i in range(len(times)):
             bucket = int(times[i] // bucket_seconds)
             if current_bucket is None or bucket != current_bucket:
-                if current_bucket is not None and count >= timeframe:
+                if current_bucket is not None and count >= 1:
                     agg_opens.append(open_val)
                     agg_highs.append(high_val)
                     agg_lows.append(low_val)
@@ -426,7 +426,7 @@ class ConfluenceDetector:
                 close_val = float(closes[i])
                 vol_val += float(volumes[i])
 
-        if current_bucket is not None and count >= timeframe:
+        if current_bucket is not None and count >= 1:
             agg_opens.append(open_val)
             agg_highs.append(high_val)
             agg_lows.append(low_val)
@@ -655,7 +655,11 @@ class ConfluenceDetector:
         weighted_confidence = min(weighted_confidence + confluence_bonus, 1.0)
 
         # Opposing signal penalty: if strategies actively disagree, reduce confidence
-        opposing_count = len(short_signals) if direction == SignalDirection.LONG else len(long_signals)
+        # Exclude synthetic order_book signal from opposition count
+        if direction == SignalDirection.LONG:
+            opposing_count = sum(1 for s in short_signals if s.strategy_name != "order_book")
+        else:
+            opposing_count = sum(1 for s in long_signals if s.strategy_name != "order_book")
         if opposing_count > 0:
             opposition_penalty = min(opposing_count * 0.08, 0.25)
             weighted_confidence = max(weighted_confidence - opposition_penalty, 0.0)

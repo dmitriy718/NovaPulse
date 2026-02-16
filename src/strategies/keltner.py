@@ -121,7 +121,7 @@ class KeltnerStrategy(BaseStrategy):
         curr_close = closes[-1]
         curr_low = lows[-1]
         curr_high = highs[-1]
-        curr_open = opens[-1] if len(opens) >= len(closes) else closes[-2]
+        curr_open = opens[-1] if len(opens) >= len(closes) else (closes[-2] if len(closes) > 1 else closes[-1])
         curr_kc_upper = kc_upper[-1]
         curr_kc_lower = kc_lower[-1]
         curr_kc_mid = kc_mid[-1]
