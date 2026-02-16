@@ -115,7 +115,6 @@ class BaseStrategy(ABC):
         self._trade_count = 0
         self._win_count = 0
         self._total_pnl = 0.0
-        self._last_signal: Optional[StrategySignal] = None
 
     @abstractmethod
     async def analyze(

@@ -275,6 +275,9 @@ class KrakenRESTClient:
             "GET", "/0/public/Depth",
             {"pair": kraken_pair, "count": count}
         )
+        # Look up by known pair key first, then fall back to first key
+        if kraken_pair in result:
+            return result[kraken_pair]
         for key in result:
             return result[key]
         return {"asks": [], "bids": []}
@@ -403,10 +406,15 @@ class KrakenRESTClient:
         if post_only:
             data["oflags"] = "post"
         if client_order_id:
-            data["userref"] = client_order_id
+            # Kraken userref requires a 32-bit signed integer
+            try:
+                data["userref"] = int(client_order_id) % (2**31)
+            except (ValueError, TypeError):
+                import hashlib as _hl
+                data["userref"] = int(_hl.sha256(client_order_id.encode()).hexdigest()[:8], 16) % (2**31)
         if close_order_type:
             data["close[ordertype]"] = close_order_type
-        if close_price:
+        if close_price is not None:
             data["close[price]"] = str(close_price)
 
         logger.info(

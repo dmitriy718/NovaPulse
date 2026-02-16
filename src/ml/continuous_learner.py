@@ -74,7 +74,16 @@ class ContinuousLearner:
             self._model = payload.get("model")
             self.stats = payload.get("stats") or self.stats
             if not isinstance(self.stats, ContinuousStats):
-                self.stats = ContinuousStats(**dict(self.stats))
+                try:
+                    from dataclasses import asdict, fields as dc_fields
+                    if hasattr(self.stats, '__dataclass_fields__'):
+                        raw = asdict(self.stats)
+                    else:
+                        raw = dict(self.stats)
+                    valid_keys = {f.name for f in dc_fields(ContinuousStats)}
+                    self.stats = ContinuousStats(**{k: v for k, v in raw.items() if k in valid_keys})
+                except Exception:
+                    self.stats = ContinuousStats()
             logger.info("Continuous model loaded", path=str(self.model_path), seen=self.stats.seen)
         except Exception as e:
             logger.warning("Continuous model load failed (non-fatal)", error=repr(e))

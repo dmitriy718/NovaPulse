@@ -178,8 +178,20 @@ class ModelTrainer:
             else list(TradePredictorFeatures.FEATURE_NAMES)
         )
         self._training_history: List[Dict[str, Any]] = []
-        self._executor = concurrent.futures.ProcessPoolExecutor(max_workers=1)
+        self._executor: Optional[concurrent.futures.ProcessPoolExecutor] = None
         self.tenant_id = tenant_id or "default"
+
+    def _get_executor(self) -> concurrent.futures.ProcessPoolExecutor:
+        """Lazy-init executor so it can be shut down cleanly."""
+        if self._executor is None:
+            self._executor = concurrent.futures.ProcessPoolExecutor(max_workers=1)
+        return self._executor
+
+    def close(self) -> None:
+        """Shut down the training process pool."""
+        if self._executor is not None:
+            self._executor.shutdown(wait=False)
+            self._executor = None
 
     async def train(self) -> Dict[str, Any]:
         """
@@ -227,7 +239,7 @@ class ModelTrainer:
         try:
             loop = asyncio.get_running_loop()
             metrics = await loop.run_in_executor(
-                self._executor,
+                self._get_executor(),
                 _run_training_process,
                 X_train,
                 y_train,

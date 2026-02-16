@@ -326,5 +326,4 @@ class ReversalStrategy(BaseStrategy):
             }
         )
 
-        self._last_signal = signal
         return signal
