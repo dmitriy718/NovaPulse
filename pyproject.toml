@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=69.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "novapulse"
+version = "3.0.0"
+description = "NovaPulse: multi-strategy crypto trading engine + hardened control plane"
+# The system is tested and deployed on Python 3.13 as of 2026-02-15.
+# Keep an upper bound to avoid silent breakage on future majors.
+requires-python = ">=3.11,<3.14"
+readme = "README.md"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+python_files = ["test_*.py"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+ignore_missing_imports = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
