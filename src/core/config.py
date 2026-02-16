@@ -138,6 +138,8 @@ class TradingConfig(BaseModel):
     use_closed_candles_only: bool = False
     # Single Strategy Mode: if set, only this strategy runs (e.g. "keltner", "trend")
     single_strategy_mode: Optional[Union[str, bool]] = None
+    # Quiet hours: skip new entries during these UTC hours (e.g. [2,3,4,5])
+    quiet_hours_utc: List[int] = Field(default_factory=list)
 
 
 class StrategyWeights(BaseModel):

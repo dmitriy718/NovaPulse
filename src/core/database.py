@@ -53,14 +53,14 @@ class DatabaseManager:
         """Initialize database connection and create schema."""
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
 
-        self._db = await aiosqlite.connect(self.db_path, timeout=30)
+        self._db = await aiosqlite.connect(self.db_path, timeout=15)
 
         # Enable WAL mode for concurrent access
         await self._db.execute("PRAGMA journal_mode=WAL")
         await self._db.execute("PRAGMA synchronous=NORMAL")
-        await self._db.execute("PRAGMA cache_size=-64000")  # 64MB cache
+        await self._db.execute("PRAGMA cache_size=-16000")  # 16MB cache
         await self._db.execute("PRAGMA temp_store=MEMORY")
-        await self._db.execute("PRAGMA mmap_size=268435456")  # 256MB mmap
+        await self._db.execute("PRAGMA mmap_size=67108864")  # 64MB mmap
 
         await self._create_schema()
         await self._run_tenant_migrations()
@@ -1005,7 +1005,70 @@ class DatabaseManager:
         row = await cursor.fetchone()
         stats["today_pnl"] = row[0] if row else 0.0
 
+        # Sharpe and Sortino ratios (annualized, based on per-trade returns)
+        cursor = await self._db.execute(
+            f"SELECT pnl FROM trades WHERE status = 'closed'{tc}{rc}",
+            tuple(p),
+        )
+        rows = await cursor.fetchall()
+        pnls = [r[0] for r in rows if r[0] is not None]
+        if len(pnls) >= 5:
+            import math
+            mean_pnl = sum(pnls) / len(pnls)
+            variance = sum((x - mean_pnl) ** 2 for x in pnls) / len(pnls)
+            std_dev = math.sqrt(variance) if variance > 0 else 0.0
+            # Annualize assuming ~250 trading days, ~10 trades/day
+            annual_factor = math.sqrt(min(len(pnls), 2500))
+            stats["sharpe_ratio"] = round(
+                (mean_pnl / std_dev * annual_factor) if std_dev > 0 else 0.0, 3
+            )
+            # Sortino: only downside deviation
+            downside = [x for x in pnls if x < 0]
+            if downside:
+                down_var = sum(x ** 2 for x in downside) / len(pnls)
+                down_dev = math.sqrt(down_var) if down_var > 0 else 0.0
+                stats["sortino_ratio"] = round(
+                    (mean_pnl / down_dev * annual_factor) if down_dev > 0 else 0.0, 3
+                )
+            else:
+                stats["sortino_ratio"] = 999.0  # No losing trades
+        else:
+            stats["sharpe_ratio"] = 0.0
+            stats["sortino_ratio"] = 0.0
+
         return stats
+
+    async def get_strategy_stats(
+        self, tenant_id: Optional[str] = "default"
+    ) -> Dict[str, Dict[str, Any]]:
+        """Get per-strategy win rate and PnL stats."""
+        tc = " AND tenant_id = ?" if tenant_id else ""
+        params: list = [tenant_id] if tenant_id else []
+        cursor = await self._db.execute(
+            f"""SELECT strategy,
+                COUNT(*) as total,
+                SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
+                COALESCE(SUM(pnl), 0) as total_pnl,
+                COALESCE(AVG(pnl), 0) as avg_pnl
+            FROM trades
+            WHERE status = 'closed' AND strategy IS NOT NULL{tc}
+            GROUP BY strategy""",
+            tuple(params),
+        )
+        rows = await cursor.fetchall()
+        result: Dict[str, Dict[str, Any]] = {}
+        for row in rows:
+            strat = row[0]
+            total = row[1] or 0
+            wins = row[2] or 0
+            result[strat] = {
+                "total_trades": total,
+                "wins": wins,
+                "win_rate": round(wins / total, 3) if total > 0 else 0.0,
+                "total_pnl": round(float(row[3] or 0.0), 4),
+                "avg_pnl": round(float(row[4] or 0.0), 4),
+            }
+        return result
 
     # ------------------------------------------------------------------
     # Tenants (multi-tenant / Stripe)

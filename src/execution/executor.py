@@ -82,8 +82,20 @@ class TradeExecutor:
 
         self.continuous_learner: Optional[ContinuousLearner] = None
 
-        self._active_orders: Dict[str, Dict[str, Any]] = {}
-        self._pending_signals: asyncio.Queue = asyncio.Queue()
+        # Correlation groups: pairs in the same group share a single slot
+        # to prevent concentrated directional exposure.
+        self._correlation_groups: Dict[str, str] = {
+            "BTC/USD": "btc",
+            "ETH/USD": "major",
+            "SOL/USD": "alt_l1",
+            "AVAX/USD": "alt_l1",
+            "DOT/USD": "alt_l1",
+            "ADA/USD": "alt_l1",
+            "XRP/USD": "alt_payment",
+            "LINK/USD": "alt_oracle",
+        }
+        self._max_per_correlation_group = 2  # max open positions in same group
+
         self._execution_stats = {
             "orders_placed": 0,
             "orders_filled": 0,
@@ -169,8 +181,33 @@ class TradeExecutor:
         if signal.direction == SignalDirection.NEUTRAL:
             return None
 
-        if signal.confidence < 0.40:
+        # Signal age decay: reduce confidence for stale signals
+        signal_age_seconds = 0.0
+        try:
+            sig_ts = datetime.fromisoformat(signal.timestamp.replace("Z", "+00:00"))
+            signal_age_seconds = (datetime.now(timezone.utc) - sig_ts).total_seconds()
+        except Exception:
+            pass
+        if signal_age_seconds > 5:
+            # Decay: lose 2% confidence per second over 5s, max 30% penalty
+            decay = min((signal_age_seconds - 5) * 0.02, 0.30)
+            signal.confidence = max(signal.confidence - decay, 0.0)
+        if signal_age_seconds > 60:
+            return None  # Signal too old, discard entirely
+
+        if signal.confidence < 0.50:
             return None
+
+        # Quiet hours filter: skip new entries during low-liquidity periods
+        try:
+            from src.core.config import get_config
+            quiet_hours = get_config().trading.quiet_hours_utc
+        except Exception:
+            quiet_hours = []
+        if quiet_hours:
+            current_utc_hour = datetime.now(timezone.utc).hour
+            if current_utc_hour in quiet_hours:
+                return None
 
         # Block duplicate pair — only one position per pair at a time
         open_trades = await self.db.get_open_trades(
@@ -178,6 +215,17 @@ class TradeExecutor:
         )
         if open_trades:
             return None  # Already have a position on this pair
+
+        # Correlation guard: limit concentrated exposure to correlated pairs
+        group = self._correlation_groups.get(signal.pair)
+        if group:
+            all_open = await self.db.get_open_trades(tenant_id=self.tenant_id)
+            group_count = sum(
+                1 for t in all_open
+                if self._correlation_groups.get(t.get("pair")) == group
+            )
+            if group_count >= self._max_per_correlation_group:
+                return None
 
         # Stage 2: Risk check and position sizing
         side = "buy" if signal.direction == SignalDirection.LONG else "sell"
@@ -206,6 +254,7 @@ class TradeExecutor:
             win_rate = 0.50
             win_loss_ratio = 1.5
 
+        spread_pct = self.market_data.get_spread(signal.pair) if self.market_data else 0.0
         size_result = self.risk_manager.calculate_position_size(
             pair=signal.pair,
             entry_price=signal.entry_price,
@@ -214,6 +263,7 @@ class TradeExecutor:
             win_rate=win_rate,
             avg_win_loss_ratio=win_loss_ratio,
             confidence=signal.confidence,
+            spread_pct=spread_pct,
         )
 
         if not size_result.allowed:
@@ -482,6 +532,25 @@ class TradeExecutor:
         current_price = self.market_data.get_latest_price(pair)
         if current_price <= 0:
             return
+
+        # Max trade duration: auto-close positions older than 24 hours
+        max_duration_hours = 24
+        entry_time_str = trade.get("entry_time", "")
+        if entry_time_str:
+            try:
+                from datetime import datetime, timezone
+                entry_dt = datetime.fromisoformat(entry_time_str.replace("Z", "+00:00"))
+                age_hours = (datetime.now(timezone.utc) - entry_dt).total_seconds() / 3600
+                if age_hours >= max_duration_hours:
+                    await self._close_position(
+                        trade_id, pair, side, entry_price,
+                        current_price, quantity, "max_duration",
+                        metadata=trade.get("metadata"),
+                        strategy=trade.get("strategy"),
+                    )
+                    return
+            except Exception:
+                pass
 
         # Update trailing stop
         state = self.risk_manager.update_stop_loss(

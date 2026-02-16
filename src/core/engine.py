@@ -99,13 +99,16 @@ class BotEngine:
         self._scan_count = 0
         self._last_health_check = 0.0
         self._tasks: List[asyncio.Task] = []
-        self._scan_queue: asyncio.Queue = asyncio.Queue()
+        self._scan_queue: asyncio.Queue = asyncio.Queue(maxsize=100)
         self._pending_scan_pairs: set = set()
         self._event_price_move_pct = getattr(self.config.trading, "event_price_move_pct", 0.005)
         self.exchange_name = (self.config.exchange.name or "kraken").lower()
         self._stale_check_count = 0
         self._ws_disconnected_since: Optional[float] = None
         self._auto_pause_reason: str = ""
+        # Adaptive scan interval: tracks recent event frequency
+        self._recent_event_count = 0
+        self._event_window_start = 0.0
 
     async def _auto_pause_trading(self, reason: str, detail: str = "") -> None:
         """Pause trading with audit logging and optional Telegram alert (idempotent)."""
@@ -907,18 +910,36 @@ class BotEngine:
 
     async def _collect_scan_pairs(self) -> tuple[list, bool]:
         """
-        Collect pairs to scan.
+        Collect pairs to scan with adaptive timeout.
+        High event frequency → shorter wait (more responsive).
+        Low event frequency → longer wait (save CPU).
         Returns (pairs, from_event_queue).
         """
+        # Adaptive scan interval based on recent event frequency
+        now = time.time()
+        if now - self._event_window_start > 60:
+            self._recent_event_count = 0
+            self._event_window_start = now
+        # Scale timeout: many events → faster (min 5s), few events → configured interval
+        events_per_min = self._recent_event_count
+        if events_per_min > 20:
+            adaptive_timeout = max(5, self.scan_interval // 3)
+        elif events_per_min > 5:
+            adaptive_timeout = max(10, self.scan_interval // 2)
+        else:
+            adaptive_timeout = self.scan_interval
+
         pairs = set()
         try:
             pair = await asyncio.wait_for(
-                self._scan_queue.get(), timeout=self.scan_interval
+                self._scan_queue.get(), timeout=adaptive_timeout
             )
             pairs.add(pair)
+            self._recent_event_count += 1
             while True:
                 pair = self._scan_queue.get_nowait()
                 pairs.add(pair)
+                self._recent_event_count += 1
         except asyncio.TimeoutError:
             return list(self.pairs), False
         except asyncio.QueueEmpty:

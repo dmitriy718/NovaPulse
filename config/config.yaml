@@ -57,6 +57,7 @@ trading:
     reversal: 600
   event_price_move_pct: 0.005
   single_strategy_mode: null    # or "keltner", "trend", "mean_reversion", etc. for testing
+  quiet_hours_utc: [2, 3, 4, 5]  # Skip new entries during low-liquidity UTC hours (empty list = disabled)
 
 strategies:
   # Keltner Channel — primary strategy for high win rate
@@ -127,9 +128,9 @@ strategies:
     weight: 0.15
 
 ai:
-  confluence_threshold: 2  # Min strategies that must agree
-  min_confidence: 0.62
-  min_risk_reward_ratio: 1.1
+  confluence_threshold: 3  # Min strategies that must agree (was 2 — too loose)
+  min_confidence: 0.68     # Higher quality bar (was 0.62)
+  min_risk_reward_ratio: 1.5  # Better R:R to overcome fees (was 1.1)
   tflite_model_path: "models/trade_predictor.tflite"
   order_book_depth: 25
   obi_threshold: 0.15  # Order Book Imbalance threshold
@@ -137,7 +138,7 @@ ai:
   book_score_max_age_seconds: 5
   multi_timeframe_min_agreement: 2
   primary_timeframe: 1
-  obi_counts_as_confluence: true  # "Weighted Order Book": when true, OBI + 1 strategy = tradable
+  obi_counts_as_confluence: false  # OBI as confirmation filter only — too noisy as pseudo-strategy
   obi_weight: 0.4
   allow_keltner_solo: false
   allow_any_solo: false
@@ -188,13 +189,13 @@ risk:
   initial_bankroll: 5000.0
   atr_multiplier_sl: 2.0
   atr_multiplier_tp: 3.0
-  trailing_activation_pct: 0.012  # 1.2% profit to activate trailing (was 0.8)
+  trailing_activation_pct: 0.018  # 1.8% profit to activate trailing — let winners run
   trailing_step_pct: 0.005        # 0.5% trailing step
-  breakeven_activation_pct: 0.008 # 0.8% profit to move SL to breakeven (was 1%)
+  breakeven_activation_pct: 0.012 # 1.2% profit to move SL to breakeven — avoid premature lockout
   kelly_fraction: 0.25            # Quarter-Kelly for safety
   max_kelly_size: 0.10            # Never more than 10% of bankroll
   risk_of_ruin_threshold: 0.01    # 1% acceptable risk of ruin
-  global_cooldown_seconds_on_loss: 1800
+  global_cooldown_seconds_on_loss: 600  # 10 min cooldown after loss (was 30 min — too aggressive)
 
 control:
   web:

@@ -489,10 +489,12 @@ def main():
     """)
 
     # Top-level supervisor: keep the process alive on unexpected fatal exceptions.
+    # Cap restarts to prevent resource exhaustion if the bot can't start.
     failures = 0
+    max_failures = 10
     base_delay = 2.0
     max_delay = 60.0
-    while True:
+    while failures < max_failures:
         try:
             asyncio.run(run_bot())
             return
@@ -511,9 +513,16 @@ def main():
                 error=repr(e),
                 error_type=type(e).__name__,
                 failures=failures,
+                max_failures=max_failures,
                 restart_in_seconds=round(delay, 2),
             )
             time.sleep(delay)
+
+    logger.critical(
+        "Max restart attempts reached, shutting down",
+        failures=failures,
+    )
+    sys.exit(1)
 
 
 if __name__ == "__main__":
