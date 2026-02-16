@@ -1,10 +1,12 @@
 [allowlist]
 paths = [
-  "^\.venv.*",
-  "^venv/",
-  "^env/",
-  "^__pycache__/",
-  "^data/",
-  "^logs/",
-  "^models/"
+  '^\.venv.*',
+  '^venv/',
+  '^env/',
+  '^__pycache__/',
+  '^data/',
+  '^logs/',
+  '^models/',
+  '\.env\.example$',
+  'FirstReview\.md',
 ]

@@ -319,7 +319,7 @@ The `.env` file contains what appear to be **real credentials**:
 - `KRAKEN_API_KEY` and `KRAKEN_API_SECRET` (56 and 88 chars respectively)
 - `TELEGRAM_BOT_TOKEN` (looks like a real token format)
 - `STRIPE_RESTRICTED_KEY`, `STRIPE_PUBLISHABLE_KEY`, `STRIPE_SECRET_KEY` (all `*_live_*` prefix)
-- `DASHBOARD_ADMIN_PASSWORD=DimaZ7188!` (plaintext password)
+- `DASHBOARD_ADMIN_PASSWORD=<REDACTED>` (plaintext password in .env)
 - `DASHBOARD_SESSION_SECRET` (base64 encoded secret)
 
 **If this `.env` has ever been committed to git history, all these credentials should be rotated immediately.** Even with `.gitignore`, if they were committed before being added to `.gitignore`, they remain in history.
