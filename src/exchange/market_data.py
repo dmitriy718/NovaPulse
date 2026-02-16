@@ -189,8 +189,8 @@ class MarketDataCache:
 
             is_new_bar = False
             # M17 FIX: Tolerance-based comparison
-            # Guard: only update in-place if buffer has data
-            if time_buf.size > 0 and abs(last_ts - timestamp) < 1.0:
+            # Guard: only update in-place if buffer has data and size > 0
+            if time_buf.size > 0 and last_ts is not None and abs(last_ts - timestamp) < 1.0:
                 # Update current candle (overwrite last)
                 # RingBuffer doesn't support random access write easily, 
                 # but we can hack it by appending (which advances) then checking logic?
@@ -267,7 +267,7 @@ class MarketDataCache:
             return np.array([])
         
         # RingBuffer.latest() handles the view/copy logic efficiently
-        if n:
+        if n is not None:
             return self._buffers[pair][col].latest(n)
         return self._buffers[pair][col].view()
 
@@ -310,7 +310,7 @@ class MarketDataCache:
         }
         
         for name, col_idx in col_map.items():
-            if n:
+            if n is not None:
                 data[name] = self._buffers[pair][col_idx].latest(n)
             else:
                 data[name] = self._buffers[pair][col_idx].view()

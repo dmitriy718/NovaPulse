@@ -143,13 +143,13 @@ class CoinbaseRESTClient:
 
         last_error: Optional[Exception] = None
         for attempt in range(self.max_retries + 1):
-            headers: Dict[str, str] = {}
-            if authenticated:
-                host_override = self._market_host if use_market_client else None
-                token = self._build_jwt(method, path, host_override=host_override)
-                headers["Authorization"] = f"Bearer {token}"
-
             async with self._rate_semaphore:
+                headers: Dict[str, str] = {}
+                if authenticated:
+                    # Build JWT inside semaphore so it doesn't expire while waiting
+                    host_override = self._market_host if use_market_client else None
+                    token = self._build_jwt(method, path, host_override=host_override)
+                    headers["Authorization"] = f"Bearer {token}"
                 try:
                     if method.upper() == "GET":
                         resp = await client.get(path, params=params, headers=headers)

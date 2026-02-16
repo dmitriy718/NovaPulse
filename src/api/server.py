@@ -414,6 +414,10 @@ class DashboardServer:
                     del buckets[k]
                 _last_eviction[0] = now
 
+            # Cap bucket count to prevent memory exhaustion from many IPs
+            if ip not in buckets and len(buckets) >= 10000:
+                return JSONResponse(status_code=429, content={"detail": "Rate limit exceeded"})
+
             tokens, last = buckets.get(ip, (float(burst), now))
             rate = float(rpm) / 60.0
             tokens = min(float(burst), tokens + (now - last) * rate)

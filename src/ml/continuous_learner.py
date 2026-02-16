@@ -128,8 +128,9 @@ class ContinuousLearner:
                     )
 
                 x = self._vectorize(features)
-                # Incremental normalization and model update
-                self._scaler.partial_fit(x)
+                # Freeze scaler after enough samples to avoid distribution drift
+                if self.stats.seen < 200:
+                    self._scaler.partial_fit(x)
                 xs = self._scaler.transform(x)
 
                 # partial_fit needs classes on first call

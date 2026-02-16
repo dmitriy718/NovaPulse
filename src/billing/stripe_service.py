@@ -139,7 +139,7 @@ class StripeService:
         if not self.webhook_secret:
             return False
         try:
-            import stripe
+            stripe = self._api()
             stripe.Webhook.construct_event(
                 payload, signature_header, self.webhook_secret
             )
@@ -197,11 +197,14 @@ class StripeService:
         if not tenant_id:
             return
         status = subscription.get("status")
-        our_status = "active" if status in ("active", "trialing") else status
-        if status == "past_due":
-            our_status = "past_due"
-        elif status in ("canceled", "unpaid"):
-            our_status = "canceled"
+        _STATUS_MAP = {
+            "active": "active",
+            "trialing": "active",
+            "past_due": "past_due",
+            "canceled": "canceled",
+            "unpaid": "canceled",
+        }
+        our_status = _STATUS_MAP.get(status, status)
         await self._db.set_tenant_status(tenant_id, our_status)
         logger.info("Tenant subscription updated", tenant_id=tenant_id, status=our_status)
 

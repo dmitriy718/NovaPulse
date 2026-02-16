@@ -138,7 +138,7 @@ class MeanReversionStrategy(BaseStrategy):
             direction = SignalDirection.LONG
 
             # Strength based on BB position depth
-            strength = 0.4 + (0.15 - curr_bb_pos) * 2.0
+            strength = 0.4 + min((0.15 - curr_bb_pos) * 2.0, 0.3)
 
             # RSI extremity bonus
             rsi_bonus = max(0, (self.rsi_oversold - curr_rsi) / 30) * 0.2
@@ -169,7 +169,7 @@ class MeanReversionStrategy(BaseStrategy):
         elif curr_bb_pos > 0.85 and curr_rsi > self.rsi_overbought:
             direction = SignalDirection.SHORT
 
-            strength = 0.4 + (curr_bb_pos - 0.85) * 2.0
+            strength = 0.4 + min((curr_bb_pos - 0.85) * 2.0, 0.3)
 
             rsi_bonus = max(0, (curr_rsi - self.rsi_overbought) / 30) * 0.2
             strength += rsi_bonus

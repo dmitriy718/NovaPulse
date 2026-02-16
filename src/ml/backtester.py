@@ -61,7 +61,7 @@ class BacktestResult:
 
     @property
     def losing_trades(self) -> int:
-        return sum(1 for t in self.trades if t.get("pnl", 0) <= 0)
+        return sum(1 for t in self.trades if t.get("pnl", 0) < 0)
 
     @property
     def win_rate(self) -> float:
@@ -97,7 +97,7 @@ class BacktestResult:
 
     @property
     def avg_loss(self) -> float:
-        losses = [t["pnl"] for t in self.trades if t.get("pnl", 0) <= 0]
+        losses = [t["pnl"] for t in self.trades if t.get("pnl", 0) < 0]
         return np.mean(losses) if losses else 0.0
 
     @property
@@ -120,8 +120,8 @@ class BacktestResult:
         std = np.std(returns)
         if std == 0:
             return 0.0
-        # Annualize: sqrt(525600) for 1-minute data
-        return (avg / std) * np.sqrt(525600 / max(len(returns), 1))
+        # Per-trade Sharpe (no annualization — trade frequency varies)
+        return float(avg / std) * np.sqrt(max(len(returns), 1))
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -755,7 +755,7 @@ class Backtester:
             return time.time()
 
     def _build_prediction_features(
-        self, signal: StrategySignal, predictor: TFLitePredictor
+        self, signal, predictor: TFLitePredictor
     ) -> Dict[str, Any]:
         """Build predictor features from a confluence signal."""
         metadata: Dict[str, Any] = {}
@@ -776,7 +776,7 @@ class Backtester:
             spread=0.0,
         )
 
-    def _primary_strategy(self, signal: StrategySignal) -> str:
+    def _primary_strategy(self, signal) -> str:
         """Select the strongest agreeing strategy name."""
         if not signal.signals:
             return "confluence"
