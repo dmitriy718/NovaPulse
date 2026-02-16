@@ -665,6 +665,12 @@ class TestApiTenantAuth:
 
 
 class _FakeTradeDB:
+    async def get_tenant_id_by_api_key(self, api_key: str):
+        return None
+
+    async def get_tenant(self, tenant_id: str):
+        return None
+
     async def get_trade_history(self, limit: int = 100, tenant_id: str = "default"):
         return [
             {
@@ -718,7 +724,7 @@ class TestApiExports:
         from src.api.server import DashboardServer
 
         server = DashboardServer()
-        server._api_secret = "ADMIN"
+        server._admin_key = "ADMIN"
         server._bot_engine = _FakeEngineForExport()
 
         client = TestClient(server.app)
@@ -735,7 +741,7 @@ class TestApiMiddleware:
         from src.api.server import DashboardServer
 
         server = DashboardServer()
-        server._api_secret = "ADMIN"
+        server._admin_key = "ADMIN"
         server._bot_engine = _FakeEngineForExport()
 
         client = TestClient(server.app)
@@ -749,7 +755,7 @@ class TestApiMiddleware:
         from src.api.server import DashboardServer
 
         server = DashboardServer()
-        server._api_secret = "ADMIN"
+        server._admin_key = "ADMIN"
         eng = _FakeEngineForExport()
         # Tight limits for the test
         eng.config.dashboard.rate_limit_enabled = True
