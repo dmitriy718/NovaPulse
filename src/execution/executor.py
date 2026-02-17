@@ -128,14 +128,17 @@ class TradeExecutor:
                 try:
                     meta = json.loads(trade["metadata"]) if isinstance(trade["metadata"], str) else trade["metadata"]
                     size_usd = meta.get("size_usd", 0.0)
-                    
+
                     # Restore stop loss state
                     if "stop_loss_state" in meta:
                         sl_state = meta["stop_loss_state"]
                         trailing_high = sl_state.get("trailing_high", 0.0)
                         trailing_low = sl_state.get("trailing_low", float("inf"))
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(
+                        "Failed to parse trade metadata on restore",
+                        trade_id=trade_id, error=repr(e),
+                    )
             
             if size_usd == 0.0:
                 size_usd = entry_price * trade["quantity"]
@@ -743,14 +746,30 @@ class TradeExecutor:
             tenant_id=tid,
         )
         # Label the ML row for this trade (1=win, 0=loss/breakeven).
+        ml_label = 1.0 if pnl > 0 else 0.0
         try:
             await self.db.update_ml_label_for_trade(
                 trade_id,
-                1.0 if pnl > 0 else 0.0,
+                ml_label,
                 tenant_id=tid,
             )
         except Exception as e:
             logger.debug("ML label update failed (non-fatal)", trade_id=trade_id, error=repr(e))
+
+        # Feed the closed trade to the continuous learner for online ML updates.
+        if self.continuous_learner:
+            try:
+                features = await self.db.get_ml_features_for_trade(trade_id, tenant_id=tid)
+                if features:
+                    await self.continuous_learner.update(features, ml_label)
+                    logger.info(
+                        "Continuous learner updated",
+                        trade_id=trade_id,
+                        label=ml_label,
+                        updates=self.continuous_learner.stats.updates,
+                    )
+            except Exception as e:
+                logger.debug("Continuous learner update failed (non-fatal)", trade_id=trade_id, error=repr(e))
 
         # Update risk manager
         self.risk_manager.close_position(trade_id, pnl)

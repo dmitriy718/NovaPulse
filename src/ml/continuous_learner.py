@@ -11,6 +11,8 @@ Design goals:
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import os
 import time
 from dataclasses import dataclass
@@ -63,10 +65,39 @@ class ContinuousLearner:
 
         self._load_best_effort()
 
+    # Integrity check: HMAC of the serialized model file to detect tampering.
+    _HMAC_SUFFIX = ".hmac"
+
+    def _hmac_path(self) -> Path:
+        return self.model_path.with_suffix(self.model_path.suffix + self._HMAC_SUFFIX)
+
+    @staticmethod
+    def _compute_file_hmac(path: Path) -> str:
+        """Compute HMAC-SHA256 of a file using a machine-local key."""
+        # Use hostname + username as key so the model is bound to this machine.
+        key = (os.uname().nodename + os.getenv("USER", "bot")).encode()
+        h = hmac.new(key, digestmod=hashlib.sha256)
+        with open(path, "rb") as f:
+            while chunk := f.read(65536):
+                h.update(chunk)
+        return h.hexdigest()
+
     def _load_best_effort(self) -> None:
         if not self.model_path.exists():
             return
         try:
+            # Integrity check: refuse to load if HMAC doesn't match
+            hmac_path = self._hmac_path()
+            if hmac_path.exists():
+                expected = hmac_path.read_text().strip()
+                actual = self._compute_file_hmac(self.model_path)
+                if not hmac.compare_digest(expected, actual):
+                    logger.error(
+                        "Continuous model HMAC mismatch — refusing to load (possible tampering)",
+                        path=str(self.model_path),
+                    )
+                    return
+
             import joblib
 
             payload = joblib.load(self.model_path)
@@ -165,6 +196,12 @@ class ContinuousLearner:
             payload = {"scaler": self._scaler, "model": self._model, "stats": self.stats}
             joblib.dump(payload, tmp)
             os.replace(tmp, self.model_path)
+            # Write HMAC for integrity verification on next load
+            try:
+                file_hmac = self._compute_file_hmac(self.model_path)
+                self._hmac_path().write_text(file_hmac)
+            except Exception:
+                pass  # Non-fatal: model still saved even if HMAC write fails
             self.stats.last_saved_ts = time.time()
             logger.info("Continuous model saved", path=str(self.model_path), updates=self.stats.updates)
         except Exception as e:

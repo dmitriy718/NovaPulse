@@ -1037,25 +1037,28 @@ class DatabaseManager:
             tuple(p),
         )
         rows = await cursor.fetchall()
-        pnls = [r[0] for r in rows if r[0] is not None]
+        pnls = [r[0] for r in rows if r[0] is not None and math.isfinite(r[0])]
         if len(pnls) >= 5:
-
             mean_pnl = sum(pnls) / len(pnls)
-            variance = sum((x - mean_pnl) ** 2 for x in pnls) / len(pnls)
+            variance = sum((x - mean_pnl) ** 2 for x in pnls) / max(len(pnls) - 1, 1)
             std_dev = math.sqrt(variance) if variance > 0 else 0.0
-            # Annualize assuming ~250 trading days, ~10 trades/day
+            # Annualize: sqrt(trades_per_year). Cap at 2500 to avoid inflated ratios.
             annual_factor = math.sqrt(min(len(pnls), 2500))
-            stats["sharpe_ratio"] = round(
-                (mean_pnl / std_dev * annual_factor) if std_dev > 0 else 0.0, 3
-            )
-            # Sortino: only downside deviation
+            if std_dev > 1e-12:
+                sharpe = mean_pnl / std_dev * annual_factor
+                stats["sharpe_ratio"] = round(sharpe, 3) if math.isfinite(sharpe) else 0.0
+            else:
+                stats["sharpe_ratio"] = 0.0
+            # Sortino: only downside deviation (semi-deviation below zero)
             downside = [x for x in pnls if x < 0]
             if downside:
                 down_var = sum(x ** 2 for x in downside) / len(downside)
                 down_dev = math.sqrt(down_var) if down_var > 0 else 0.0
-                stats["sortino_ratio"] = round(
-                    (mean_pnl / down_dev * annual_factor) if down_dev > 0 else 0.0, 3
-                )
+                if down_dev > 1e-12:
+                    sortino = mean_pnl / down_dev * annual_factor
+                    stats["sortino_ratio"] = round(sortino, 3) if math.isfinite(sortino) else 0.0
+                else:
+                    stats["sortino_ratio"] = 0.0
             else:
                 stats["sortino_ratio"] = 999.0  # No losing trades
         else:

@@ -14,6 +14,7 @@ and real-time updates from WebSocket.
 from __future__ import annotations
 
 import asyncio
+import math
 import time
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -172,12 +173,12 @@ class MarketDataCache:
                 self.COL_COUNT: float(bar.get("count", 0)),
             }
 
-            # Outlier check
-            if time_buf.size > 10:
+            # Outlier check — reject bars with extreme price jumps (bad data / exchange glitch)
+            if time_buf.size > 2:
                 last_close = self._buffers[pair][self.COL_CLOSE].get_last()
                 if last_close > 0:
                     deviation = abs(values[self.COL_CLOSE] - last_close) / last_close
-                    if deviation > 0.20:
+                    if deviation > 0.10:
                         logger.warning(
                             "Outlier bar rejected",
                             pair=pair,
@@ -191,20 +192,17 @@ class MarketDataCache:
             # M17 FIX: Tolerance-based comparison
             # Guard: only update in-place if buffer has data and size > 0
             if time_buf.size > 0 and last_ts is not None and abs(last_ts - timestamp) < 1.0:
-                # Update current candle (overwrite last)
-                # RingBuffer doesn't support random access write easily, 
-                # but we can hack it by appending (which advances) then checking logic?
-                # Actually, easier to just manually set the last index in the underlying array
-                # IF we expose it. But for purity, let's add `update_last` to RingBuffer?
-                # Or just direct access since we are in the same module ecosystem.
-                # Accessing protected _data is cleaner for performance here.
-                
-                # We need the physical index of the last element
+                # Update current candle in-place via direct buffer access.
                 pos = self._buffers[pair][0].position
-                idx = (pos - 1) % self.max_bars
-                
-                for col, val in values.items():
-                    self._buffers[pair][col]._data[idx] = val
+                if pos == 0 and self._buffers[pair][0].size == 0:
+                    # Buffer is empty — fall through to append path
+                    pass
+                else:
+                    idx = (pos - 1) % self.max_bars
+                    for col, val in values.items():
+                        buf = self._buffers[pair][col]
+                        if idx < len(buf._data):
+                            buf._data[idx] = val
             else:
                 # Append new candle
                 for col, val in values.items():
@@ -225,13 +223,15 @@ class MarketDataCache:
                 low_buf = self._buffers[pair][self.COL_LOW]
 
                 idx = (close_buf.position - 1) % close_buf.capacity
+                if idx >= len(close_buf._data):
+                    return
 
                 close_buf._data[idx] = price
 
                 # Update High/Low
-                if price > high_buf._data[idx]:
+                if idx < len(high_buf._data) and price > high_buf._data[idx]:
                     high_buf._data[idx] = price
-                if price < low_buf._data[idx]:
+                if idx < len(low_buf._data) and price < low_buf._data[idx]:
                     low_buf._data[idx] = price
 
                 self._last_update[pair] = time.time()
@@ -321,12 +321,17 @@ class MarketDataCache:
         return df
 
     def get_latest_price(self, pair: str) -> float:
-        """Get the most recent close price."""
+        """Get the most recent close price. Returns 0.0 for NaN/Inf."""
         if pair in self._buffers and self._buffers[pair][self.COL_CLOSE].size > 0:
-            return self._buffers[pair][self.COL_CLOSE].get_last()
-        
+            v = self._buffers[pair][self.COL_CLOSE].get_last()
+            return v if math.isfinite(v) else 0.0
+
         ticker = self._tickers.get(pair, {})
-        return float(ticker.get("last", 0))
+        try:
+            v = float(ticker.get("last", 0))
+            return v if math.isfinite(v) else 0.0
+        except (TypeError, ValueError):
+            return 0.0
 
     def get_ticker(self, pair: str) -> Dict[str, Any]:
         return self._tickers.get(pair, {})
@@ -345,24 +350,31 @@ class MarketDataCache:
             def _level_price(level: Any) -> float:
                 try:
                     if isinstance(level, (list, tuple)):
-                        return float(level[0]) if len(level) > 0 else 0.0
-                    if isinstance(level, dict):
+                        v = float(level[0]) if len(level) > 0 else 0.0
+                    elif isinstance(level, dict):
+                        v = 0.0
                         for key in ("price", "p", "rate"):
                             if key in level:
-                                return float(level[key])
-                        if 0 in level:
-                            return float(level[0])
-                        if "0" in level:
-                            return float(level["0"])
+                                v = float(level[key])
+                                break
+                        if v == 0.0:
+                            if 0 in level:
+                                v = float(level[0])
+                            elif "0" in level:
+                                v = float(level["0"])
+                    else:
+                        v = 0.0
+                    return v if math.isfinite(v) else 0.0
                 except (ValueError, TypeError, IndexError):
                     return 0.0
-                return 0.0
 
             best_bid = _level_price(bids[0])
             best_ask = _level_price(asks[0])
             if best_bid > 0 and best_ask > 0:
                 midpoint = (best_ask + best_bid) / 2
-                return (best_ask - best_bid) / midpoint
+                if midpoint > 0:
+                    spread = (best_ask - best_bid) / midpoint
+                    return spread if math.isfinite(spread) else 0.0
         return 0.0
 
     # ------------------------------------------------------------------

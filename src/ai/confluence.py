@@ -13,6 +13,7 @@ Imbalance as a final confirmation filter.
 from __future__ import annotations
 
 import asyncio
+import math
 import traceback
 import time
 from datetime import datetime, timezone
@@ -661,7 +662,7 @@ class ConfluenceDetector:
         else:
             opposing_count = sum(1 for s in long_signals if s.strategy_name != "order_book")
         if opposing_count > 0:
-            opposition_penalty = min(opposing_count * 0.08, 0.25)
+            opposition_penalty = min(opposing_count * 0.04, 0.12)
             weighted_confidence = max(weighted_confidence - opposition_penalty, 0.0)
 
         # Legacy: when OBI is not counted as confluence, still add small confidence bump when it agrees
@@ -693,11 +694,13 @@ class ConfluenceDetector:
             sl_values = [s.stop_loss for s in directional_signals if s.stop_loss > 0]
             tp_values = [s.take_profit for s in directional_signals if s.take_profit > 0]
             if direction == SignalDirection.LONG:
-                stop_loss = max(sl_values) if sl_values else 0
-                take_profit = min(tp_values) if tp_values else 0
-            else:
+                # LONG: widest stop (min SL = furthest below entry) + furthest TP (max)
                 stop_loss = min(sl_values) if sl_values else 0
                 take_profit = max(tp_values) if tp_values else 0
+            else:
+                # SHORT: widest stop (max SL = furthest above entry) + furthest TP (min)
+                stop_loss = max(sl_values) if sl_values else 0
+                take_profit = min(tp_values) if tp_values else 0
         else:
             stop_loss = 0
             take_profit = 0
@@ -799,7 +802,11 @@ class ConfluenceDetector:
         atr_vals = indicator_cache.atr(14)
 
         adx_val = float(adx_vals[-1]) if len(adx_vals) else 0.0
+        if not math.isfinite(adx_val):
+            adx_val = 0.0
         atr_val = float(atr_vals[-1]) if len(atr_vals) else 0.0
+        if not math.isfinite(atr_val):
+            atr_val = 0.0
         price = float(closes[-1]) if len(closes) else 0.0
         atr_pct = (atr_val / price) if price > 0 else 0.0
 
