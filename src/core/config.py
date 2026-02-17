@@ -532,6 +532,43 @@ def get_config() -> BotConfig:
     return ConfigManager().config
 
 
+def save_to_yaml(
+    updates: Dict[str, Dict[str, Any]],
+    config_path: str = "config/config.yaml",
+) -> None:
+    """
+    Persist settings changes to config.yaml, preserving comments and formatting.
+
+    ``updates`` is a nested dict like ``{"ai": {"confluence_threshold": 3}, "risk": {"max_risk_per_trade": 0.01}}``.
+    Only the specified keys are overwritten; everything else is untouched.
+    """
+    from ruamel.yaml import YAML
+
+    ryaml = YAML()
+    ryaml.preserve_quotes = True
+
+    config_file = Path(config_path)
+    if config_file.exists():
+        with open(config_file, "r") as f:
+            doc = ryaml.load(f) or {}
+    else:
+        doc = {}
+
+    for section, kvs in updates.items():
+        if not isinstance(kvs, dict):
+            continue
+        if section not in doc or not isinstance(doc[section], dict):
+            doc[section] = {}
+        for key, value in kvs.items():
+            doc[section][key] = value
+
+    tmp = config_file.with_suffix(".yaml.tmp")
+    with open(tmp, "w") as f:
+        ryaml.dump(doc, f)
+    import os
+    os.replace(tmp, config_file)
+
+
 def load_config_with_overrides(
     config_path: str = "config/config.yaml",
     overrides: Optional[Dict[str, Any]] = None,

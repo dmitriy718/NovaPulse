@@ -396,11 +396,11 @@ class RiskManager:
                 # Trail from the highest price
                 new_sl = state.trailing_high * (1 - self.trailing_step_pct)
 
-                # Acceleration: tighter trail on larger profits (larger multiplier = closer stop)
+                # Acceleration: tighter trail on larger profits (smaller multiplier = closer stop)
                 if pnl_pct > 0.05:  # 5%+ profit — lock in gains aggressively
-                    new_sl = state.trailing_high * (1 - self.trailing_step_pct * 3.0)
+                    new_sl = state.trailing_high * (1 - self.trailing_step_pct * 0.3)
                 elif pnl_pct > 0.03:  # 3%+ profit
-                    new_sl = state.trailing_high * (1 - self.trailing_step_pct * 2.0)
+                    new_sl = state.trailing_high * (1 - self.trailing_step_pct * 0.5)
 
                 # Only move stop up, never down
                 if new_sl > state.current_sl:
@@ -420,11 +420,11 @@ class RiskManager:
                 state.trailing_activated = True
                 new_sl = state.trailing_low * (1 + self.trailing_step_pct)
 
-                # Acceleration: tighter trail on larger profits (larger multiplier = closer stop)
+                # Acceleration: tighter trail on larger profits (smaller multiplier = closer stop)
                 if pnl_pct > 0.05:  # 5%+ profit — lock in gains aggressively
-                    new_sl = state.trailing_low * (1 + self.trailing_step_pct * 3.0)
+                    new_sl = state.trailing_low * (1 + self.trailing_step_pct * 0.3)
                 elif pnl_pct > 0.03:
-                    new_sl = state.trailing_low * (1 + self.trailing_step_pct * 2.0)
+                    new_sl = state.trailing_low * (1 + self.trailing_step_pct * 0.5)
 
                 if new_sl < state.current_sl:
                     state.current_sl = new_sl
@@ -601,16 +601,16 @@ class RiskManager:
 
         drawdown = (self._peak_bankroll - self.current_bankroll) / self._peak_bankroll
 
-        if drawdown < 0.02:
+        if drawdown < 0.03:
             return 1.0
-        elif drawdown < 0.05:
-            return 0.75
-        elif drawdown < 0.10:
-            return 0.5
-        elif drawdown < 0.15:
-            return 0.25
+        elif drawdown < 0.07:
+            return 0.80
+        elif drawdown < 0.12:
+            return 0.60
+        elif drawdown < 0.18:
+            return 0.35
         else:
-            return 0.1  # Minimal sizing during severe drawdown
+            return 0.15  # Reduced sizing during severe drawdown (still allows recovery)
 
     def _get_remaining_capacity(self) -> float:
         """Calculate remaining position capacity in USD."""

@@ -107,12 +107,23 @@ class KrakenWebSocketClient:
                 if not self._running:
                     break
 
-                delay = min(2 ** min(self._reconnect_count, 6), 60)
+                # Kraken 1013 = "Market data unavailable" — use longer backoff
+                is_1013 = (
+                    isinstance(e, ConnectionClosed)
+                    and e.rcvd
+                    and e.rcvd.code == 1013
+                )
+                if is_1013:
+                    delay = min(15 * self._reconnect_count, 120)  # 15, 30, 45… up to 120s
+                else:
+                    delay = min(2 ** min(self._reconnect_count, 6), 60)
+
                 logger.warning(
                     "WebSocket disconnected, reconnecting",
                     error=str(e),
                     attempt=self._reconnect_count,
-                    delay=delay
+                    delay=delay,
+                    is_1013=is_1013,
                 )
                 await asyncio.sleep(delay)
 
@@ -251,15 +262,38 @@ class KrakenWebSocketClient:
                 logger.error("Unsubscribe failed", channel=channel, error=str(e))
 
     async def _resubscribe(self) -> None:
-        """Resubscribe to all channels after reconnection."""
+        """Resubscribe to all channels after reconnection with retry on 1013."""
+        max_retries = 4
         for sub_key, params in self._subscriptions.items():
-            if self._ws:
-                message = {"method": "subscribe", "params": params}
+            if not self._ws:
+                break
+            message = {"method": "subscribe", "params": params}
+            for attempt in range(1, max_retries + 1):
                 try:
                     await self._ws.send(json.dumps(message))
                     logger.debug("Resubscribed", channel=sub_key)
+                    # Stagger subscriptions to avoid overwhelming Kraken
+                    await asyncio.sleep(0.5)
+                    break
+                except ConnectionClosed as e:
+                    # 1013 = "Try Again Later" — Kraken market data temporarily unavailable
+                    if e.rcvd and e.rcvd.code == 1013 and attempt < max_retries:
+                        delay = 2 ** attempt  # 2, 4, 8s backoff
+                        logger.warning(
+                            "Kraken 1013 during resubscription, backing off",
+                            channel=sub_key,
+                            attempt=attempt,
+                            retry_in=delay,
+                        )
+                        await asyncio.sleep(delay)
+                        # Connection is dead after 1013 — must re-raise to trigger full reconnect
+                        if not self._ws or self._ws.closed:
+                            raise
+                    else:
+                        raise  # Let connect() loop handle reconnection
                 except Exception as e:
                     logger.error("Resubscription failed", channel=sub_key, error=str(e))
+                    raise  # Let connect() loop handle reconnection
 
     # ------------------------------------------------------------------
     # Callback Registration

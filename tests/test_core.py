@@ -402,13 +402,13 @@ class TestRiskManager:
         rm.current_bankroll = 10000
         assert rm._get_drawdown_factor() == 1.0
 
-        # 3% drawdown -> 0.75
-        rm.current_bankroll = 9700
-        assert rm._get_drawdown_factor() == 0.75
+        # 4% drawdown -> 0.80
+        rm.current_bankroll = 9600
+        assert rm._get_drawdown_factor() == 0.80
 
-        # 7% drawdown -> 0.5
-        rm.current_bankroll = 9300
-        assert rm._get_drawdown_factor() == 0.5
+        # 8% drawdown -> 0.60
+        rm.current_bankroll = 9200
+        assert rm._get_drawdown_factor() == 0.60
 
 
 # ---- Database Tests ----

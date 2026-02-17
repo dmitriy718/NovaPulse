@@ -949,8 +949,9 @@ class DashboardServer:
                             gross = (cp - pos["entry_price"]) * pos["quantity"]
                         else:
                             gross = (pos["entry_price"] - cp) * pos["quantity"]
+                        est_entry_fee = abs(pos["entry_price"] * pos["quantity"]) * fee_rate
                         est_exit_fee = abs(cp * pos["quantity"]) * fee_rate
-                        unrealized += (gross - est_exit_fee)
+                        unrealized += (gross - est_entry_fee - est_exit_fee)
 
             stats["unrealized_pnl"] = round(unrealized, 2)
             stats["total_equity"] = round(
@@ -1086,21 +1087,88 @@ class DashboardServer:
                         agg[k] = v
             return agg
 
-        # ---- Settings (AI / confluence options) ----
+        # ---- Settings (all tunable parameters) ----
+        def _read_all_settings(engine) -> dict:
+            """Read all tunable settings from engine runtime state."""
+            cfg = engine.config
+            return {
+                "ai": {
+                    "confluence_threshold": cfg.ai.confluence_threshold,
+                    "min_confidence": cfg.ai.min_confidence,
+                    "min_risk_reward_ratio": cfg.ai.min_risk_reward_ratio,
+                    "obi_counts_as_confluence": cfg.ai.obi_counts_as_confluence,
+                    "obi_weight": cfg.ai.obi_weight,
+                    "allow_keltner_solo": cfg.ai.allow_keltner_solo,
+                    "allow_any_solo": cfg.ai.allow_any_solo,
+                    "keltner_solo_min_confidence": cfg.ai.keltner_solo_min_confidence,
+                    "solo_min_confidence": cfg.ai.solo_min_confidence,
+                },
+                "risk": {
+                    "max_risk_per_trade": cfg.risk.max_risk_per_trade,
+                    "max_daily_loss": cfg.risk.max_daily_loss,
+                    "max_position_usd": cfg.risk.max_position_usd,
+                    "atr_multiplier_sl": cfg.risk.atr_multiplier_sl,
+                    "atr_multiplier_tp": cfg.risk.atr_multiplier_tp,
+                    "trailing_activation_pct": cfg.risk.trailing_activation_pct,
+                    "trailing_step_pct": cfg.risk.trailing_step_pct,
+                    "breakeven_activation_pct": cfg.risk.breakeven_activation_pct,
+                    "kelly_fraction": cfg.risk.kelly_fraction,
+                    "global_cooldown_seconds_on_loss": cfg.risk.global_cooldown_seconds_on_loss,
+                },
+                "trading": {
+                    "scan_interval_seconds": cfg.trading.scan_interval_seconds,
+                    "max_concurrent_positions": cfg.trading.max_concurrent_positions,
+                    "cooldown_seconds": cfg.trading.cooldown_seconds,
+                    "max_spread_pct": cfg.trading.max_spread_pct,
+                    "quiet_hours_utc": cfg.trading.quiet_hours_utc,
+                },
+                "ml": {
+                    "retrain_interval_hours": cfg.ml.retrain_interval_hours,
+                    "min_samples": cfg.ml.min_samples,
+                },
+            }
+
+        # Validation rules: (type, min, max) — None means no bound
+        _SETTINGS_VALIDATORS: dict = {
+            "ai.confluence_threshold": (int, 2, 8),
+            "ai.min_confidence": (float, 0.45, 0.75),
+            "ai.min_risk_reward_ratio": (float, 0.5, 5.0),
+            "ai.obi_counts_as_confluence": (bool, None, None),
+            "ai.obi_weight": (float, 0.0, 1.0),
+            "ai.allow_keltner_solo": (bool, None, None),
+            "ai.allow_any_solo": (bool, None, None),
+            "ai.keltner_solo_min_confidence": (float, 0.50, 0.90),
+            "ai.solo_min_confidence": (float, 0.50, 0.90),
+            "risk.max_risk_per_trade": (float, 0.001, 0.10),
+            "risk.max_daily_loss": (float, 0.01, 0.20),
+            "risk.max_position_usd": (float, 10, 50000),
+            "risk.atr_multiplier_sl": (float, 0.5, 5.0),
+            "risk.atr_multiplier_tp": (float, 0.5, 10.0),
+            "risk.trailing_activation_pct": (float, 0.005, 0.10),
+            "risk.trailing_step_pct": (float, 0.001, 0.05),
+            "risk.breakeven_activation_pct": (float, 0.005, 0.10),
+            "risk.kelly_fraction": (float, 0.05, 0.50),
+            "risk.global_cooldown_seconds_on_loss": (int, 0, 3600),
+            "trading.scan_interval_seconds": (int, 5, 300),
+            "trading.max_concurrent_positions": (int, 1, 20),
+            "trading.cooldown_seconds": (int, 0, 3600),
+            "trading.max_spread_pct": (float, 0.0, 0.01),
+            "trading.quiet_hours_utc": (list, None, None),
+            "ml.retrain_interval_hours": (int, 1, 720),
+            "ml.min_samples": (int, 100, 100000),
+        }
+
         @self.app.get("/api/v1/settings")
         async def get_settings(
             request: Request,
             x_api_key: str = Header(default="", alias="X-API-Key"),
         ):
-            """Get settings used by the dashboard (e.g. Weighted Order Book)."""
+            """Get all tunable settings with current runtime values."""
             await _require_read_access(request, x_api_key=x_api_key)
             primary = self._get_primary_engine()
             if not primary:
-                return {"weighted_order_book": False}
-            c = getattr(primary, "confluence", None)
-            return {
-                "weighted_order_book": getattr(c, "obi_counts_as_confluence", False),
-            }
+                return {}
+            return _read_all_settings(primary)
 
         @self.app.patch("/api/v1/settings")
         async def patch_settings(
@@ -1109,17 +1177,106 @@ class DashboardServer:
             x_api_key: str = Header(default="", alias="X-API-Key"),
             x_csrf_token: str = Header(default="", alias="X-CSRF-Token"),
         ):
-            """Update settings at runtime (e.g. Weighted Order Book). Takes effect immediately; for persistence set config.yaml and restart."""
+            """Update settings at runtime and persist to config.yaml."""
             await _require_control_access(request, x_api_key=x_api_key, x_csrf_token=x_csrf_token)
             primary = self._get_primary_engine()
             if not primary:
                 raise HTTPException(status_code=503, detail="Bot not running")
-            c = getattr(primary, "confluence", None)
-            if not c:
-                raise HTTPException(status_code=503, detail="Confluence not available")
-            if "weighted_order_book" in body:
-                c.obi_counts_as_confluence = bool(body["weighted_order_book"])
-            return {"weighted_order_book": c.obi_counts_as_confluence}
+
+            cfg = primary.config
+            yaml_updates: dict = {}
+            changed: list = []
+
+            for section_key, section_values in body.items():
+                if not isinstance(section_values, dict):
+                    continue
+                for key, value in section_values.items():
+                    dotpath = f"{section_key}.{key}"
+                    validator = _SETTINGS_VALIDATORS.get(dotpath)
+                    if validator is None:
+                        continue  # Unknown setting, skip
+
+                    vtype, vmin, vmax = validator
+
+                    # Type coercion + validation
+                    try:
+                        if vtype is bool:
+                            value = bool(value)
+                        elif vtype is int:
+                            value = int(value)
+                        elif vtype is float:
+                            value = float(value)
+                        elif vtype is list:
+                            if isinstance(value, str):
+                                value = [int(x.strip()) for x in value.split(",") if x.strip()] if value.strip() else []
+                            elif not isinstance(value, list):
+                                value = list(value)
+                    except (ValueError, TypeError):
+                        raise HTTPException(status_code=400, detail=f"Invalid type for {dotpath}")
+
+                    if vmin is not None and not isinstance(value, (bool, list)) and value < vmin:
+                        raise HTTPException(status_code=400, detail=f"{dotpath} must be >= {vmin}")
+                    if vmax is not None and not isinstance(value, (bool, list)) and value > vmax:
+                        raise HTTPException(status_code=400, detail=f"{dotpath} must be <= {vmax}")
+
+                    # Apply to runtime config model
+                    section_obj = getattr(cfg, section_key, None)
+                    if section_obj and hasattr(section_obj, key):
+                        setattr(section_obj, key, value)
+                        changed.append(dotpath)
+
+                    # Stage for YAML persistence
+                    if section_key not in yaml_updates:
+                        yaml_updates[section_key] = {}
+                    yaml_updates[section_key][key] = value
+
+            # Apply to live engine subsystems
+            if any(k.startswith("ai.") for k in changed):
+                confluence = getattr(primary, "confluence", None)
+                if confluence:
+                    confluence.obi_counts_as_confluence = cfg.ai.obi_counts_as_confluence
+                    confluence.obi_weight = cfg.ai.obi_weight
+                    confluence.confluence_threshold = cfg.ai.confluence_threshold
+                    confluence.min_confidence = cfg.ai.min_confidence
+
+            if any(k.startswith("risk.") for k in changed):
+                rm = getattr(primary, "risk_manager", None)
+                if rm:
+                    rm.max_risk_per_trade = cfg.risk.max_risk_per_trade
+                    rm.max_daily_loss = cfg.risk.max_daily_loss
+                    rm.max_position_usd = cfg.risk.max_position_usd
+                    rm.atr_multiplier_sl = cfg.risk.atr_multiplier_sl
+                    rm.atr_multiplier_tp = cfg.risk.atr_multiplier_tp
+                    rm.trailing_activation_pct = cfg.risk.trailing_activation_pct
+                    rm.trailing_step_pct = cfg.risk.trailing_step_pct
+                    rm.breakeven_activation_pct = cfg.risk.breakeven_activation_pct
+                    rm.kelly_fraction = cfg.risk.kelly_fraction
+                    rm.global_cooldown_seconds_on_loss = cfg.risk.global_cooldown_seconds_on_loss
+
+            if any(k.startswith("trading.") for k in changed):
+                primary.scan_interval = cfg.trading.scan_interval_seconds
+
+            # Persist to config.yaml
+            if yaml_updates:
+                try:
+                    from src.core.config import save_to_yaml
+                    save_to_yaml(yaml_updates)
+                except Exception as e:
+                    logger.warning("Settings YAML save failed (runtime still applied)", error=repr(e))
+
+            # Audit log
+            if changed:
+                try:
+                    await primary.db.log_thought(
+                        "system",
+                        f"Settings updated via dashboard: {', '.join(changed)}",
+                        severity="info",
+                        tenant_id=getattr(primary, "tenant_id", "default"),
+                    )
+                except Exception:
+                    pass
+
+            return _read_all_settings(primary)
 
         # ---- Billing (Stripe) ----
         @self.app.post("/api/v1/billing/checkout")
@@ -1388,11 +1545,13 @@ class DashboardServer:
                             gross = (cp - pos["entry_price"]) * pos["quantity"]
                         else:
                             gross = (pos["entry_price"] - cp) * pos["quantity"]
+                        est_entry_fee = abs(pos["entry_price"] * pos["quantity"]) * fee_rate
                         est_exit_fee = abs(cp * pos["quantity"]) * fee_rate
-                        pos["unrealized_pnl"] = round(gross - est_exit_fee, 2)
+                        net = gross - est_entry_fee - est_exit_fee
+                        pos["unrealized_pnl"] = round(net, 2)
                         pos["current_price"] = cp
                         pos["unrealized_pnl_pct"] = (
-                            (gross - est_exit_fee) / notional
+                            net / notional
                         ) if notional > 0 else 0
                     pos["exchange"] = getattr(eng, "exchange_name", "unknown")
                 positions.extend(rows)
@@ -1436,6 +1595,19 @@ class DashboardServer:
                 [eng.risk_manager.get_risk_report() for eng in engines if getattr(eng, "risk_manager", None)]
             )
 
+            # Strategy / algorithm stats
+            if len(engines) == 1:
+                strategies = engines[0].get_algorithm_stats()
+            else:
+                strategies = []
+                for eng in engines:
+                    stats_items = eng.get_algorithm_stats()
+                    for s in stats_items:
+                        s = dict(s)
+                        s["exchange"] = getattr(eng, "exchange_name", "unknown")
+                        strategies.append(s)
+
+
             # Calculate total unrealized P&L from open positions
             total_unrealized = sum(p.get("unrealized_pnl", 0) for p in positions)
             performance["unrealized_pnl"] = round(total_unrealized, 2)
@@ -1452,6 +1624,7 @@ class DashboardServer:
                     "thoughts": thoughts,
                     "scanner": scanner_data,
                     "risk": risk,
+                    "strategies": strategies,
                     "status": {
                         "running": any(getattr(e, "_running", False) for e in engines),
                         "paused": all(getattr(e, "_trading_paused", False) for e in engines),

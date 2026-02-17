@@ -162,18 +162,14 @@
             </div>
         </section>
 
-        <!-- Settings -->
-        <section class="glass-card settings-card">
+        <!-- Settings Launcher -->
+        <section class="glass-card settings-card settings-launcher" onclick="openSettingsModal()">
             <div class="card-header">
                 <h2>⚙️ SETTINGS</h2>
+                <span class="settings-open-hint">CLICK TO CONFIGURE</span>
             </div>
             <div class="settings-grid">
-                <label class="settings-item checkbox-item">
-                    <input type="checkbox" id="weightedOrderBook" />
-                    <span>Weighted Order Book</span>
-                </label>
-                <p class="settings-hint" id="weightedOrderBookHint">When on, order book counts as heavy confluence (OBI + 1 strategy = tradable).</p>
-                <p class="settings-hint">Auth uses an httpOnly cookie session; no tokens are stored in localStorage.</p>
+                <p class="settings-hint">AI, Risk, Trading & ML parameters. Changes are applied immediately and saved permanently.</p>
             </div>
         </section>
 
@@ -214,6 +210,35 @@
     </main>
 
     <div id="algoTooltip" class="algo-tooltip hidden"></div>
+
+    <!-- Settings Modal Overlay -->
+    <div id="settingsOverlay" class="settings-modal-overlay hidden" onclick="if(event.target===this)closeSettingsModal()">
+        <div class="settings-modal">
+            <div class="settings-modal-header">
+                <h2>⚙️ CONFIGURATION</h2>
+                <button class="settings-close-btn" onclick="closeSettingsModal()">&times;</button>
+            </div>
+            <div class="settings-tabs">
+                <button class="settings-tab active" data-tab="ai" onclick="switchSettingsTab('ai')">AI & CONFLUENCE</button>
+                <button class="settings-tab" data-tab="risk" onclick="switchSettingsTab('risk')">RISK</button>
+                <button class="settings-tab" data-tab="trading" onclick="switchSettingsTab('trading')">TRADING</button>
+                <button class="settings-tab" data-tab="ml" onclick="switchSettingsTab('ml')">ML / LEARNING</button>
+            </div>
+            <div class="settings-modal-body" id="settingsModalBody">
+                <!-- Rendered dynamically by JS -->
+            </div>
+            <div class="settings-modal-footer">
+                <span class="settings-status" id="settingsStatus"></span>
+                <div class="settings-footer-btns">
+                    <button class="settings-btn cancel" onclick="closeSettingsModal()">CANCEL</button>
+                    <button class="settings-btn save" id="settingsSaveBtn" onclick="saveSettings()">SAVE</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Settings Toast -->
+    <div id="settingsToast" class="settings-toast hidden"></div>
 
     <script src="/static/js/dashboard.js"></script>
 </body>

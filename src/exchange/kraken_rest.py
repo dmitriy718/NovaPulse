@@ -100,9 +100,13 @@ class KrakenRESTClient:
     # ------------------------------------------------------------------
 
     async def _get_nonce(self) -> int:
-        """Generate a unique nonce with collision prevention."""
+        """Generate a unique nonce with collision prevention.
+
+        Uses microsecond precision to minimize collisions under concurrent access.
+        Falls back to incrementing the last nonce if time hasn't advanced.
+        """
         async with self._nonce_lock:
-            nonce = int(time.time() * 1000)
+            nonce = int(time.time() * 1_000_000)
             if nonce <= self._last_nonce:
                 nonce = self._last_nonce + 1
             self._last_nonce = nonce

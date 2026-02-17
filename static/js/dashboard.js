@@ -103,6 +103,7 @@ function renderUpdate(data) {
     renderThoughts(data.thoughts);
     renderScanner(data.scanner);
     renderRisk(data.risk);
+    if (data.strategies) renderStrategies(data.strategies);
 }
 
 // ---- Status / HUD ----
@@ -353,31 +354,278 @@ function csrfHeaders() {
     return t ? { 'X-CSRF-Token': t } : {};
 }
 
-async function loadSettings() {
-    if (!serverReachable) return;
-    try {
-        const r = await fetch('/api/v1/settings');
-        const d = await r.json();
-        const cb = document.getElementById('weightedOrderBook');
-        if (cb && typeof d.weighted_order_book === 'boolean') cb.checked = d.weighted_order_book;
-    } catch {}
-}
+// ================================================================
+//  Settings Modal — Schema, Load, Render, Save
+// ================================================================
 
-async function saveWeightedOrderBook(checked) {
-    if (!serverReachable) return;
-    try {
-        await fetch('/api/v1/settings', {
-            method: 'PATCH',
-            headers: { 'Content-Type': 'application/json', ...csrfHeaders() },
-            body: JSON.stringify({ weighted_order_book: checked })
-        });
-    } catch {}
+const SETTINGS_SCHEMA = {
+    ai: {
+        label: 'AI & CONFLUENCE',
+        fields: [
+            { key: 'confluence_threshold', label: 'Confluence Threshold', type: 'int', min: 2, max: 8,
+              desc: 'Minimum number of strategies that must agree on a direction before the bot enters a trade.',
+              example: '3 = at least 3 of 8 strategies must signal the same direction' },
+            { key: 'min_confidence', label: 'Min Confidence', type: 'float', min: 0.45, max: 0.75, step: 0.01,
+              desc: 'Minimum blended confidence score (strategy + AI) required to execute a trade.',
+              example: '0.68 = 68% confidence threshold. Lower = more trades but riskier' },
+            { key: 'min_risk_reward_ratio', label: 'Min Risk/Reward Ratio', type: 'float', min: 0.5, max: 5.0, step: 0.1,
+              desc: 'Minimum ratio of take-profit distance to stop-loss distance. Higher = only take trades with better upside.',
+              example: '1.5 = TP must be at least 1.5x the SL distance' },
+            { key: 'obi_counts_as_confluence', label: 'Weighted Order Book', type: 'bool',
+              desc: 'When ON, order-book imbalance counts as a confluence vote (OBI + 1 strategy = tradable).',
+              example: 'ON = more aggressive, uses microstructure data' },
+            { key: 'obi_weight', label: 'OBI Weight', type: 'float', min: 0.0, max: 1.0, step: 0.05,
+              desc: 'Weight of the Order Book Imbalance signal when weighted mode is enabled.',
+              example: '0.4 = OBI contributes 40% of a full confluence vote' },
+            { key: 'allow_keltner_solo', label: 'Allow Keltner Solo', type: 'bool',
+              desc: 'Allow Keltner Channel strategy to open trades by itself, without needing other strategies to agree.',
+              example: 'ON = Keltner can trade alone if confidence is high enough' },
+            { key: 'allow_any_solo', label: 'Allow Any Solo', type: 'bool',
+              desc: 'Allow any single strategy to trade alone without confluence. Use with caution.',
+              example: 'ON = any strategy can trade solo. High risk of false signals' },
+            { key: 'keltner_solo_min_confidence', label: 'Keltner Solo Min Confidence', type: 'float', min: 0.50, max: 0.90, step: 0.01,
+              desc: 'Minimum confidence for Keltner to trade solo (only applies if Keltner solo is enabled).',
+              example: '0.62 = Keltner needs 62%+ confidence to trade alone' },
+            { key: 'solo_min_confidence', label: 'Any Solo Min Confidence', type: 'float', min: 0.50, max: 0.90, step: 0.01,
+              desc: 'Minimum confidence for any strategy to trade solo (only applies if any solo is enabled).',
+              example: '0.67 = single strategy needs 67%+ confidence to trade alone' },
+        ]
+    },
+    risk: {
+        label: 'RISK MANAGEMENT',
+        fields: [
+            { key: 'max_risk_per_trade', label: 'Max Risk Per Trade', type: 'float', min: 0.001, max: 0.10, step: 0.001,
+              desc: 'Fraction of your bankroll risked on each trade. This is the most important risk setting.',
+              example: '0.005 = 0.5% of bankroll. On $10,000, you risk $50 per trade' },
+            { key: 'max_daily_loss', label: 'Max Daily Loss', type: 'float', min: 0.01, max: 0.20, step: 0.01,
+              desc: 'Maximum daily drawdown as a fraction of bankroll. Trading pauses if this limit is hit.',
+              example: '0.05 = 5%. On $10,000, trading stops after $500 daily loss' },
+            { key: 'max_position_usd', label: 'Max Position Size ($)', type: 'float', min: 10, max: 50000, step: 10,
+              desc: 'Maximum USD value of a single position, regardless of other sizing calculations.',
+              example: '$200 = no single position will exceed $200' },
+            { key: 'atr_multiplier_sl', label: 'ATR Multiplier (Stop Loss)', type: 'float', min: 0.5, max: 5.0, step: 0.1,
+              desc: 'How many ATRs (Average True Range) away to place the initial stop-loss.',
+              example: '2.0 = stop-loss is 2x the ATR distance from entry' },
+            { key: 'atr_multiplier_tp', label: 'ATR Multiplier (Take Profit)', type: 'float', min: 0.5, max: 10.0, step: 0.1,
+              desc: 'How many ATRs away to place the take-profit target.',
+              example: '3.0 = take-profit is 3x the ATR distance from entry' },
+            { key: 'trailing_activation_pct', label: 'Trailing Stop Activation', type: 'float', min: 0.005, max: 0.10, step: 0.001,
+              desc: 'Profit percentage needed before the trailing stop activates to lock in gains.',
+              example: '0.018 = trailing stop kicks in after 1.8% profit' },
+            { key: 'trailing_step_pct', label: 'Trailing Step Size', type: 'float', min: 0.001, max: 0.05, step: 0.001,
+              desc: 'How tightly the trailing stop follows price. Smaller = tighter trailing.',
+              example: '0.005 = stop trails 0.5% behind the high-water mark' },
+            { key: 'breakeven_activation_pct', label: 'Breakeven Activation', type: 'float', min: 0.005, max: 0.10, step: 0.001,
+              desc: 'Profit percentage to move stop-loss to breakeven (entry price), eliminating downside.',
+              example: '0.012 = after 1.2% profit, SL moves to entry price' },
+            { key: 'kelly_fraction', label: 'Kelly Fraction', type: 'float', min: 0.05, max: 0.50, step: 0.05,
+              desc: 'Fraction of the Kelly criterion used for position sizing. Lower = more conservative.',
+              example: '0.25 = quarter-Kelly. Full Kelly is too aggressive for most traders' },
+            { key: 'global_cooldown_seconds_on_loss', label: 'Loss Cooldown (seconds)', type: 'int', min: 0, max: 3600,
+              desc: 'Seconds to wait after a losing trade before allowing new entries. Prevents tilt trading.',
+              example: '600 = 10 minute cooldown after each loss' },
+        ]
+    },
+    trading: {
+        label: 'TRADING',
+        fields: [
+            { key: 'scan_interval_seconds', label: 'Scan Interval (seconds)', type: 'int', min: 5, max: 300,
+              desc: 'How often the bot scans all pairs for new trading opportunities.',
+              example: '30 = scan every 30 seconds. Lower = more responsive but more CPU' },
+            { key: 'max_concurrent_positions', label: 'Max Open Positions', type: 'int', min: 1, max: 20,
+              desc: 'Maximum number of positions open at the same time.',
+              example: '5 = never hold more than 5 trades simultaneously' },
+            { key: 'cooldown_seconds', label: 'Strategy Cooldown (seconds)', type: 'int', min: 0, max: 3600,
+              desc: 'Default cooldown per strategy per pair after a trade closes.',
+              example: '600 = wait 10 min before the same strategy can trade the same pair' },
+            { key: 'max_spread_pct', label: 'Max Spread %', type: 'float', min: 0, max: 0.01, step: 0.0001,
+              desc: 'Maximum bid-ask spread allowed to enter a trade. Prevents entries in illiquid conditions.',
+              example: '0.0015 = skip if spread > 0.15%' },
+            { key: 'quiet_hours_utc', label: 'Quiet Hours (UTC)', type: 'text',
+              desc: 'UTC hours when the bot will not open new positions. Comma-separated list.',
+              example: '2,3,4,5 = no new trades between 2:00-5:59 UTC (low liquidity)' },
+        ]
+    },
+    ml: {
+        label: 'ML / LEARNING',
+        fields: [
+            { key: 'retrain_interval_hours', label: 'Retrain Interval (hours)', type: 'int', min: 1, max: 720,
+              desc: 'Hours between full TFLite model retrain cycles. The model learns from all historical trade outcomes.',
+              example: '168 = retrain weekly. Shorter = adapts faster but needs more data' },
+            { key: 'min_samples', label: 'Min Training Samples', type: 'int', min: 100, max: 100000,
+              desc: 'Minimum number of closed trades needed before the system will train/retrain the AI model.',
+              example: '10000 = need 10k labeled trades before first retrain. Lower for faster cold start' },
+        ]
+    }
+};
+
+let currentSettingsData = {};
+let activeSettingsTab = 'ai';
+
+async function loadSettings() {
+    // No-op now; settings are loaded on modal open
 }
 
 function setupSettings() {
-    const cb = document.getElementById('weightedOrderBook');
-    if (!cb) return;
-    cb.addEventListener('change', () => saveWeightedOrderBook(cb.checked));
+    // No-op; modal handles everything
+}
+
+function openSettingsModal() {
+    if (!serverReachable) return;
+    const overlay = document.getElementById('settingsOverlay');
+    const body = document.getElementById('settingsModalBody');
+    const status = document.getElementById('settingsStatus');
+    if (!overlay || !body) return;
+
+    status.textContent = 'Loading...';
+    overlay.classList.remove('hidden');
+    body.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text-dim)">Loading settings...</div>';
+
+    fetch('/api/v1/settings')
+        .then(r => { if (!r.ok) throw new Error(r.status); return r.json(); })
+        .then(data => {
+            currentSettingsData = data;
+            renderAllSettingsTabs(body);
+            switchSettingsTab(activeSettingsTab);
+            status.textContent = '';
+        })
+        .catch(e => {
+            body.innerHTML = '<div style="text-align:center;padding:40px;color:var(--red)">Failed to load settings</div>';
+            status.textContent = '';
+        });
+}
+
+function closeSettingsModal() {
+    const overlay = document.getElementById('settingsOverlay');
+    if (overlay) overlay.classList.add('hidden');
+}
+
+function renderAllSettingsTabs(container) {
+    container.innerHTML = '';
+    for (const [sectionKey, section] of Object.entries(SETTINGS_SCHEMA)) {
+        const sectionDiv = document.createElement('div');
+        sectionDiv.className = 'settings-section';
+        sectionDiv.id = `settings-section-${sectionKey}`;
+
+        const sectionData = currentSettingsData[sectionKey] || {};
+
+        for (const field of section.fields) {
+            const val = sectionData[field.key];
+            sectionDiv.appendChild(renderSettingRow(sectionKey, field, val));
+        }
+        container.appendChild(sectionDiv);
+    }
+}
+
+function renderSettingRow(sectionKey, field, currentValue) {
+    const row = document.createElement('div');
+    row.className = 'setting-row';
+
+    const inputId = `setting-${sectionKey}-${field.key}`;
+
+    let inputHtml;
+    if (field.type === 'bool') {
+        const checked = currentValue ? 'checked' : '';
+        inputHtml = `<label class="setting-toggle">
+            <input type="checkbox" id="${inputId}" ${checked} data-section="${sectionKey}" data-key="${field.key}" data-type="bool">
+            <span class="toggle-slider"></span>
+        </label>`;
+    } else if (field.type === 'text') {
+        const displayVal = Array.isArray(currentValue) ? currentValue.join(', ') : (currentValue || '');
+        inputHtml = `<input class="setting-input wide" type="text" id="${inputId}" value="${escHtml(String(displayVal))}" data-section="${sectionKey}" data-key="${field.key}" data-type="text">`;
+    } else {
+        const step = field.step || (field.type === 'int' ? 1 : 0.01);
+        const v = currentValue != null ? currentValue : '';
+        inputHtml = `<input class="setting-input" type="number" id="${inputId}" value="${v}" min="${field.min}" max="${field.max}" step="${step}" data-section="${sectionKey}" data-key="${field.key}" data-type="${field.type}">`;
+    }
+
+    row.innerHTML = `
+        <div class="setting-row-top">
+            <div>
+                <span class="setting-label">${escHtml(field.label)}</span>
+                <span class="setting-key">${sectionKey}.${field.key}</span>
+            </div>
+            ${inputHtml}
+        </div>
+        <div class="setting-desc">${escHtml(field.desc)}</div>
+        ${field.example ? `<div class="setting-example">${escHtml(field.example)}</div>` : ''}
+    `;
+    return row;
+}
+
+function switchSettingsTab(tabKey) {
+    activeSettingsTab = tabKey;
+    document.querySelectorAll('.settings-tab').forEach(t => {
+        t.classList.toggle('active', t.dataset.tab === tabKey);
+    });
+    document.querySelectorAll('.settings-section').forEach(s => {
+        s.classList.toggle('active', s.id === `settings-section-${tabKey}`);
+    });
+}
+
+async function saveSettings() {
+    if (!serverReachable) return;
+
+    const saveBtn = document.getElementById('settingsSaveBtn');
+    const status = document.getElementById('settingsStatus');
+    if (saveBtn) saveBtn.disabled = true;
+    if (status) status.textContent = 'Saving...';
+
+    // Collect all values from inputs
+    const payload = {};
+    document.querySelectorAll('.settings-section [data-section]').forEach(el => {
+        const section = el.dataset.section;
+        const key = el.dataset.key;
+        const type = el.dataset.type;
+
+        if (!section || !key) return;
+        if (!(section in payload)) payload[section] = {};
+
+        if (type === 'bool') {
+            payload[section][key] = el.checked;
+        } else if (type === 'int') {
+            payload[section][key] = parseInt(el.value, 10);
+        } else if (type === 'float') {
+            payload[section][key] = parseFloat(el.value);
+        } else if (type === 'text') {
+            payload[section][key] = el.value;
+        }
+    });
+
+    try {
+        const r = await fetch('/api/v1/settings', {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json', ...csrfHeaders() },
+            body: JSON.stringify(payload)
+        });
+        if (!r.ok) {
+            const err = await r.json().catch(() => ({}));
+            throw new Error(err.detail || `HTTP ${r.status}`);
+        }
+        const data = await r.json();
+        currentSettingsData = data;
+        if (status) status.textContent = '';
+        showSettingsToast('Settings saved successfully', 'success');
+        closeSettingsModal();
+    } catch (e) {
+        if (status) status.textContent = '';
+        showSettingsToast(e.message || 'Save failed', 'error');
+    } finally {
+        if (saveBtn) saveBtn.disabled = false;
+    }
+}
+
+function showSettingsToast(msg, type) {
+    const toast = document.getElementById('settingsToast');
+    if (!toast) return;
+    toast.textContent = msg;
+    toast.className = `settings-toast ${type}`;
+    // Re-trigger animation
+    toast.style.animation = 'none';
+    toast.offsetHeight; // force reflow
+    toast.style.animation = '';
+    clearTimeout(toast._timer);
+    toast._timer = setTimeout(() => { toast.classList.add('hidden'); }, 3000);
 }
 
 // ---- Controls ----
@@ -499,38 +747,34 @@ function initAlgoTooltip() {
     });
 }
 
-async function fetchStrategyStats() {
-    if (!serverReachable) return;
-    try {
-        const strategies = await (await fetch('/api/v1/strategies')).json();
-        if (!Array.isArray(strategies)) return;
-        for (const s of strategies) {
-            if (!s || !s.name) continue;
-            const row = ensureStrategyRow(s.name);
-            if (!row) continue;
+function renderStrategies(strategies) {
+    if (!Array.isArray(strategies)) return;
+    for (const s of strategies) {
+        if (!s || !s.name) continue;
+        const row = ensureStrategyRow(s.name);
+        if (!row) continue;
 
-            const winRate = Number(s.win_rate);
-            const trades = Number(s.trades);
-            const enabled = s.enabled !== false;
-            const kind = s.kind || 'strategy';
-            const isStrategy = kind === 'strategy';
-            if (s.note) row.item.dataset.note = s.note;
-            else delete row.item.dataset.note;
+        const winRate = Number(s.win_rate);
+        const trades = Number(s.trades);
+        const enabled = s.enabled !== false;
+        const kind = s.kind || 'strategy';
+        const isStrategy = kind === 'strategy';
+        if (s.note) row.item.dataset.note = s.note;
+        else delete row.item.dataset.note;
 
-            if (isStrategy) {
-                if (Number.isFinite(winRate) && trades > 0) {
-                    row.bar.style.width = (Math.max(0, Math.min(winRate, 1)) * 100) + '%';
-                    row.stat.textContent = `${(winRate * 100).toFixed(0)}% (${trades})`;
-                } else {
-                    row.bar.style.width = '0%';
-                    row.stat.textContent = '--';
-                }
+        if (isStrategy) {
+            if (Number.isFinite(winRate) && trades > 0) {
+                row.bar.style.width = (Math.max(0, Math.min(winRate, 1)) * 100) + '%';
+                row.stat.textContent = `${(winRate * 100).toFixed(0)}% (${trades})`;
             } else {
-                row.bar.style.width = enabled ? '100%' : '0%';
-                row.stat.textContent = enabled ? 'ON' : 'OFF';
+                row.bar.style.width = '0%';
+                row.stat.textContent = '--';
             }
+        } else {
+            row.bar.style.width = enabled ? '100%' : '0%';
+            row.stat.textContent = enabled ? 'ON' : 'OFF';
         }
-    } catch {}
+    }
 }
 
 // ---- Utilities ----
@@ -619,8 +863,6 @@ document.addEventListener('DOMContentLoaded', () => {
     // Load settings when server is reachable (after first WS connect)
     setInterval(loadSettings, 15000);
     loadSettings();
-    // Only fetch strategies when server is reachable (gated inside the function)
-    setInterval(fetchStrategyStats, 5000);
     // NO fallback polling — WebSocket is the sole data channel.
-    // Reconnection handles recovery. This eliminates all console spam.
+    // Strategies are now included in the WS update payload.
 });

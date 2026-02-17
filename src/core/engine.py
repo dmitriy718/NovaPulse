@@ -371,6 +371,27 @@ class BotEngine:
             strategy_cooldowns=self.config.trading.strategy_cooldowns_seconds,
             global_cooldown_seconds_on_loss=self.config.risk.global_cooldown_seconds_on_loss,
         )
+        # Sync bankroll with historical P/L from DB so restarts don't
+        # cause a mismatch between the displayed total P/L (from DB) and
+        # the bankroll (which was reset to initial_bankroll).
+        try:
+            hist = await self.db.get_performance_stats(tenant_id=self.tenant_id)
+            historical_pnl = float(hist.get("total_pnl", 0.0) or 0.0)
+            if historical_pnl != 0.0:
+                self.risk_manager.current_bankroll = initial_bankroll + historical_pnl
+                self.risk_manager._peak_bankroll = max(
+                    self.risk_manager._peak_bankroll,
+                    self.risk_manager.current_bankroll,
+                )
+                logger.info(
+                    "Bankroll synced with historical P/L",
+                    initial=initial_bankroll,
+                    historical_pnl=round(historical_pnl, 2),
+                    adjusted_bankroll=round(self.risk_manager.current_bankroll, 2),
+                )
+        except Exception as e:
+            logger.warning("Could not sync bankroll with DB history", error=repr(e))
+
         if self.confluence:
             self.confluence.set_cooldown_checker(
                 self.risk_manager.is_strategy_on_cooldown
