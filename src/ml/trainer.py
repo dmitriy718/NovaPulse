@@ -213,8 +213,8 @@ class ModelTrainer:
             self.min_samples, tenant_id=self.tenant_id
         )
 
-        if len(training_data) < 100:
-            result["message"] = f"Insufficient training data: {len(training_data)} samples (need 100+)"
+        if len(training_data) < 20:
+            result["message"] = f"Insufficient training data: {len(training_data)} samples (need 20+)"
             logger.warning(result["message"])
             return result
 
