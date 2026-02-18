@@ -21,10 +21,15 @@ import numpy as np
 # Round-trip fee (entry + exit). Kraken taker: 0.26% each way
 ROUND_TRIP_FEE_PCT = 0.0052
 
-# Minimum take-profit must be 4x fees to be worth trading
-MIN_TP_FEE_MULTIPLIER = 4.0
-# Slightly wider SL multiplier to avoid getting chopped on noise (was 2.0)
-DEFAULT_SL_MULTIPLIER = 2.25
+# Percentage-based minimum distances.
+# On 1-min candles ATR is ~0.06-0.10% of price — far too small for crypto
+# volatility.  These floors ensure SL/TP survive normal intraday noise
+# regardless of the ATR value.
+MIN_SL_PCT = 0.025   # 2.5% minimum stop-loss distance
+MIN_TP_PCT = 0.050   # 5.0% minimum take-profit distance (R:R floor = 2:1)
+
+# Fee floor: TP must still beat 2x round-trip fees (secondary check)
+MIN_TP_FEE_MULTIPLIER = 2.0
 
 
 def compute_sl_tp(
@@ -33,24 +38,27 @@ def compute_sl_tp(
     round_trip_fee_pct: Optional[float] = None,
 ) -> Tuple[float, float]:
     """
-    Compute stop-loss and take-profit with a fee-aware minimum floor.
-    
-    Ensures TP distance is always at least 3x the round-trip fee cost,
-    so that every winning trade generates meaningful profit after fees.
-    The SL is set proportionally.
+    Compute stop-loss and take-profit with percentage-based minimum floors.
+
+    Uses ATR-based distances when they're wide enough, otherwise falls back
+    to percentage-based minimums so trades survive normal crypto volatility.
     """
     # ATR-based distances
     sl_dist = atr * sl_mult
     tp_dist = atr * tp_mult
 
-    # Fee floor: TP must cover at least 3x round-trip fees
+    # Percentage-based floors — use whichever is WIDER
+    min_sl_dist = price * MIN_SL_PCT
+    min_tp_dist = price * MIN_TP_PCT
+
+    # Fee floor (secondary): TP must beat 2x round-trip fees
     fee_pct = ROUND_TRIP_FEE_PCT if round_trip_fee_pct is None else float(round_trip_fee_pct)
-    min_tp_dist = price * fee_pct * MIN_TP_FEE_MULTIPLIER
-    if tp_dist < min_tp_dist:
-        # Scale both SL and TP up proportionally
-        scale = min_tp_dist / tp_dist if tp_dist > 0 else 10.0
-        sl_dist *= scale
-        tp_dist = min_tp_dist
+    fee_floor = price * fee_pct * MIN_TP_FEE_MULTIPLIER
+    min_tp_dist = max(min_tp_dist, fee_floor)
+
+    # Apply floors independently (no proportional scaling)
+    sl_dist = max(sl_dist, min_sl_dist)
+    tp_dist = max(tp_dist, min_tp_dist)
 
     if direction == "long":
         return (price - sl_dist, price + tp_dist)
