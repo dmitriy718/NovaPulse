@@ -124,6 +124,15 @@ def _apply_env_overrides(config: Dict[str, Any]) -> None:
         "STOCKS_DB_PATH": ("stocks", "db_path"),
         "POLYGON_API_KEY": ("stocks", "polygon_api_key"),
         "POLYGON_BASE_URL": ("stocks", "polygon_base_url"),
+        # 1Password/operator aliases used in deployment vaults.
+        "ALPACA_KEY": ("stocks", "alpaca_api_key"),
+        "ALPACA_SECRET": ("stocks", "alpaca_api_secret"),
+        "ALPACA_SECRET_KEY": ("stocks", "alpaca_api_secret"),
+        "ALPACA_ENDPOINT": (
+            "stocks",
+            "alpaca_base_url",
+            lambda v: (v or "").rstrip("/").removesuffix("/v2"),
+        ),
         "ALPACA_API_KEY": ("stocks", "alpaca_api_key"),
         "ALPACA_API_SECRET": ("stocks", "alpaca_api_secret"),
         "ALPACA_BASE_URL": ("stocks", "alpaca_base_url"),
