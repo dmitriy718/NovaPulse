@@ -15,6 +15,7 @@ import asyncio
 import secrets
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
@@ -44,6 +45,7 @@ class CoinbaseRESTClient:
 
     DEFAULT_REST_URL = "https://api.coinbase.com"
     DEFAULT_SANDBOX_URL = "https://api-sandbox.coinbase.com"
+    DEFAULT_PUBLIC_MD_URL = "https://api.exchange.coinbase.com"
 
     def __init__(
         self,
@@ -252,13 +254,24 @@ class CoinbaseRESTClient:
             "end": str(end_ts),
             "granularity": granularity,
         }
-        data = await self._request(
-            "GET",
-            path,
-            params=params,
-            authenticated=bool(self._auth_config),
-            use_market_client=True,
-        )
+        try:
+            data = await self._request(
+                "GET",
+                path,
+                params=params,
+                authenticated=bool(self._auth_config),
+                use_market_client=True,
+            )
+        except httpx.HTTPStatusError as e:
+            # In paper mode, credentials may be absent/rotated. Keep market data
+            # flowing via Coinbase Exchange public candles endpoint.
+            if e.response is not None and e.response.status_code == 401:
+                logger.warning(
+                    "Coinbase brokerage candles unauthorized, falling back to public endpoint",
+                    pair=pair,
+                )
+                return await self._get_ohlc_public(pair, interval, start_ts, end_ts)
+            raise
         candles = data.get("candles", []) if isinstance(data, dict) else []
         ohlc: List[List[Any]] = []
         for c in candles:
@@ -270,6 +283,45 @@ class CoinbaseRESTClient:
             cl = c.get("close")
             v = c.get("volume", 0)
             ohlc.append([ts, o, h, l, cl, 0, v, 0])
+        ohlc.sort(key=lambda x: float(x[0]) if x and x[0] is not None else 0)
+        return ohlc
+
+    async def _get_ohlc_public(
+        self,
+        pair: str,
+        interval: int,
+        start_ts: int,
+        end_ts: int,
+    ) -> List[List[Any]]:
+        product_id = self._pair_to_product_id(pair)
+        # Coinbase Exchange public candles endpoint supports up to 300 points.
+        max_public_candles = 300
+        span = max(60, int(interval * 60))
+        max_span = span * max_public_candles
+        if (end_ts - start_ts) > max_span:
+            start_ts = end_ts - max_span
+        path = f"/products/{product_id}/candles"
+        params = {
+            "start": datetime.fromtimestamp(start_ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "end": datetime.fromtimestamp(end_ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "granularity": str(span),
+        }
+        async with httpx.AsyncClient(
+            base_url=self.DEFAULT_PUBLIC_MD_URL,
+            timeout=float(self.timeout),
+            headers={"User-Agent": "AITradingBot/3.0"},
+        ) as client:
+            resp = await client.get(path, params=params)
+            resp.raise_for_status()
+            data = resp.json() if resp.content else []
+
+        ohlc: List[List[Any]] = []
+        if isinstance(data, list):
+            for row in data:
+                if not isinstance(row, list) or len(row) < 6:
+                    continue
+                ts, low, high, open_, close, volume = row[:6]
+                ohlc.append([float(ts), open_, high, low, close, 0, volume, 0])
         ohlc.sort(key=lambda x: float(x[0]) if x and x[0] is not None else 0)
         return ohlc
 

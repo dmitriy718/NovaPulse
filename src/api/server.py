@@ -83,19 +83,22 @@ class DashboardServer:
         # Control plane auth:
         # - Cookie session (web UI)
         # - API keys (CLI/automation): separate read vs admin
+        def _read_env_secret(*names: str) -> str:
+            """Return first non-empty, non-op:// placeholder secret value."""
+            for name in names:
+                value = (os.getenv(name, "") or "").strip()
+                if not value:
+                    continue
+                if value.startswith("op://"):
+                    continue
+                return value
+            return ""
+
         # Backward compatibility:
         # - DASHBOARD_SECRET_KEY (legacy) -> DASHBOARD_ADMIN_KEY
         # - DASHBOARD_READONLY_KEY (legacy) -> DASHBOARD_READ_KEY
-        self._admin_key = (
-            os.getenv("DASHBOARD_ADMIN_KEY")
-            or os.getenv("DASHBOARD_SECRET_KEY")
-            or ""
-        ).strip()
-        self._read_key = (
-            os.getenv("DASHBOARD_READ_KEY")
-            or os.getenv("DASHBOARD_READONLY_KEY")
-            or ""
-        ).strip()
+        self._admin_key = _read_env_secret("DASHBOARD_ADMIN_KEY", "DASHBOARD_SECRET_KEY")
+        self._read_key = _read_env_secret("DASHBOARD_READ_KEY", "DASHBOARD_READONLY_KEY")
         self._generated_admin_key = False
         if not self._admin_key:
             self._admin_key = secrets.token_urlsafe(32)
