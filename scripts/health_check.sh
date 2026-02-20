@@ -122,6 +122,8 @@ get_db_stats_host() {
 from pathlib import Path
 import os
 import sqlite3
+import base64
+import json
 from src.core.config import ConfigManager
 from src.core.multi_engine import resolve_db_path, resolve_trading_accounts
 
@@ -131,7 +133,8 @@ accounts = resolve_trading_accounts(cfg.exchange.name, getattr(cfg.app, "trading
 if not accounts:
     accounts = [{"account_id": getattr(cfg.app, "account_id", "default"), "exchange": (cfg.exchange.name or "kraken")}]
 multi = len(accounts) > 1
-paths = []
+path_specs = []
+seen_paths = set()
 for spec in accounts:
     ex = str(spec.get("exchange") or cfg.exchange.name or "kraken").strip().lower()
     account_id = str(spec.get("account_id") or "default").strip().lower()
@@ -139,46 +142,81 @@ for spec in accounts:
     p = Path(resolved)
     if not p.is_absolute():
         p = (Path.cwd() / p).resolve()
-    if str(p) not in paths:
-        paths.append(str(p))
+    pkey = str(p)
+    if pkey in seen_paths:
+        continue
+    seen_paths.add(pkey)
+    path_specs.append((pkey, account_id))
 
-initial_bankroll = float(os.environ.get("INITIAL_BANKROLL", "10000") or 10000)
+def _default_initial_bankroll() -> float:
+    v = float(getattr(cfg.risk, "initial_bankroll", 0.0) or 0.0)
+    return v if v > 0 else 10000.0
+
+def _account_initial_bankroll(account_id: str) -> float:
+    if account_id and account_id != "default":
+        prefix = "".join(ch if ch.isalnum() else "_" for ch in account_id.upper())
+        scoped_key = f"{prefix}_INITIAL_BANKROLL"
+        scoped_raw = (os.getenv(scoped_key) or "").strip()
+        if scoped_raw:
+            try:
+                scoped_val = float(scoped_raw)
+                if scoped_val > 0:
+                    return scoped_val
+            except Exception:
+                pass
+    shared_raw = (os.getenv("INITIAL_BANKROLL") or "").strip()
+    if shared_raw:
+        try:
+            shared_val = float(shared_raw)
+            if shared_val > 0:
+                return shared_val
+        except Exception:
+            pass
+    return _default_initial_bankroll()
+
 total = max_id = open_positions = 0
 win_rate = 0.0
 drawdown_pnl = 0.0
 drawdown_pct = 0.0
 streak_label = "N/A"
 closed_rows = []
+max_ids = {}
+db_initial = {}
 
-for db in paths:
+for db, account_id in path_specs:
     if not os.path.exists(db):
         continue
+    db_initial[db] = _account_initial_bankroll(account_id)
     conn = sqlite3.connect(db, timeout=5)
     cur = conn.cursor()
     cur.execute("select count(*) from trades")
     total += int(cur.fetchone()[0] or 0)
     cur.execute("select max(id) from trades")
-    max_id = max(max_id, int(cur.fetchone()[0] or 0))
+    db_max_id = int(cur.fetchone()[0] or 0)
+    max_id = max(max_id, db_max_id)
+    max_ids[db] = db_max_id
     cur.execute("select count(*) from trades where status='open'")
     open_positions += int(cur.fetchone()[0] or 0)
     cur.execute("select coalesce(exit_time, entry_time, ''), pnl from trades where status='closed'")
     for ts, pnl in cur.fetchall():
-        closed_rows.append((str(ts or ""), float(pnl or 0.0)))
+        closed_rows.append((str(ts or ""), float(pnl or 0.0), db))
     conn.close()
 
 closed_rows.sort(key=lambda r: r[0])
 if closed_rows:
-    wins = sum(1 for _, p in closed_rows if p > 0)
+    wins = sum(1 for _, p, _ in closed_rows if p > 0)
     win_rate = wins / max(len(closed_rows), 1)
-    cum = 0.0
-    peak = float(initial_bankroll)
     streak = 0
     streak_type = ''
     last = None
-    for _, p in closed_rows:
+    initial_total = sum(float(v or 0.0) for v in db_initial.values())
+    if initial_total <= 0:
+        initial_total = _default_initial_bankroll()
+    equity = float(initial_total)
+    peak = float(initial_total)
+    for _, p, _ in closed_rows:
         pnl_val = float(p or 0.0)
-        cum += pnl_val
-        equity = initial_bankroll + cum
+        equity += pnl_val
         if equity > peak:
             peak = equity
         win = pnl_val > 0
@@ -191,20 +229,23 @@ if closed_rows:
             streak = 1
             streak_type = 'W' if win else 'L'
         last = win
-    equity_now = initial_bankroll + cum
-    drawdown_pnl = max(0.0, peak - equity_now)
+    drawdown_pnl = max(0.0, peak - equity)
     drawdown_pct = (drawdown_pnl / peak * 100.0) if peak > 0 else 0.0
     if streak_type:
         streak_label = f"{streak_type}{streak}"
 
-print(f"{total} {max_id} {open_positions} {win_rate} {drawdown_pnl} {drawdown_pct} {streak_label} {len(paths)}")
+max_ids_blob = base64.urlsafe_b64encode(
+    json.dumps(max_ids, separators=(",", ":"), sort_keys=True).encode("utf-8")
+).decode("utf-8")
+
+print(f"{total} {max_id} {open_positions} {win_rate} {drawdown_pnl} {drawdown_pct} {streak_label} {len(path_specs)} {max_ids_blob}")
 PY
   ) 2>/dev/null || true
 }
 
 get_db_stats_container() {
   INITIAL_BANKROLL="$BANKROLL" docker exec -i "${container_name}" python - <<'PY' 2>/dev/null || true
-import os, sqlite3
+import os, sqlite3, base64, json
 from pathlib import Path
 
 def resolve_runtime_db_paths():
@@ -218,7 +259,8 @@ def resolve_runtime_db_paths():
         if not accounts:
             accounts = [{"account_id": getattr(cfg.app, "account_id", "default"), "exchange": (cfg.exchange.name or "kraken")}]
         multi = len(accounts) > 1
-        paths = []
+        rows = []
+        seen = set()
         for spec in accounts:
             ex = str(spec.get("exchange") or cfg.exchange.name or "kraken").strip().lower()
             account_id = str(spec.get("account_id") or "default").strip().lower()
@@ -226,32 +268,53 @@ def resolve_runtime_db_paths():
             p = Path(resolved)
             if not p.is_absolute():
                 p = (Path("/app") / p).resolve()
-            if str(p) not in paths:
-                paths.append(str(p))
-        return paths
+            pkey = str(p)
+            if pkey in seen:
+                continue
+            seen.add(pkey)
+            rows.append({"path": pkey, "account_id": account_id})
+        return rows, float(getattr(cfg.risk, "initial_bankroll", 0.0) or 0.0)
     except Exception:
-        return ["/app/data/trading.db"]
+        return [{"path": "/app/data/trading.db", "account_id": "default"}], 0.0
 
-db_paths = resolve_runtime_db_paths()
+path_specs, cfg_initial_bankroll = resolve_runtime_db_paths()
+db_paths = [row["path"] for row in path_specs]
+global_initial_bankroll = 0.0
 initial_bankroll_raw = (os.environ.get("INITIAL_BANKROLL") or "").strip()
-initial_bankroll = 0.0
 if initial_bankroll_raw:
     try:
-        initial_bankroll = float(initial_bankroll_raw)
+        global_initial_bankroll = float(initial_bankroll_raw)
     except Exception:
-        initial_bankroll = 0.0
-if initial_bankroll <= 0:
+        global_initial_bankroll = 0.0
+if global_initial_bankroll <= 0:
+    global_initial_bankroll = float(cfg_initial_bankroll or 0.0)
+if global_initial_bankroll <= 0:
     # Prefer the running config inside the container.
     try:
         import yaml
         cfg_path = "/app/config/config.yaml"
         if os.path.exists(cfg_path):
             cfg = yaml.safe_load(open(cfg_path, "r")) or {}
-            initial_bankroll = float(((cfg.get("risk") or {}).get("initial_bankroll")) or 0.0)
+            global_initial_bankroll = float(((cfg.get("risk") or {}).get("initial_bankroll")) or 0.0)
     except Exception:
         pass
-if initial_bankroll <= 0:
-    initial_bankroll = 10000.0
+if global_initial_bankroll <= 0:
+    global_initial_bankroll = 10000.0
+
+def account_initial_bankroll(account_id: str) -> float:
+    account = str(account_id or "").strip().lower()
+    if account and account != "default":
+        prefix = "".join(ch if ch.isalnum() else "_" for ch in account.upper())
+        scoped_key = f"{prefix}_INITIAL_BANKROLL"
+        scoped_raw = (os.getenv(scoped_key) or "").strip()
+        if scoped_raw:
+            try:
+                scoped_val = float(scoped_raw)
+                if scoped_val > 0:
+                    return scoped_val
+            except Exception:
+                pass
+    return global_initial_bankroll
 
 total = max_id = open_positions = 0
 win_rate = 0.0
@@ -259,36 +322,43 @@ drawdown_pnl = 0.0
 drawdown_pct = 0.0
 streak_label = "N/A"
 closed_rows = []
+max_ids = {}
+db_initial = {}
 
-for db in db_paths:
+for row in path_specs:
+    db = row.get("path")
+    account_id = row.get("account_id", "default")
     if not os.path.exists(db):
         continue
+    db_initial[db] = account_initial_bankroll(account_id)
     conn = sqlite3.connect(db, timeout=5)
     cur = conn.cursor()
     cur.execute("select count(*) from trades")
     total += int(cur.fetchone()[0] or 0)
     cur.execute("select max(id) from trades")
-    max_id = max(max_id, int(cur.fetchone()[0] or 0))
+    db_max_id = int(cur.fetchone()[0] or 0)
+    max_id = max(max_id, db_max_id)
+    max_ids[db] = db_max_id
     cur.execute("select count(*) from trades where status='open'")
     open_positions += int(cur.fetchone()[0] or 0)
     cur.execute("select coalesce(exit_time, entry_time, ''), pnl from trades where status='closed'")
     for ts, pnl in cur.fetchall():
-        closed_rows.append((str(ts or ""), float(pnl or 0.0)))
+        closed_rows.append((str(ts or ""), float(pnl or 0.0), db))
     conn.close()
 
 closed_rows.sort(key=lambda r: r[0])
 if closed_rows:
-    wins = sum(1 for _, p in closed_rows if p > 0)
+    wins = sum(1 for _, p, _ in closed_rows if p > 0)
     win_rate = wins / max(len(closed_rows), 1)
-    cum = 0.0
-    peak = float(initial_bankroll)
     streak = 0
     streak_type = ''
     last = None
-    for _, p in closed_rows:
+    initial_total = sum(float(v or 0.0) for v in db_initial.values()) or float(global_initial_bankroll)
+    equity = float(initial_total)
+    peak = float(initial_total)
+    for _, p, _ in closed_rows:
         pnl_val = float(p or 0.0)
-        cum += pnl_val
-        equity = initial_bankroll + cum
+        equity += pnl_val
         if equity > peak:
             peak = equity
         win = pnl_val > 0
@@ -301,27 +371,30 @@ if closed_rows:
             streak = 1
             streak_type = 'W' if win else 'L'
         last = win
-    equity_now = initial_bankroll + cum
-    drawdown_pnl = max(0.0, peak - equity_now)
+    drawdown_pnl = max(0.0, peak - equity)
     drawdown_pct = (drawdown_pnl / peak * 100.0) if peak > 0 else 0.0
     if streak_type:
         streak_label = f"{streak_type}{streak}"
 
-print(f"{total} {max_id} {open_positions} {win_rate} {drawdown_pnl} {drawdown_pct} {streak_label} {len(db_paths)}")
+max_ids_blob = base64.urlsafe_b64encode(
+    json.dumps(max_ids, separators=(",", ":"), sort_keys=True).encode("utf-8")
+).decode("utf-8")
+
+print(f"{total} {max_id} {open_positions} {win_rate} {drawdown_pnl} {drawdown_pct} {streak_label} {len(db_paths)} {max_ids_blob}")
 PY
 }
 
-stats="0 0 0 0.0 0.0 0.0 N/A 0"
+stats="0 0 0 0.0 0.0 0.0 N/A 0 e30="
 if [ "$container_running" = "1" ]; then
   stats="$(get_db_stats_container)"
 else
   stats="$(get_db_stats_host)"
 fi
 if [ -z "${stats:-}" ]; then
-  stats="0 0 0 0.0 0.0 0.0 N/A 0"
+  stats="0 0 0 0.0 0.0 0.0 N/A 0 e30="
 fi
 
-read -r total_trades max_id open_positions win_rate drawdown_pnl drawdown_pct streak_label db_count <<<"$stats" || true
+read -r total_trades max_id open_positions win_rate drawdown_pnl drawdown_pct streak_label db_count max_ids_b64 <<<"$stats" || true
 total_trades="${total_trades:-0}"
 max_id="${max_id:-0}"
 open_positions="${open_positions:-0}"
@@ -330,15 +403,57 @@ drawdown_pnl="${drawdown_pnl:-0.0}"
 drawdown_pct="${drawdown_pct:-0.0}"
 streak_label="${streak_label:-N/A}"
 db_count="${db_count:-0}"
+max_ids_b64="${max_ids_b64:-e30=}"
 
-last_id=0
+last_state_json="{}"
 if [ -f "$STATE" ]; then
-  last_id=$(cat "$STATE" 2>/dev/null || echo 0)
+  last_state_json="$(cat "$STATE" 2>/dev/null || echo '{}')"
 fi
-new_trades=0
-if [ "$max_id" -ge "$last_id" ] 2>/dev/null; then
-  new_trades=$((max_id - last_id))
-fi
+new_trades="$(
+  LAST_STATE_JSON="$last_state_json" MAX_IDS_B64="$max_ids_b64" /usr/bin/python3 - <<'PY' 2>/dev/null || echo 0
+import base64
+import json
+import os
+
+def decode_map(raw: str):
+    txt = (raw or "").strip()
+    if not txt:
+        return {}
+    pad = "=" * ((4 - (len(txt) % 4)) % 4)
+    try:
+        decoded = base64.urlsafe_b64decode((txt + pad).encode("utf-8")).decode("utf-8")
+        data = json.loads(decoded)
+        if isinstance(data, dict):
+            return {str(k): int(v or 0) for k, v in data.items()}
+    except Exception:
+        return {}
+    return {}
+
+last_raw = (os.environ.get("LAST_STATE_JSON") or "").strip()
+if last_raw.isdigit():
+    prev_map = {"__legacy__": int(last_raw)}
+else:
+    try:
+        loaded = json.loads(last_raw) if last_raw else {}
+        prev_map = {str(k): int(v or 0) for k, v in (loaded.items() if isinstance(loaded, dict) else [])}
+    except Exception:
+        prev_map = {}
+
+curr_map = decode_map(os.environ.get("MAX_IDS_B64", ""))
+if "__legacy__" in prev_map and curr_map:
+    prev_scalar = int(prev_map.get("__legacy__", 0) or 0)
+    curr_scalar = max(int(v or 0) for v in curr_map.values())
+    print(max(0, curr_scalar - prev_scalar))
+else:
+    delta = 0
+    for db_path, curr_id in curr_map.items():
+        prev_id = int(prev_map.get(db_path, 0) or 0)
+        if curr_id >= prev_id:
+            delta += (curr_id - prev_id)
+    print(max(0, delta))
+PY
+)"
+new_trades="${new_trades:-0}"
 
 uptime_fmt="$(format_duration "${uptime_s}")"
 now_iso=$(date -Is)
@@ -370,4 +485,19 @@ if [ "${can_notify}" = "1" ]; then
     --data-urlencode "text=${msg}" >/dev/null || true
 fi
 
-echo "$max_id" > "$STATE"
+MAX_IDS_B64="$max_ids_b64" /usr/bin/python3 - <<'PY' > "$STATE" 2>/dev/null || echo '{}' > "$STATE"
+import base64
+import json
+import os
+
+txt = (os.environ.get("MAX_IDS_B64") or "").strip()
+pad = "=" * ((4 - (len(txt) % 4)) % 4)
+try:
+    decoded = base64.urlsafe_b64decode((txt + pad).encode("utf-8")).decode("utf-8")
+    parsed = json.loads(decoded)
+    if not isinstance(parsed, dict):
+        parsed = {}
+except Exception:
+    parsed = {}
+print(json.dumps(parsed, sort_keys=True, separators=(",", ":")))
+PY
