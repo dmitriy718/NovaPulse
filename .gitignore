@@ -38,7 +38,7 @@ config/.vault.bak
 .log_watch.offset
 
 # Data (auto-generated)
-data/
+/data/
 logs/
 models/*.tflite
 models/*.keras
