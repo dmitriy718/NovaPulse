@@ -1203,6 +1203,12 @@ class DashboardServer:
             start_times = [getattr(e, "_start_time", 0.0) for e in engines if getattr(e, "_start_time", 0.0)]
             start_time = min(start_times) if start_times else 0.0
 
+            es_clients = [getattr(e, "es_client", None) for e in engines if getattr(e, "es_client", None)]
+            es_queue_depth = sum(int(getattr(es, "queue_depth", 0) or 0) for es in es_clients)
+            es_queue_capacity = sum(int(getattr(es, "queue_capacity", 0) or 0) for es in es_clients)
+            es_dropped_docs = sum(int(getattr(es, "dropped_docs", 0) or 0) for es in es_clients)
+            es_connected = sum(1 for es in es_clients if bool(getattr(es, "connected", False)))
+
             return {
                 "status": "running" if running else "stopped",
                 "mode": mode,
@@ -1239,6 +1245,13 @@ class DashboardServer:
                     }
                     for e in engines
                 ],
+                "es_queue": {
+                    "engines_with_es": len(es_clients),
+                    "connected": es_connected,
+                    "depth": es_queue_depth,
+                    "capacity": es_queue_capacity,
+                    "dropped_docs": es_dropped_docs,
+                },
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }
 

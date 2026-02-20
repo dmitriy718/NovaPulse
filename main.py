@@ -509,10 +509,10 @@ async def run_bot():
     for eng in engines:
         label = f"{eng.exchange_name}:{eng.tenant_id}"
         eng._tasks = [
-            asyncio.create_task(_run_with_restart(eng, f"{label}:scan_loop", eng._main_scan_loop)),
-            asyncio.create_task(_run_with_restart(eng, f"{label}:position_loop", eng._position_management_loop)),
-            asyncio.create_task(_run_with_restart(eng, f"{label}:ws_loop", eng._ws_data_loop)),
-            asyncio.create_task(_run_with_restart(eng, f"{label}:health_monitor", eng._health_monitor)),
+            asyncio.create_task(_run_with_restart(eng, f"{label}:scan_loop", eng._main_scan_loop, critical=True)),
+            asyncio.create_task(_run_with_restart(eng, f"{label}:position_loop", eng._position_management_loop, critical=True)),
+            asyncio.create_task(_run_with_restart(eng, f"{label}:ws_loop", eng._ws_data_loop, critical=True)),
+            asyncio.create_task(_run_with_restart(eng, f"{label}:health_monitor", eng._health_monitor, critical=True)),
             asyncio.create_task(_run_with_restart(eng, f"{label}:cleanup_loop", eng._cleanup_loop)),
             asyncio.create_task(_run_with_restart(eng, f"{label}:auto_retrainer", eng.retrainer.run)),
         ]
@@ -536,7 +536,7 @@ async def run_bot():
             )
         if getattr(eng, "exchange_name", "") == "coinbase":
             eng._tasks.append(
-                asyncio.create_task(_run_with_restart(eng, f"{label}:rest_candles", eng._rest_candle_poll_loop))
+                asyncio.create_task(_run_with_restart(eng, f"{label}:rest_candles", eng._rest_candle_poll_loop, critical=True))
             )
         if eng.telegram_bot:
             eng._tasks.append(
