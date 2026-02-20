@@ -18,6 +18,7 @@ import signal
 import time
 import traceback
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from src.ai.confluence import ConfluenceDetector, ConfluenceSignal
@@ -619,8 +620,6 @@ class BotEngine:
         )
         if enabled:
             try:
-                from pathlib import Path
-
                 self.continuous_learner = ContinuousLearner(
                     model_path=str(Path("models") / "continuous_sgd.joblib"),
                     feature_names=self.config.ml.features,
