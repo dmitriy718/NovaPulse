@@ -23,6 +23,11 @@ import random
 _INSTANCE_LOCK_FD: int | None = None
 
 
+def _telegram_runtime_enabled(bot: object | None) -> bool:
+    """True only when Telegram bot instance is configured with token + chat target."""
+    return bool(bot and getattr(bot, "_enabled", False))
+
+
 def _release_instance_lock() -> None:
     """Release the instance lock file descriptor on process exit."""
     global _INSTANCE_LOCK_FD
@@ -397,7 +402,7 @@ async def run_bot():
             engine._tasks.append(
                 asyncio.create_task(_run_with_restart(engine, "rest_candles", engine._rest_candle_poll_loop, critical=True))
             )
-        if engine.telegram_bot:
+        if _telegram_runtime_enabled(engine.telegram_bot):
             engine._tasks.append(
                 asyncio.create_task(_run_with_restart(engine, "telegram_bot", engine.telegram_bot.start))
             )
@@ -585,7 +590,7 @@ async def run_bot():
             eng._tasks.append(
                 asyncio.create_task(_run_with_restart(eng, f"{label}:rest_candles", eng._rest_candle_poll_loop, critical=True))
             )
-        if eng.telegram_bot:
+        if _telegram_runtime_enabled(eng.telegram_bot):
             eng._tasks.append(
                 asyncio.create_task(_run_with_restart(eng, f"{label}:telegram_bot", eng.telegram_bot.start))
             )
@@ -603,7 +608,12 @@ async def run_bot():
     try:
         primary = engines[0] if engines else None
         tcfg = getattr(getattr(primary.config, "control", None), "telegram", None) if primary else None
-        if primary and primary.telegram_bot and tcfg and getattr(tcfg, "send_checkins", False):
+        if (
+            primary
+            and _telegram_runtime_enabled(primary.telegram_bot)
+            and tcfg
+            and getattr(tcfg, "send_checkins", False)
+        ):
             interval = int(getattr(tcfg, "checkin_interval_minutes", 30) or 30)
             primary._tasks.append(
                 asyncio.create_task(

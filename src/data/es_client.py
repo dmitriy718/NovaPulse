@@ -236,7 +236,18 @@ class ESClient:
                 kwargs["hosts"] = self.hosts
 
             if self.api_key:
-                kwargs["api_key"] = self.api_key
+                api_key = str(self.api_key).strip()
+                # Accept both Elastic Python client formats:
+                # 1) base64-encoded "id:api_key" string
+                # 2) raw "id:api_key" (convert to tuple for client)
+                if ":" in api_key:
+                    key_id, key_secret = api_key.split(":", 1)
+                    if key_id and key_secret:
+                        kwargs["api_key"] = (key_id, key_secret)
+                    else:
+                        kwargs["api_key"] = api_key
+                else:
+                    kwargs["api_key"] = api_key
 
             self._es = AsyncElasticsearch(**kwargs)
             info = await self._es.info()

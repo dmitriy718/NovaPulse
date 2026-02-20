@@ -1710,13 +1710,21 @@ class BotEngine:
             })
         stats.append({
             "name": "ai_predictor",
-            "enabled": bool(self.predictor and self.predictor.is_model_loaded),
+            # Consider AI online when either:
+            # - TFLite model is loaded, or
+            # - heuristic predictor is available, or
+            # - continuous learner is active.
+            "enabled": bool(self.predictor or self.continuous_learner),
             "weight": 0.0,
             "trades": 0,
             "win_rate": None,
             "total_pnl": None,
             "avg_pnl": None,
             "kind": "model",
-            "note": "tflite signal scoring",
+            "note": (
+                "tflite signal scoring"
+                if bool(self.predictor and self.predictor.is_model_loaded)
+                else "heuristic fallback + continuous learner"
+            ),
         })
         return stats
