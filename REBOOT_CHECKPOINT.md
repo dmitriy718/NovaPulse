@@ -2,24 +2,32 @@
 
 Date: 2026-02-20
 Project: NovaPulse
+Commit: `e5e24f8`
 
 ## Where We Left Off
-- Completed and saved comprehensive review in `HomeStretch.md`.
-- Implemented fixes:
-  - `HS-001`: locked persistence contract (`SQLite` canonical, ES analytics-only mirror enforcement).
-  - `HS-008`: stock live fill-sync/reconciliation for accepted-but-not-filled orders.
-  - `HS-002 + HS-015`: exchange/account-aware chart/backtest engine routing normalization.
-- Test baseline at checkpoint: `102 passed in 3.38s` (`pytest -q`).
 
-## Primary Artifact
-- `HomeStretch.md` (full sectioned findings + prioritized fix queue + v4.0 plan + Human Deliverables)
+- HomeStretch queue fully executed (`HS-001` through `HS-017`).
+- Documentation updated for persistence/storage contract and live ops verification:
+  - `HomeStretch.md`
+  - `README.md`
+  - `LiveRunbook.md`
+- Test baseline after completion:
+  - `pytest -q` => `114 passed in 4.15s`
 
-## Next Work (in order)
-1. HS-006: mark critical loops in multi-engine mode
-2. HS-012: fix backtest friction double-counting
-3. HS-013: Slack loop handling hardening
-4. HS-014: frontend escaping hardening
+## Primary Artifacts
 
-## Notes
-- Current working tree is already dirty from prior work; do not reset.
-- Resume by opening `HomeStretch.md` and continuing from `HS-006`.
+- `HomeStretch.md` (now includes completion status section)
+- `README.md` (persistence/storage and health-script behavior updates)
+- `LiveRunbook.md` (explicit `/api/v1/storage` verification step)
+
+## Operational Notes
+
+- SQLite remains canonical ledger.
+- Elasticsearch remains analytics mirror only.
+- Health script now aggregates all resolved account/exchange DBs.
+- Stock live mode now reconciles broker positions on startup and periodically.
+
+## Next Work
+
+1. Deploy this commit to ops and run post-deploy verification.
+2. Run soak window and monitor `/api/v1/storage`, `/api/v1/status`, `/api/v1/risk`, and logs.
