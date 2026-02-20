@@ -220,7 +220,8 @@ class ModelTrainer:
 
         if len(training_data) < 20:
             result["message"] = f"Insufficient training data: {len(training_data)} samples (need 20+)"
-            logger.warning(result["message"])
+            # Expected on fresh deployments; keep this informational.
+            logger.info(result["message"])
             return result
 
         # Step 1b: Enrich with ES context features (best-effort)
@@ -295,7 +296,12 @@ class ModelTrainer:
         await self.db.log_thought(
             "ml",
             f"🤖 Model Training: {result['message']}",
-            severity="info" if result["success"] else "warning",
+            severity=(
+                "info"
+                if result["success"]
+                or str(result.get("message", "")).lower().startswith("insufficient training data")
+                else "warning"
+            ),
             metadata=result,
             tenant_id=self.tenant_id,
         )
@@ -483,7 +489,11 @@ class AutoRetrainer:
                 if result.get("success"):
                     logger.info("Initial model training successful", metrics=result.get("metrics", {}))
                 else:
-                    logger.warning("Initial model training failed", message=result.get("message", ""))
+                    msg = str(result.get("message", "") or "")
+                    if msg.lower().startswith("insufficient training data"):
+                        logger.info("Initial model training deferred", message=msg)
+                    else:
+                        logger.warning("Initial model training failed", message=msg)
             except Exception as e:
                 logger.error("Initial model training error", error=str(e))
 
