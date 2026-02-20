@@ -26,6 +26,7 @@ env/
 .env.*
 !.env.example
 .secrets/
+NovaPulse.json
 config/.vault.enc
 config/.vault.bak
 *.key
