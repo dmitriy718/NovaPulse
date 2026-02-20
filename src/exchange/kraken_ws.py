@@ -88,14 +88,14 @@ class KrakenWebSocketClient:
                     max_size=2 ** 20,  # 1MB max message
                 )
 
-                self._connected = True
                 self._reconnect_count = 0
                 self._last_heartbeat = time.time()
 
                 logger.info("WebSocket connected successfully")
 
-                # Resubscribe to all channels
+                # Resubscribe to all channels before marking connected
                 await self._resubscribe()
+                self._connected = True
 
                 # Start message processing
                 await self._message_loop()

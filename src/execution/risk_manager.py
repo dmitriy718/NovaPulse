@@ -99,6 +99,8 @@ class RiskManager:
         kelly_fraction: float = 0.25,
         max_kelly_size: float = 0.10,
         risk_of_ruin_threshold: float = 0.01,
+        max_daily_trades: int = 0,
+        max_total_exposure_pct: float = 0.50,
         atr_multiplier_sl: float = 2.0,
         atr_multiplier_tp: float = 3.0,
         trailing_activation_pct: float = 0.015,
@@ -108,6 +110,7 @@ class RiskManager:
         max_concurrent_positions: int = 5,
         strategy_cooldowns: Optional[Dict[str, int]] = None,
         global_cooldown_seconds_on_loss: int = 1800,
+        min_risk_reward_ratio: float = 1.2,
     ):
         self.initial_bankroll = initial_bankroll
         self.current_bankroll = initial_bankroll
@@ -117,6 +120,8 @@ class RiskManager:
         self.kelly_fraction = kelly_fraction
         self.max_kelly_size = max_kelly_size
         self.risk_of_ruin_threshold = risk_of_ruin_threshold
+        self.max_daily_trades = max(0, int(max_daily_trades or 0))
+        self.max_total_exposure_pct = max(0.05, min(1.0, float(max_total_exposure_pct or 0.50)))
         self.atr_multiplier_sl = atr_multiplier_sl
         self.atr_multiplier_tp = atr_multiplier_tp
         self.trailing_activation_pct = trailing_activation_pct
@@ -126,6 +131,7 @@ class RiskManager:
         self.max_concurrent_positions = max_concurrent_positions
         self.strategy_cooldowns = strategy_cooldowns or {}
         self.global_cooldown_seconds_on_loss = max(0, int(global_cooldown_seconds_on_loss))
+        self.min_risk_reward_ratio = max(0.1, float(min_risk_reward_ratio))
 
         # State tracking
         self._daily_pnl: float = 0.0
@@ -156,6 +162,9 @@ class RiskManager:
         avg_win_loss_ratio: float = 1.5,
         confidence: float = 0.5,
         spread_pct: float = 0.0,
+        vol_regime: str = "",
+        vol_level: float = 0.5,
+        vol_expanding: bool = False,
     ) -> PositionSizeResult:
         """
         Calculate optimal position size using Kelly Criterion.
@@ -207,8 +216,11 @@ class RiskManager:
         if sl_distance > 0:
             result.risk_reward_ratio = tp_distance / sl_distance
         
-        if result.risk_reward_ratio < 1.2:
-            result.reason = f"R:R ratio too low: {result.risk_reward_ratio:.2f} (min 1.2)"
+        if result.risk_reward_ratio < self.min_risk_reward_ratio:
+            result.reason = (
+                f"R:R ratio too low: {result.risk_reward_ratio:.2f} "
+                f"(min {self.min_risk_reward_ratio:.2f})"
+            )
             return result
 
         # ============================================================
@@ -254,6 +266,10 @@ class RiskManager:
         if spread_pct > 0.001:
             spread_penalty = max(0.5, 1.0 - (spread_pct - 0.001) * 50)
             position_size_usd *= spread_penalty
+
+        # Volatility regime sizing: reduce in high vol, expand slightly in low vol
+        vol_factor = self._get_volatility_factor(vol_regime, vol_level, vol_expanding)
+        position_size_usd *= vol_factor
 
         # Apply maximum position cap
         position_size_usd = min(position_size_usd, self.max_position_usd)
@@ -316,6 +332,11 @@ class RiskManager:
             result.reason = f"Max positions reached: {len(self._open_positions)}"
             return False
 
+        # Optional hard cap on number of entries per UTC day.
+        if self.max_daily_trades > 0 and self._daily_trades >= self.max_daily_trades:
+            result.reason = f"Daily trade cap reached: {self._daily_trades}"
+            return False
+
         # Risk of ruin check
         ror = self.calculate_risk_of_ruin()
         if ror > self.risk_of_ruin_threshold:
@@ -373,6 +394,10 @@ class RiskManager:
         state = self._stop_states.get(trade_id)
         if not state:
             return StopLossState()
+
+        if entry_price <= 0:
+            logger.warning("update_stop_loss called with entry_price<=0", trade_id=trade_id)
+            return state
 
         if side == "buy":
             pnl_pct = (current_price - entry_price) / entry_price
@@ -569,6 +594,27 @@ class RiskManager:
 
         # deque(maxlen=5000) automatically evicts oldest entries
 
+    def reduce_position_size(
+        self,
+        trade_id: str,
+        reduction_usd: float = 0.0,
+        reduction_fraction: Optional[float] = None,
+    ) -> None:
+        """
+        Reduce tracked position size after a partial exit.
+
+        Prefer `reduction_fraction` for partial exits so realized PnL at exit
+        price does not distort remaining portfolio exposure.
+        """
+        pos = self._open_positions.get(trade_id)
+        if pos:
+            current = float(pos.get("size_usd", 0.0) or 0.0)
+            if reduction_fraction is not None:
+                frac = max(0.0, min(1.0, float(reduction_fraction)))
+                pos["size_usd"] = max(0.0, current * (1.0 - frac))
+            else:
+                pos["size_usd"] = max(0.0, current - float(reduction_usd))
+
     def is_strategy_on_cooldown(
         self, pair: str, strategy: Optional[str], side: Optional[str]
     ) -> bool:
@@ -612,12 +658,39 @@ class RiskManager:
         else:
             return 0.15  # Reduced sizing during severe drawdown (still allows recovery)
 
+    def _get_volatility_factor(
+        self, vol_regime: str, vol_level: float, vol_expanding: bool
+    ) -> float:
+        """Adjust position size based on volatility regime.
+
+        - Low vol + low vol_level: slightly larger positions (cleaner signals)
+        - High vol + high vol_level: smaller positions (noisy, stop-hunt risk)
+        - Vol expanding (transition): sharp cut regardless of regime
+        """
+        factor = 1.0
+
+        if vol_regime == "low_vol" and vol_level < 0.3:
+            factor = 1.15
+        elif vol_regime == "high_vol":
+            if vol_level > 0.8:
+                factor = 0.60
+            elif vol_level > 0.7:
+                factor = 0.70
+            else:
+                factor = 0.80
+
+        # Vol expansion override: sudden regime transitions are most dangerous
+        if vol_expanding:
+            factor *= 0.60
+
+        return max(0.30, factor)
+
     def _get_remaining_capacity(self) -> float:
         """Calculate remaining position capacity in USD."""
         total_exposure = sum(
             pos["size_usd"] for pos in self._open_positions.values()
         )
-        max_total = self.current_bankroll * 0.50  # Max 50% total exposure
+        max_total = self.current_bankroll * self.max_total_exposure_pct
         return max(0, max_total - total_exposure)
 
     def _check_daily_reset(self) -> None:
@@ -626,7 +699,28 @@ class RiskManager:
         if today != self._daily_reset_date:
             self._daily_pnl = 0.0
             self._daily_trades = 0
+            self._consecutive_wins = 0
+            self._consecutive_losses = 0
             self._daily_reset_date = today
+
+    def reset_runtime(self, initial_bankroll: Optional[float] = None) -> None:
+        """Reset paper/runtime state for a fresh simulation cycle."""
+        if initial_bankroll is not None:
+            self.initial_bankroll = float(initial_bankroll)
+        self.current_bankroll = float(self.initial_bankroll)
+        self._daily_pnl = 0.0
+        self._daily_trades = 0
+        self._last_trade_time.clear()
+        self._open_positions.clear()
+        self._stop_states.clear()
+        self._strategy_cooldowns.clear()
+        self._peak_bankroll = float(self.initial_bankroll)
+        self._max_drawdown = 0.0
+        self._trade_history.clear()
+        self._global_cooldown_until = 0.0
+        self._consecutive_wins = 0
+        self._consecutive_losses = 0
+        self._daily_reset_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
     # ------------------------------------------------------------------
     # Reporting
@@ -656,6 +750,8 @@ class RiskManager:
             "risk_of_ruin": round(self.calculate_risk_of_ruin(), 4),
             "drawdown_factor": round(self._get_drawdown_factor(), 2),
             "remaining_capacity_usd": round(self._get_remaining_capacity(), 2),
+            "max_daily_trades": self.max_daily_trades,
+            "max_total_exposure_pct": round(self.max_total_exposure_pct, 4),
             "trade_count": len(self._trade_history),
             "consecutive_wins": self._consecutive_wins,
             "consecutive_losses": self._consecutive_losses,

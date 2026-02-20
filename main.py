@@ -53,10 +53,37 @@ def _acquire_instance_lock() -> bool:
         return True
 
     lock_path = os.getenv("INSTANCE_LOCK_PATH", "data/instance.lock").strip() or "data/instance.lock"
-    lock_file = Path(lock_path)
-    lock_file.parent.mkdir(parents=True, exist_ok=True)
+    candidates = [Path(lock_path)]
+    if _running_in_docker():
+        candidates.append(Path("/tmp/novapulse/instance.lock"))
 
-    fd = os.open(str(lock_file), os.O_RDWR | os.O_CREAT, 0o644)
+    fd = None
+    lock_file = None
+    last_err = None
+    for candidate in candidates:
+        try:
+            candidate.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(str(candidate), os.O_RDWR | os.O_CREAT, 0o644)
+            lock_file = candidate
+            if candidate != Path(lock_path):
+                print(
+                    f"[WARN] Using fallback instance lock path `{candidate}` "
+                    f"(configured path `{lock_path}` is not writable)."
+                )
+            break
+        except PermissionError as e:
+            last_err = e
+            continue
+        except Exception as e:
+            last_err = e
+            continue
+
+    if fd is None or lock_file is None:
+        print(
+            "[FATAL] Unable to open instance lock file at any allowed path "
+            f"(configured: {lock_path}, error: {last_err})."
+        )
+        return False
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
@@ -138,12 +165,23 @@ async def run_bot():
         MultiEngineHub,
         resolve_db_path,
         resolve_exchange_names,
+        resolve_trading_accounts,
     )
+    from src.stocks.swing_engine import StockSwingEngine
 
     logger = get_logger("main")
-    default_exchange = ConfigManager().config.exchange.name
-    exchange_names = resolve_exchange_names(default_exchange)
-    multi = len(exchange_names) > 1
+    root_cfg = ConfigManager().config
+    default_exchange = root_cfg.exchange.name
+    cfg_accounts = getattr(root_cfg.app, "trading_accounts", "").strip()
+    cfg_exchanges = getattr(root_cfg.app, "trading_exchanges", "").strip()
+    if cfg_accounts and not (os.getenv("TRADING_ACCOUNTS") or "").strip():
+        os.environ["TRADING_ACCOUNTS"] = cfg_accounts
+    if cfg_exchanges and not (os.getenv("TRADING_EXCHANGES") or "").strip() and not cfg_accounts:
+        os.environ["TRADING_EXCHANGES"] = cfg_exchanges
+    account_specs = resolve_trading_accounts(default_exchange, cfg_accounts)
+    if not account_specs:
+        account_specs = [{"account_id": "default", "exchange": (default_exchange or "kraken")}]
+    multi = len(account_specs) > 1
 
     shutdown_event = asyncio.Event()
 
@@ -217,11 +255,40 @@ async def run_bot():
                 await asyncio.sleep(delay)
 
     if not multi:
-        engine = BotEngine()
+        spec = account_specs[0]
+        account_id = (spec.get("account_id") or "default").strip().lower()
+        exchange_name = (spec.get("exchange") or default_exchange or "kraken").strip().lower()
+        base_db_path = os.getenv("DB_PATH", root_cfg.app.db_path or "data/trading.db")
+
+        if exchange_name != (default_exchange or "").strip().lower() or account_id != "default":
+            db_path = resolve_db_path(base_db_path, exchange_name, multi=False, account_id=account_id)
+            overrides = {
+                "exchange": {"name": exchange_name},
+                "app": {"db_path": db_path, "account_id": account_id},
+                "billing": {"tenant": {"default_tenant_id": account_id}},
+            }
+            cfg = load_config_with_overrides(overrides=overrides)
+            engine = BotEngine(config_override=cfg)
+        else:
+            engine = BotEngine()
+        stock_engine = None
 
         # Phase 1: Initialize all subsystems
         await engine.initialize()
         await engine.warmup()
+        try:
+            if getattr(engine.config, "stocks", None) and engine.config.stocks.enabled:
+                stock_engine = StockSwingEngine(config_override=engine.config)
+                await stock_engine.initialize()
+                await stock_engine.start()
+                if engine.dashboard:
+                    hub = MultiEngineHub([engine, stock_engine])
+                    engine.dashboard.set_bot_engine(hub)
+                    engine.dashboard.set_control_router(
+                        MultiControlRouter([engine.control_router, stock_engine.control_router])
+                    )
+        except Exception as e:
+            logger.error("Stock engine init failed", error=repr(e), error_type=type(e).__name__)
 
         # Phase 2: Start uvicorn dashboard (without its own signal handlers)
         uvi_config = uvicorn.Config(
@@ -240,6 +307,8 @@ async def run_bot():
 
         def _request_shutdown():
             engine._running = False
+            if stock_engine:
+                stock_engine._running = False
             shutdown_event.set()
 
         loop = asyncio.get_running_loop()
@@ -266,6 +335,25 @@ async def run_bot():
             asyncio.create_task(_run_with_restart(engine, "cleanup_loop", engine._cleanup_loop)),
             asyncio.create_task(_run_with_restart(engine, "auto_retrainer", engine.retrainer.run)),
         ]
+        if getattr(engine, "auto_tuner", None):
+            engine._tasks.append(
+                asyncio.create_task(_run_with_restart(engine, "auto_tuner", engine.auto_tuner.run))
+            )
+        # Elasticsearch external data collection tasks
+        if getattr(engine, "external_data_collector", None):
+            edc = engine.external_data_collector
+            engine._tasks.append(
+                asyncio.create_task(_run_with_restart(engine, "es_fear_greed", edc.poll_fear_greed))
+            )
+            engine._tasks.append(
+                asyncio.create_task(_run_with_restart(engine, "es_coingecko", edc.poll_coingecko))
+            )
+            engine._tasks.append(
+                asyncio.create_task(_run_with_restart(engine, "es_cryptopanic", edc.poll_cryptopanic))
+            )
+            engine._tasks.append(
+                asyncio.create_task(_run_with_restart(engine, "es_onchain", edc.poll_onchain))
+            )
         if getattr(engine, "exchange_name", "") == "coinbase":
             engine._tasks.append(
                 asyncio.create_task(_run_with_restart(engine, "rest_candles", engine._rest_candle_poll_loop, critical=True))
@@ -289,6 +377,14 @@ async def run_bot():
                     )
             except Exception:
                 pass
+        if getattr(engine, "discord_bot", None):
+            engine._tasks.append(
+                asyncio.create_task(_run_with_restart(engine, "discord_bot", engine.discord_bot.start))
+            )
+        if getattr(engine, "slack_bot", None):
+            engine._tasks.append(
+                asyncio.create_task(_run_with_restart(engine, "slack_bot", engine.slack_bot.start))
+            )
         # Keep the dashboard alive, but never let it take down trading.
         server_holder = {"server": server}
 
@@ -315,6 +411,11 @@ async def run_bot():
         logger = get_logger("main")
         logger.info("Shutdown signal received, cleaning up...")
         await engine.stop()
+        if stock_engine:
+            try:
+                await stock_engine.stop()
+            except Exception:
+                pass
         try:
             cur = server_holder.get("server")
             if cur:
@@ -328,16 +429,19 @@ async def run_bot():
             pass
         return
 
-    # ---- Multi-exchange mode ----
+    # ---- Multi-exchange / multi-account mode ----
     engines = []
     base_db_path = os.getenv("DB_PATH", ConfigManager().config.app.db_path or "data/trading.db")
     start_time = time.time()
 
-    for name in exchange_names:
-        db_path = resolve_db_path(base_db_path, name, multi=True)
+    for spec in account_specs:
+        name = (spec.get("exchange") or default_exchange or "kraken").strip().lower()
+        account_id = (spec.get("account_id") or "default").strip().lower()
+        db_path = resolve_db_path(base_db_path, name, multi=True, account_id=account_id)
         overrides = {
             "exchange": {"name": name},
-            "app": {"db_path": db_path},
+            "app": {"db_path": db_path, "account_id": account_id},
+            "billing": {"tenant": {"default_tenant_id": account_id}},
         }
         cfg = load_config_with_overrides(overrides=overrides)
         eng = BotEngine(config_override=cfg, enable_dashboard=False)
@@ -350,15 +454,31 @@ async def run_bot():
         if eng.db:
             await eng.db.log_thought(
                 "system",
-                f"Bot engine STARTED ({name}) - All systems operational",
+                f"Bot engine STARTED ({name}:{account_id}) - All systems operational",
                 severity="info",
                 tenant_id=eng.tenant_id,
             )
 
-    hub = MultiEngineHub(engines)
+    stock_engine = None
+    try:
+        base_cfg = engines[0].config if engines else root_cfg
+        if getattr(base_cfg, "stocks", None) and base_cfg.stocks.enabled:
+            stock_engine = StockSwingEngine(config_override=base_cfg)
+            await stock_engine.initialize()
+            await stock_engine.start()
+    except Exception as e:
+        logger.error("Stock engine init failed (multi mode)", error=repr(e), error_type=type(e).__name__)
+
+    hub_engines = list(engines)
+    if stock_engine:
+        stock_engine._running = True
+        stock_engine._start_time = start_time
+        hub_engines.append(stock_engine)
+
+    hub = MultiEngineHub(hub_engines)
     dashboard = DashboardServer()
     dashboard.set_bot_engine(hub)
-    dashboard.set_control_router(MultiControlRouter([e.control_router for e in engines]))
+    dashboard.set_control_router(MultiControlRouter([e.control_router for e in hub_engines if getattr(e, "control_router", None)]))
 
     uvi_config = uvicorn.Config(
         app=dashboard.app,
@@ -373,6 +493,8 @@ async def run_bot():
     def _request_shutdown_multi():
         for eng in engines:
             eng._running = False
+        if stock_engine:
+            stock_engine._running = False
         shutdown_event.set()
 
     loop = asyncio.get_running_loop()
@@ -385,21 +507,48 @@ async def run_bot():
 
     all_tasks = []
     for eng in engines:
+        label = f"{eng.exchange_name}:{eng.tenant_id}"
         eng._tasks = [
-            asyncio.create_task(_run_with_restart(eng, f"{eng.exchange_name}:scan_loop", eng._main_scan_loop)),
-            asyncio.create_task(_run_with_restart(eng, f"{eng.exchange_name}:position_loop", eng._position_management_loop)),
-            asyncio.create_task(_run_with_restart(eng, f"{eng.exchange_name}:ws_loop", eng._ws_data_loop)),
-            asyncio.create_task(_run_with_restart(eng, f"{eng.exchange_name}:health_monitor", eng._health_monitor)),
-            asyncio.create_task(_run_with_restart(eng, f"{eng.exchange_name}:cleanup_loop", eng._cleanup_loop)),
-            asyncio.create_task(_run_with_restart(eng, f"{eng.exchange_name}:auto_retrainer", eng.retrainer.run)),
+            asyncio.create_task(_run_with_restart(eng, f"{label}:scan_loop", eng._main_scan_loop)),
+            asyncio.create_task(_run_with_restart(eng, f"{label}:position_loop", eng._position_management_loop)),
+            asyncio.create_task(_run_with_restart(eng, f"{label}:ws_loop", eng._ws_data_loop)),
+            asyncio.create_task(_run_with_restart(eng, f"{label}:health_monitor", eng._health_monitor)),
+            asyncio.create_task(_run_with_restart(eng, f"{label}:cleanup_loop", eng._cleanup_loop)),
+            asyncio.create_task(_run_with_restart(eng, f"{label}:auto_retrainer", eng.retrainer.run)),
         ]
+        if getattr(eng, "auto_tuner", None):
+            eng._tasks.append(
+                asyncio.create_task(_run_with_restart(eng, f"{label}:auto_tuner", eng.auto_tuner.run))
+            )
+        if getattr(eng, "external_data_collector", None):
+            edc = eng.external_data_collector
+            eng._tasks.append(
+                asyncio.create_task(_run_with_restart(eng, f"{label}:es_fear_greed", edc.poll_fear_greed))
+            )
+            eng._tasks.append(
+                asyncio.create_task(_run_with_restart(eng, f"{label}:es_coingecko", edc.poll_coingecko))
+            )
+            eng._tasks.append(
+                asyncio.create_task(_run_with_restart(eng, f"{label}:es_cryptopanic", edc.poll_cryptopanic))
+            )
+            eng._tasks.append(
+                asyncio.create_task(_run_with_restart(eng, f"{label}:es_onchain", edc.poll_onchain))
+            )
         if getattr(eng, "exchange_name", "") == "coinbase":
             eng._tasks.append(
-                asyncio.create_task(_run_with_restart(eng, f"{eng.exchange_name}:rest_candles", eng._rest_candle_poll_loop))
+                asyncio.create_task(_run_with_restart(eng, f"{label}:rest_candles", eng._rest_candle_poll_loop))
             )
         if eng.telegram_bot:
             eng._tasks.append(
-                asyncio.create_task(_run_with_restart(eng, f"{eng.exchange_name}:telegram_bot", eng.telegram_bot.start))
+                asyncio.create_task(_run_with_restart(eng, f"{label}:telegram_bot", eng.telegram_bot.start))
+            )
+        if getattr(eng, "discord_bot", None):
+            eng._tasks.append(
+                asyncio.create_task(_run_with_restart(eng, f"{label}:discord_bot", eng.discord_bot.start))
+            )
+        if getattr(eng, "slack_bot", None):
+            eng._tasks.append(
+                asyncio.create_task(_run_with_restart(eng, f"{label}:slack_bot", eng.slack_bot.start))
             )
         all_tasks.extend(eng._tasks)
 
@@ -451,6 +600,11 @@ async def run_bot():
     logger.info("Shutdown signal received, cleaning up...")
     for eng in engines:
         await eng.stop()
+    if stock_engine:
+        try:
+            await stock_engine.stop()
+        except Exception:
+            pass
     try:
         cur = server_holder.get("server")
         if cur:

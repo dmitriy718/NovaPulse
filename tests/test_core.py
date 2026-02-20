@@ -13,6 +13,7 @@ import os
 import sys
 import tempfile
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import numpy as np
@@ -28,6 +29,7 @@ from src.core.database import DatabaseManager
 from src.exchange.coinbase_rest import CoinbaseRESTClient
 from src.exchange.coinbase_ws import CoinbaseWebSocketClient
 from src.exchange.market_data import MarketDataCache
+from src.execution.executor import TradeExecutor
 from src.execution.risk_manager import RiskManager
 from src.strategies.base import SignalDirection, StrategySignal
 from src.strategies.breakout import BreakoutStrategy
@@ -355,6 +357,19 @@ class TestRiskManager:
         assert result.size_usd <= 500  # Max position cap
         assert result.risk_reward_ratio >= 1.0
 
+    def test_position_sizing_uses_configurable_rr_threshold(self):
+        rm = RiskManager(initial_bankroll=10000, min_risk_reward_ratio=0.9)
+        result = rm.calculate_position_size(
+            pair="BTC/USD",
+            entry_price=100.0,
+            stop_loss=95.0,
+            take_profit=104.6,  # R:R ~= 0.92
+            win_rate=0.55,
+            avg_win_loss_ratio=1.2,
+            confidence=0.7,
+        )
+        assert result.allowed
+
     def test_position_sizing_respects_daily_limit(self):
         rm = RiskManager(initial_bankroll=10000, max_daily_loss=0.05)
         # Simulate daily loss exceeding 5% of bankroll
@@ -409,6 +424,29 @@ class TestRiskManager:
         # 8% drawdown -> 0.60
         rm.current_bankroll = 9200
         assert rm._get_drawdown_factor() == 0.60
+
+    def test_partial_reduction_uses_fraction_of_current_exposure(self):
+        rm = RiskManager(initial_bankroll=10000)
+        rm.register_position("T-partial", "BTC/USD", "buy", 50000, 1000.0)
+
+        rm.reduce_position_size("T-partial", reduction_fraction=0.50)
+        assert rm._open_positions["T-partial"]["size_usd"] == pytest.approx(500.0)
+
+        rm.reduce_position_size("T-partial", reduction_fraction=0.60)
+        # 60% of remaining 500 leaves 200.
+        assert rm._open_positions["T-partial"]["size_usd"] == pytest.approx(200.0)
+
+
+class TestExecutorHelpers:
+    def test_shift_levels_to_fill_preserves_distances(self):
+        stop, take = TradeExecutor._shift_levels_to_fill(
+            planned_entry=100.0,
+            fill_price=102.0,
+            stop_loss=95.0,
+            take_profit=110.0,
+        )
+        assert stop == pytest.approx(97.0)
+        assert take == pytest.approx(112.0)
 
 
 # ---- Database Tests ----
@@ -540,6 +578,62 @@ class TestDatabase:
 
             await db.close()
 
+    @pytest.mark.asyncio
+    async def test_count_trades_since(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.db")
+            db = DatabaseManager(db_path)
+            await db.initialize()
+
+            await db.insert_trade(
+                {
+                    "trade_id": "T-old",
+                    "pair": "BTC/USD",
+                    "side": "buy",
+                    "entry_price": 50000,
+                    "quantity": 0.001,
+                    "strategy": "trend",
+                    "entry_time": "2000-01-01T00:00:00+00:00",
+                }
+            )
+            await db.insert_trade(
+                {
+                    "trade_id": "T-new",
+                    "pair": "BTC/USD",
+                    "side": "buy",
+                    "entry_price": 50000,
+                    "quantity": 0.001,
+                    "strategy": "trend",
+                    "entry_time": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+
+            count = await db.count_trades_since(
+                since_iso=(datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+            )
+            assert count == 1
+            await db.close()
+
+    @pytest.mark.asyncio
+    async def test_metrics_are_tenant_scoped(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.db")
+            db = DatabaseManager(db_path)
+            await db.initialize()
+
+            await db.insert_metric("scan_cycle_ms", 120.0, tenant_id="tenant_a")
+            await db.insert_metric("scan_cycle_ms", 240.0, tenant_id="tenant_b")
+
+            a_rows = await db.get_metrics("scan_cycle_ms", tenant_id="tenant_a")
+            b_rows = await db.get_metrics("scan_cycle_ms", tenant_id="tenant_b")
+
+            assert len(a_rows) == 1
+            assert len(b_rows) == 1
+            assert a_rows[0][1] == pytest.approx(120.0)
+            assert b_rows[0][1] == pytest.approx(240.0)
+
+            await db.close()
+
 
 # ---- Config Tests ----
 
@@ -572,6 +666,25 @@ class TestRuntimeGuards:
         with pytest.raises(SystemExit) as exc:
             main_module.main()
         assert exc.value.code == 1
+
+    def test_engine_canary_mode_restricts_pairs_and_scan_interval(self):
+        from src.core.engine import BotEngine
+
+        cfg = BotConfig(
+            trading={
+                "pairs": ["BTC/USD", "ETH/USD", "SOL/USD"],
+                "scan_interval_seconds": 15,
+                "canary_mode": True,
+                "canary_pairs": ["ETH/USD", "SOL/USD"],
+                "canary_max_pairs": 1,
+                "canary_scan_interval_seconds": 45,
+            }
+        )
+        engine = BotEngine(config_override=cfg, enable_dashboard=False)
+
+        assert engine.canary_mode is True
+        assert engine.pairs == ["ETH/USD"]
+        assert engine.scan_interval == 45
 
 
 # ---- API Tenant/Auth Tests ----
@@ -663,6 +776,25 @@ class TestApiTenantAuth:
             await server.resolve_tenant_id(requested_tenant_id="", api_key="NOPE", require_api_key=True)
         assert exc.value.status_code == 403
 
+    @pytest.mark.asyncio
+    async def test_resolve_tenant_checks_all_engine_dbs(self):
+        from src.api.server import DashboardServer
+
+        server = DashboardServer()
+        db1 = _FakeDB(api_key_map={"TENANTKEY_A": "tenant_a"}, tenants={"tenant_a": {"status": "active"}})
+        db2 = _FakeDB(api_key_map={"TENANTKEY_B": "tenant_b"}, tenants={"tenant_b": {"status": "active"}})
+        eng1 = _FakeEngine("ADMIN", db1, default_tenant_id="default")
+        eng2 = _FakeEngine("ADMIN", db2, default_tenant_id="default")
+        hub = type("Hub", (), {"engines": [eng1, eng2], "config": eng1.config, "db": eng1.db})()
+        server._bot_engine = hub
+
+        tenant = await server.resolve_tenant_id(
+            requested_tenant_id="",
+            api_key="TENANTKEY_B",
+            require_api_key=True,
+        )
+        assert tenant == "tenant_b"
+
 
 class _FakeTradeDB:
     async def get_tenant_id_by_api_key(self, api_key: str):
@@ -719,6 +851,73 @@ class _FakeEngineForExport:
         self.config = _FakeCfgForExport()
 
 
+class _FakeMarketDataForChart:
+    def __init__(self):
+        base = 1_700_000_000
+        self._times = np.array([base + i * 60 for i in range(360)], dtype=float)
+        base_px = 50_000.0
+        self._opens = np.array([base_px + i * 0.8 for i in range(360)], dtype=float)
+        self._highs = self._opens + 5.0
+        self._lows = self._opens - 5.0
+        self._closes = self._opens + 1.2
+        self._volumes = np.array([10.0 + (i % 5) for i in range(360)], dtype=float)
+
+    def _slice(self, arr, n=None):
+        if n is None:
+            return arr
+        return arr[-int(n):]
+
+    def get_times(self, pair: str, n=None):
+        return self._slice(self._times, n)
+
+    def get_opens(self, pair: str, n=None):
+        return self._slice(self._opens, n)
+
+    def get_highs(self, pair: str, n=None):
+        return self._slice(self._highs, n)
+
+    def get_lows(self, pair: str, n=None):
+        return self._slice(self._lows, n)
+
+    def get_closes(self, pair: str, n=None):
+        return self._slice(self._closes, n)
+
+    def get_volumes(self, pair: str, n=None):
+        return self._slice(self._volumes, n)
+
+
+class _FakeEngineForChart:
+    def __init__(self):
+        self.db = _FakeTradeDB()
+        self.config = _FakeCfgForExport()
+        self.market_data = _FakeMarketDataForChart()
+        self.exchange_name = "kraken"
+        self.pairs = ["BTC/USD"]
+
+
+class _FakeRestClientForChart:
+    async def get_ohlc(self, pair: str, interval: int = 1, since: int | None = None):
+        step = max(1, int(interval)) * 60
+        start = int(since or (time.time() - (500 * step)))
+        bars = []
+        px = 40_000.0
+        for i in range(520):
+            ts = start + (i * step)
+            o = px + (i * 2.0)
+            h = o + 8.0
+            l = o - 8.0
+            c = o + 1.5
+            v = 50.0 + (i % 10)
+            bars.append([float(ts), o, h, l, c, 0.0, v, 1.0])
+        return bars
+
+
+class _FakeEngineForChartWithRest(_FakeEngineForChart):
+    def __init__(self):
+        super().__init__()
+        self.rest_client = _FakeRestClientForChart()
+
+
 class TestApiExports:
     def test_export_trades_csv_requires_key_and_returns_csv(self):
         from src.api.server import DashboardServer
@@ -734,6 +933,67 @@ class TestApiExports:
         body = r.text
         assert "id,pair,side" in body.splitlines()[0]
         assert "BTC/USD" in body
+
+
+class TestApiChart:
+    def test_chart_endpoint_returns_aggregated_candles(self):
+        from src.api.server import DashboardServer
+
+        server = DashboardServer()
+        server._admin_key = "ADMIN"
+        server._bot_engine = _FakeEngineForChart()
+
+        client = TestClient(server.app)
+        r = client.get(
+            "/api/v1/chart",
+            params={"pair": "BTC/USD", "timeframe": "5m", "limit": 120},
+            headers={"X-API-Key": "ADMIN"},
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body.get("pair") == "BTC/USD"
+        assert body.get("timeframe") == "5m"
+        assert body.get("source") == "cache"
+        assert isinstance(body.get("candles"), list)
+        assert len(body["candles"]) > 0
+        first = body["candles"][0]
+        assert {"time", "open", "high", "low", "close", "volume"} <= set(first.keys())
+
+    def test_chart_endpoint_normalizes_timeframe_alias(self):
+        from src.api.server import DashboardServer
+
+        server = DashboardServer()
+        server._admin_key = "ADMIN"
+        server._bot_engine = _FakeEngineForChart()
+
+        client = TestClient(server.app)
+        r = client.get(
+            "/api/v1/chart",
+            params={"pair": "BTC/USD", "timeframe": "1H"},
+            headers={"X-API-Key": "ADMIN"},
+        )
+        assert r.status_code == 200
+        assert r.json().get("timeframe") == "1h"
+
+    def test_chart_endpoint_uses_rest_history_for_daily_timeframe(self):
+        from src.api.server import DashboardServer
+
+        server = DashboardServer()
+        server._admin_key = "ADMIN"
+        server._bot_engine = _FakeEngineForChartWithRest()
+
+        client = TestClient(server.app)
+        r = client.get(
+            "/api/v1/chart",
+            params={"pair": "BTC/USD", "timeframe": "1d", "limit": 120},
+            headers={"X-API-Key": "ADMIN"},
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body.get("timeframe") == "1d"
+        assert body.get("source") == "rest"
+        assert isinstance(body.get("candles"), list)
+        assert len(body.get("candles", [])) >= 100
 
 
 class TestApiMiddleware:

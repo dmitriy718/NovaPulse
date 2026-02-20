@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional, Union
 
 import yaml
 from dotenv import load_dotenv
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 # ---------------------------------------------------------------------------
@@ -42,10 +42,19 @@ def _apply_env_overrides(config: Dict[str, Any]) -> None:
         "MAX_RISK_PER_TRADE": ("risk", "max_risk_per_trade", float),
         "MAX_DAILY_LOSS": ("risk", "max_daily_loss", float),
         "MAX_POSITION_USD": ("risk", "max_position_usd", float),
+        "MAX_DAILY_TRADES": ("risk", "max_daily_trades", int),
+        "MAX_TOTAL_EXPOSURE_PCT": ("risk", "max_total_exposure_pct", float),
         "INITIAL_BANKROLL": ("risk", "initial_bankroll", float),
+        "MAX_TRADES_PER_HOUR": ("trading", "max_trades_per_hour", int),
         "DASHBOARD_HOST": ("dashboard", "host"),
         "DASHBOARD_PORT": ("dashboard", "port", int),
         "DASHBOARD_REQUIRE_API_KEY_FOR_READS": (
+            "dashboard",
+            "require_api_key_for_reads",
+            lambda v: v.lower() in ("1", "true", "yes", "on"),
+        ),
+        # Legacy alias kept for backward compatibility with older .env templates.
+        "DASHBOARD_REQUIRE_AUTH_FOR_READS": (
             "dashboard",
             "require_api_key_for_reads",
             lambda v: v.lower() in ("1", "true", "yes", "on"),
@@ -68,12 +77,115 @@ def _apply_env_overrides(config: Dict[str, Any]) -> None:
         "TENANT_ID": (("billing", "tenant", "default_tenant_id"), str),
         "EXCHANGE_NAME": ("exchange", "name"),
         "ACTIVE_EXCHANGE": ("exchange", "name"),
+        "TRADING_EXCHANGES": ("app", "trading_exchanges"),
+        "TRADING_EXCHANGE": ("app", "trading_exchanges"),
+        "TRADING_ACCOUNTS": ("app", "trading_accounts"),
+        "ACCOUNT_ID": ("app", "account_id"),
         "EXCHANGE_REST_URL": ("exchange", "rest_url"),
         "EXCHANGE_WS_URL": ("exchange", "ws_url"),
         "EXCHANGE_MAKER_FEE": ("exchange", "maker_fee", float),
         "EXCHANGE_TAKER_FEE": ("exchange", "taker_fee", float),
         "EXCHANGE_POST_ONLY": ("exchange", "post_only", lambda v: v.lower() in ("1", "true", "yes", "on")),
         "CANDLE_POLL_SECONDS": ("trading", "candle_poll_seconds", int),
+        "CANARY_MODE": (
+            "trading",
+            "canary_mode",
+            lambda v: v.lower() in ("1", "true", "yes", "on"),
+        ),
+        "CANARY_PAIRS": (
+            "trading",
+            "canary_pairs",
+            lambda v: [p.strip() for p in v.split(",") if p.strip()],
+        ),
+        "CANARY_MAX_PAIRS": ("trading", "canary_max_pairs", int),
+        "CANARY_MAX_POSITION_USD": ("trading", "canary_max_position_usd", float),
+        "CANARY_MAX_RISK_PER_TRADE": ("trading", "canary_max_risk_per_trade", float),
+        "CANARY_MIN_CONFIDENCE": ("trading", "canary_min_confidence", float),
+        "CANARY_MIN_CONFLUENCE": ("trading", "canary_min_confluence", int),
+        "CANARY_SCAN_INTERVAL_SECONDS": ("trading", "canary_scan_interval_seconds", int),
+        "STOCKS_ENABLED": (
+            "stocks",
+            "enabled",
+            lambda v: v.lower() in ("1", "true", "yes", "on"),
+        ),
+        "STOCKS_SYMBOLS": (
+            "stocks",
+            "symbols",
+            lambda v: [s.strip().upper() for s in v.split(",") if s.strip()],
+        ),
+        "STOCKS_SCAN_INTERVAL_SECONDS": ("stocks", "scan_interval_seconds", int),
+        "STOCKS_LOOKBACK_BARS": ("stocks", "lookback_bars", int),
+        "STOCKS_MIN_HOLD_DAYS": ("stocks", "min_hold_days", int),
+        "STOCKS_MAX_HOLD_DAYS": ("stocks", "max_hold_days", int),
+        "STOCKS_MAX_OPEN_POSITIONS": ("stocks", "max_open_positions", int),
+        "STOCKS_MAX_POSITION_USD": ("stocks", "max_position_usd", float),
+        "STOCKS_DB_PATH": ("stocks", "db_path"),
+        "POLYGON_API_KEY": ("stocks", "polygon_api_key"),
+        "POLYGON_BASE_URL": ("stocks", "polygon_base_url"),
+        "ALPACA_API_KEY": ("stocks", "alpaca_api_key"),
+        "ALPACA_API_SECRET": ("stocks", "alpaca_api_secret"),
+        "ALPACA_BASE_URL": ("stocks", "alpaca_base_url"),
+        "ELASTICSEARCH_ENABLED": (
+            "elasticsearch",
+            "enabled",
+            lambda v: v.lower() in ("1", "true", "yes", "on"),
+        ),
+        "ELASTICSEARCH_HOSTS": (
+            "elasticsearch",
+            "hosts",
+            lambda v: [h.strip() for h in v.split(",") if h.strip()],
+        ),
+        "ES_API_KEY": ("elasticsearch", "api_key"),
+        "ES_CLOUD_ID": ("elasticsearch", "cloud_id"),
+        "COINGECKO_API_KEY": ("elasticsearch", "coingecko_api_key"),
+        "CRYPTOPANIC_API_KEY": ("elasticsearch", "cryptopanic_api_key"),
+        "TELEGRAM_BOT_TOKEN": (("control", "telegram", "token"), str),
+        "TELEGRAM_CHAT_IDS": (
+            ("control", "telegram", "chat_ids"),
+            lambda v: [s.strip() for s in v.split(",") if s.strip()],
+        ),
+        "TELEGRAM_CHAT_ID": (
+            ("control", "telegram", "chat_ids"),
+            lambda v: [s.strip() for s in v.split(",") if s.strip()],
+        ),
+        "TELEGRAM_POLLING_ENABLED": (
+            ("control", "telegram", "polling_enabled"),
+            lambda v: v.lower() in ("1", "true", "yes", "on"),
+        ),
+        "DISCORD_ENABLED": (
+            ("control", "discord", "enabled"),
+            lambda v: v.lower() in ("1", "true", "yes", "on"),
+        ),
+        "DISCORD_TOKEN": (("control", "discord", "token"), str),
+        "DISCORD_ALLOWED_CHANNEL_IDS": (
+            ("control", "discord", "allowed_channel_ids"),
+            lambda v: [s.strip() for s in v.split(",") if s.strip()],
+        ),
+        "DISCORD_ALLOWED_GUILD_ID": (("control", "discord", "allowed_guild_id"), str),
+        "SLACK_ENABLED": (
+            ("control", "slack", "enabled"),
+            lambda v: v.lower() in ("1", "true", "yes", "on"),
+        ),
+        "SLACK_BOT_TOKEN": (("control", "slack", "token"), str),
+        "SLACK_SIGNING_SECRET": (("control", "slack", "signing_secret"), str),
+        "SLACK_APP_TOKEN": (("control", "slack", "app_token"), str),
+        "SLACK_ALLOWED_CHANNEL_ID": (("control", "slack", "allowed_channel_id"), str),
+        "SIGNAL_WEBHOOK_ENABLED": (
+            "webhooks",
+            "enabled",
+            lambda v: v.lower() in ("1", "true", "yes", "on"),
+        ),
+        "SIGNAL_WEBHOOK_SECRET": ("webhooks", "secret"),
+        "SIGNAL_WEBHOOK_ALLOWED_SOURCES": (
+            "webhooks",
+            "allowed_sources",
+            lambda v: [s.strip().lower() for s in v.split(",") if s.strip()],
+        ),
+        "SIGNAL_WEBHOOK_MAX_TIMESTAMP_SKEW_SECONDS": (
+            "webhooks",
+            "max_timestamp_skew_seconds",
+            int,
+        ),
     }
 
     for env_key, mapping in env_mappings.items():
@@ -140,6 +252,18 @@ class TradingConfig(BaseModel):
     single_strategy_mode: Optional[Union[str, bool]] = None
     # Quiet hours: skip new entries during these UTC hours (e.g. [2,3,4,5])
     quiet_hours_utc: List[int] = Field(default_factory=list)
+    # Hard throttle for new entries to prevent runaway overtrading.
+    # 0 disables the throttle.
+    max_trades_per_hour: int = 0
+    # Canary mode: tighter limits and restricted pair set for controlled rollout.
+    canary_mode: bool = False
+    canary_pairs: List[str] = Field(default_factory=list)
+    canary_max_pairs: int = 2
+    canary_max_position_usd: float = 100.0
+    canary_max_risk_per_trade: float = 0.005
+    canary_min_confidence: float = 0.68
+    canary_min_confluence: int = 3
+    canary_scan_interval_seconds: int = 60
 
 
 class StrategyWeights(BaseModel):
@@ -160,39 +284,53 @@ class MeanReversionConfig(StrategyWeights):
     rsi_overbought: int = 70
 
 
-class MomentumConfig(StrategyWeights):
-    rsi_threshold: int = 50
-    volume_multiplier: float = 1.5
+class IchimokuConfig(StrategyWeights):
+    tenkan_period: int = 9
+    kijun_period: int = 26
+    senkou_b_period: int = 52
+    atr_period: int = 14
+    weight: float = 0.15
 
 
-class VWAPMomentumAlphaConfig(StrategyWeights):
-    vwap_window: int = 20
-    band_std: float = 1.5
-    pullback_z: float = 0.6
-    slope_period: int = 5
-    volume_multiplier: float = 1.0
-    pullback_z_trend_adjust: float = -0.12
-    pullback_z_range_adjust: float = 0.12
-    pullback_z_high_vol_adjust: float = 0.10
-    pullback_z_low_vol_adjust: float = -0.05
-    slope_min_pct: float = 0.0005
+class StochasticDivergenceConfig(StrategyWeights):
+    k_period: int = 14
+    d_period: int = 3
+    smooth: int = 3
+    oversold: float = 20.0
+    overbought: float = 80.0
+    divergence_lookback: int = 20
+    atr_period: int = 14
     weight: float = 0.12
 
 
-class RSIMeanReversionConfig(StrategyWeights):
-    rsi_period: int = 14
-    rsi_oversold: int = 30
-    rsi_overbought: int = 70
-    trend_adjust: int = 5
-    range_adjust: int = 5
-    high_vol_adjust: int = 3
-    low_vol_adjust: int = 2
+class VolatilitySqueezeConfig(StrategyWeights):
+    bb_period: int = 20
+    bb_std: float = 2.0
+    kc_ema_period: int = 20
+    kc_atr_period: int = 14
+    kc_multiplier: float = 1.5
+    momentum_period: int = 12
+    atr_period: int = 14
+    min_squeeze_bars: int = 3
     weight: float = 0.12
 
 
-class BreakoutConfig(StrategyWeights):
-    lookback_period: int = 20
-    volume_confirmation: float = 1.3
+class OrderFlowConfig(StrategyWeights):
+    book_score_threshold: float = 0.3
+    spread_tight_pct: float = 0.0010
+    hl_lookback: int = 5
+    max_book_age_seconds: int = 5
+    atr_period: int = 14
+    weight: float = 0.15
+
+
+class SupertrendConfig(StrategyWeights):
+    st_period: int = 10
+    st_multiplier: float = 3.0
+    volume_period: int = 20
+    volume_threshold: float = 1.2
+    atr_period: int = 14
+    weight: float = 0.10
 
 
 class ReversalConfig(StrategyWeights):
@@ -218,10 +356,11 @@ class StrategiesConfig(BaseModel):
     keltner: KeltnerConfig = Field(default_factory=KeltnerConfig)
     trend: TrendConfig = Field(default_factory=TrendConfig)
     mean_reversion: MeanReversionConfig = Field(default_factory=MeanReversionConfig)
-    momentum: MomentumConfig = Field(default_factory=MomentumConfig)
-    vwap_momentum_alpha: VWAPMomentumAlphaConfig = Field(default_factory=VWAPMomentumAlphaConfig)
-    rsi_mean_reversion: RSIMeanReversionConfig = Field(default_factory=RSIMeanReversionConfig)
-    breakout: BreakoutConfig = Field(default_factory=BreakoutConfig)
+    ichimoku: IchimokuConfig = Field(default_factory=IchimokuConfig)
+    stochastic_divergence: StochasticDivergenceConfig = Field(default_factory=StochasticDivergenceConfig)
+    volatility_squeeze: VolatilitySqueezeConfig = Field(default_factory=VolatilitySqueezeConfig)
+    order_flow: OrderFlowConfig = Field(default_factory=OrderFlowConfig)
+    supertrend: SupertrendConfig = Field(default_factory=SupertrendConfig)
     reversal: ReversalConfig = Field(default_factory=ReversalConfig)
 
 
@@ -232,40 +371,49 @@ class RegimeConfig(BaseModel):
     atr_pct_low: float = 0.008
     trend_weight_multipliers: Dict[str, float] = Field(default_factory=lambda: {
         "trend": 1.3,
-        "momentum": 1.2,
-        "vwap_momentum_alpha": 1.2,
-        "breakout": 1.1,
+        "ichimoku": 1.2,
+        "supertrend": 1.2,
+        "order_flow": 1.1,
+        "volatility_squeeze": 1.1,
         "mean_reversion": 0.8,
-        "rsi_mean_reversion": 0.8,
+        "stochastic_divergence": 0.8,
         "reversal": 0.7,
         "keltner": 0.9,
     })
     range_weight_multipliers: Dict[str, float] = Field(default_factory=lambda: {
         "mean_reversion": 1.3,
-        "rsi_mean_reversion": 1.3,
+        "stochastic_divergence": 1.3,
         "keltner": 1.2,
         "reversal": 1.1,
+        "order_flow": 1.1,
         "trend": 0.8,
-        "momentum": 0.8,
-        "vwap_momentum_alpha": 0.8,
-        "breakout": 0.8,
+        "ichimoku": 0.8,
+        "supertrend": 0.8,
+        "volatility_squeeze": 0.9,
     })
     high_vol_weight_multipliers: Dict[str, float] = Field(default_factory=lambda: {
-        "breakout": 1.2,
-        "momentum": 1.1,
-        "vwap_momentum_alpha": 1.1,
+        "volatility_squeeze": 1.3,
+        "supertrend": 1.1,
+        "order_flow": 1.1,
         "mean_reversion": 0.9,
-        "rsi_mean_reversion": 0.9,
+        "stochastic_divergence": 0.9,
         "reversal": 0.9,
     })
     low_vol_weight_multipliers: Dict[str, float] = Field(default_factory=lambda: {
         "mean_reversion": 1.2,
-        "rsi_mean_reversion": 1.2,
+        "stochastic_divergence": 1.2,
         "keltner": 1.1,
-        "breakout": 0.9,
-        "momentum": 0.9,
-        "vwap_momentum_alpha": 0.9,
+        "volatility_squeeze": 0.8,
+        "supertrend": 0.9,
+        "ichimoku": 0.9,
     })
+
+
+class SessionConfig(BaseModel):
+    enabled: bool = True
+    min_trades_per_hour: int = 5
+    max_boost: float = 1.15
+    max_penalty: float = 0.70
 
 
 class AIConfig(BaseModel):
@@ -287,7 +435,27 @@ class AIConfig(BaseModel):
     obi_counts_as_confluence: bool = False
     obi_weight: float = 0.4  # weight of synthetic OBI signal when weighted (e.g. 0.4 or 0.7)
     whale_threshold_usd: float = 50000.0
+    strategy_guardrails_enabled: bool = True
+    strategy_guardrails_min_trades: int = 20
+    strategy_guardrails_window_trades: int = 30
+    strategy_guardrails_min_win_rate: float = 0.35
+    strategy_guardrails_min_profit_factor: float = 0.85
+    strategy_guardrails_disable_minutes: int = 120
+    session: SessionConfig = Field(default_factory=SessionConfig)
     regime: RegimeConfig = Field(default_factory=RegimeConfig)
+
+
+class SmartExitTier(BaseModel):
+    pct: float = 0.5        # Fraction of remaining position to close
+    tp_mult: float = 1.0    # Multiplier on original TP distance from entry
+
+class SmartExitConfig(BaseModel):
+    enabled: bool = False    # Off by default until tested
+    tiers: List[SmartExitTier] = Field(default_factory=lambda: [
+        SmartExitTier(pct=0.5, tp_mult=1.0),
+        SmartExitTier(pct=0.6, tp_mult=1.5),
+        SmartExitTier(pct=1.0, tp_mult=0),  # 0 = trailing stop only
+    ])
 
 
 class RiskConfig(BaseModel):
@@ -303,7 +471,10 @@ class RiskConfig(BaseModel):
     kelly_fraction: float = 0.25
     max_kelly_size: float = 0.10
     risk_of_ruin_threshold: float = 0.01
+    max_daily_trades: int = 0  # 0 disables daily trade cap
+    max_total_exposure_pct: float = 0.50  # max sum(size_usd) as % of bankroll
     global_cooldown_seconds_on_loss: int = 1800
+    smart_exit: SmartExitConfig = Field(default_factory=SmartExitConfig)
 
     @field_validator("max_risk_per_trade")
     @classmethod
@@ -317,6 +488,20 @@ class RiskConfig(BaseModel):
     def validate_daily_loss(cls, v):
         if v <= 0 or v > 0.20:
             raise ValueError("max_daily_loss must be between 0 and 0.20")
+        return v
+
+    @field_validator("max_daily_trades")
+    @classmethod
+    def validate_max_daily_trades(cls, v):
+        if v < 0 or v > 2000:
+            raise ValueError("max_daily_trades must be between 0 and 2000")
+        return v
+
+    @field_validator("max_total_exposure_pct")
+    @classmethod
+    def validate_max_total_exposure_pct(cls, v):
+        if v <= 0 or v > 1.0:
+            raise ValueError("max_total_exposure_pct must be between 0 and 1.0")
         return v
 
 
@@ -336,6 +521,15 @@ class DashboardConfig(BaseModel):
     rate_limit_burst: int = 60
 
 
+class TunerConfig(BaseModel):
+    enabled: bool = True
+    interval_hours: int = 168  # Weekly
+    min_trades_per_strategy: int = 15
+    weight_bounds: List[float] = Field(default_factory=lambda: [0.05, 0.50])
+    auto_disable_sharpe: float = -0.3
+    auto_disable_min_trades: int = 30
+
+
 class MLConfig(BaseModel):
     retrain_interval_hours: int = 168
     min_samples: int = 10000
@@ -348,6 +542,33 @@ class MLConfig(BaseModel):
     ])
 
 
+class ElasticsearchConfig(BaseModel):
+    enabled: bool = False
+    hosts: List[str] = Field(default_factory=lambda: ["http://elasticsearch:9200"])
+    cloud_id: str = ""        # Elastic Cloud ID (alternative to hosts)
+    api_key: str = ""         # Base64-encoded API key (or set ES_API_KEY env)
+    index_prefix: str = "novapulse"
+    bulk_size: int = 500
+    flush_interval_seconds: float = 10.0
+    buffer_maxlen: int = 10_000
+    retention_days: Dict[str, int] = Field(default_factory=lambda: {
+        "candles": 90,
+        "orderbook": 30,
+        "sentiment": 180,
+        "onchain": 180,
+        "market": 180,
+        "trades": 365,
+    })
+    poll_intervals: Dict[str, int] = Field(default_factory=lambda: {
+        "fear_greed": 3600,
+        "coingecko": 600,
+        "cryptopanic": 600,
+        "onchain": 3600,
+    })
+    coingecko_api_key: str = ""
+    cryptopanic_api_key: str = ""
+
+
 class MonitoringConfig(BaseModel):
     health_check_interval: int = 30
     auto_restart: bool = True
@@ -358,6 +579,55 @@ class MonitoringConfig(BaseModel):
     stale_data_pause_after_checks: int = 3
     auto_pause_on_ws_disconnect: bool = True
     ws_disconnect_pause_after_seconds: int = 300
+    auto_pause_on_consecutive_losses: bool = True
+    consecutive_losses_pause_threshold: int = 4
+    auto_pause_on_drawdown: bool = True
+    drawdown_pause_pct: float = 8.0
+    emergency_close_on_auto_pause: bool = False
+
+
+class StocksConfig(BaseModel):
+    enabled: bool = False
+    symbols: List[str] = Field(default_factory=lambda: ["AAPL", "MSFT", "NVDA", "TSLA"])
+    scan_interval_seconds: int = 900
+    lookback_bars: int = 120
+    min_hold_days: int = 1
+    max_hold_days: int = 7
+    max_open_positions: int = 4
+    max_position_usd: float = 500.0
+    db_path: str = "data/stocks.db"
+    polygon_api_key: str = ""
+    polygon_base_url: str = "https://api.polygon.io"
+    alpaca_api_key: str = ""
+    alpaca_api_secret: str = ""
+    alpaca_base_url: str = "https://paper-api.alpaca.markets"
+
+    @field_validator("min_hold_days")
+    @classmethod
+    def validate_min_hold_days(cls, v):
+        if v < 1:
+            raise ValueError("min_hold_days must be >= 1")
+        return v
+
+    @field_validator("max_hold_days")
+    @classmethod
+    def validate_max_hold_days(cls, v):
+        if v < 1:
+            raise ValueError("max_hold_days must be >= 1")
+        return v
+
+    @model_validator(mode="after")
+    def validate_hold_window(self):
+        if self.max_hold_days < self.min_hold_days:
+            raise ValueError("stocks.max_hold_days must be >= stocks.min_hold_days")
+        return self
+
+
+class SignalWebhookConfig(BaseModel):
+    enabled: bool = False
+    secret: str = ""
+    allowed_sources: List[str] = Field(default_factory=list)
+    max_timestamp_skew_seconds: int = 300
 
 
 class AppConfig(BaseModel):
@@ -366,6 +636,14 @@ class AppConfig(BaseModel):
     mode: str = "paper"
     log_level: str = "INFO"
     db_path: str = "data/trading.db"
+    # Optional explicit exchange list for multi-exchange mode.
+    # Example: "kraken,coinbase"
+    trading_exchanges: str = ""
+    # Optional account id label (used for multi-account orchestrations).
+    account_id: str = "default"
+    # Optional account+exchange map.
+    # Example: "main:kraken,main:coinbase,swing:kraken"
+    trading_accounts: str = ""
 
 
 # Control plane: Web + optional Telegram / Discord / Slack
@@ -438,7 +716,11 @@ class BotConfig(BaseModel):
     control: ControlConfig = Field(default_factory=ControlConfig)
     billing: BillingConfig = Field(default_factory=BillingConfig)
     ml: MLConfig = Field(default_factory=MLConfig)
+    tuner: TunerConfig = Field(default_factory=TunerConfig)
     monitoring: MonitoringConfig = Field(default_factory=MonitoringConfig)
+    stocks: StocksConfig = Field(default_factory=StocksConfig)
+    elasticsearch: ElasticsearchConfig = Field(default_factory=ElasticsearchConfig)
+    webhooks: SignalWebhookConfig = Field(default_factory=SignalWebhookConfig)
 
 
 # ---------------------------------------------------------------------------

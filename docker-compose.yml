@@ -10,16 +10,20 @@ services:
       dockerfile: Dockerfile
       args:
         REQUIREMENTS_FILE: "${REQUIREMENTS_FILE:-requirements.txt}"
-    container_name: novapulse
+    # Run with host UID/GID so bind mounts (./data, ./logs, ./models) are writable.
+    # Override with BOT_UID/BOT_GID in .env when needed.
+    user: "${BOT_UID:-1000}:${BOT_GID:-1000}"
     restart: unless-stopped
     ports:
       # Keep container port independent from host port to avoid accidental mismatch.
       # Default binds to localhost only (see .env.example).
       - "${HOST_PORT:-127.0.0.1:8090}:${DASHBOARD_PORT:-8080}"
     volumes:
-      - bot-data:/app/data
-      - bot-logs:/app/logs
-      - bot-models:/app/models
+      # Bind mounts by default so host runs and container runs share persistence.
+      # Override with named volumes by setting BOT_*_MOUNT to a volume name.
+      - ${BOT_DATA_MOUNT:-./data}:/app/data
+      - ${BOT_LOGS_MOUNT:-./logs}:/app/logs
+      - ${BOT_MODELS_MOUNT:-./models}:/app/models
       - ./config:/app/config:ro
       - ./.secrets:/app/.secrets:ro
     env_file:
@@ -27,8 +31,14 @@ services:
     environment:
       - PYTHONPATH=/app
       - PYTHONUNBUFFERED=1
+      - TF_CPP_MIN_LOG_LEVEL=2
+      - TF_ENABLE_ONEDNN_OPTS=0
     networks:
       - trading-net
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+        required: false
     deploy:
       resources:
         limits:
@@ -49,6 +59,53 @@ services:
       options:
         max-size: "50m"
         max-file: "5"
+
+  # Elasticsearch — persistent time-series store for enriched ML training data
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.17.0
+    restart: unless-stopped
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - xpack.security.http.ssl.enabled=false
+      - ES_JAVA_OPTS=-Xms256m -Xmx256m
+      - cluster.name=novapulse
+    volumes:
+      - es-data:/usr/share/elasticsearch/data
+    ports:
+      - "127.0.0.1:9200:9200"
+    networks:
+      - trading-net
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9200/_cluster/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+  # Kibana — only starts with: docker compose --profile debug up
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.17.0
+    profiles: ["debug"]
+    restart: unless-stopped
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+    ports:
+      - "127.0.0.1:5601:5601"
+    networks:
+      - trading-net
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
 
   # Optional: Monitoring with Prometheus metrics
   # prometheus:
@@ -74,11 +131,7 @@ services:
   #     - trading-net
 
 volumes:
-  bot-data:
-    driver: local
-  bot-logs:
-    driver: local
-  bot-models:
+  es-data:
     driver: local
   # prometheus-data:
   # grafana-data:

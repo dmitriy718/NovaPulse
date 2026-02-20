@@ -7,7 +7,7 @@ reused across strategies.
 
 from __future__ import annotations
 
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
 
 import numpy as np
 
@@ -17,11 +17,16 @@ from src.utils.indicators import (
     bb_position,
     bollinger_bands,
     ema,
+    garman_klass_volatility,
+    ichimoku,
     keltner_channels,
     keltner_position,
     macd,
     momentum,
+    realized_volatility,
     rsi,
+    stochastic,
+    supertrend,
     trend_strength,
     volume_ratio,
 )
@@ -36,11 +41,13 @@ class IndicatorCache:
         highs: np.ndarray,
         lows: np.ndarray,
         volumes: np.ndarray,
+        opens: Optional[np.ndarray] = None,
     ):
         self.closes = closes
         self.highs = highs
         self.lows = lows
         self.volumes = volumes
+        self.opens = opens if opens is not None else closes  # fallback
 
         self._ema: Dict[int, np.ndarray] = {}
         self._rsi: Dict[int, np.ndarray] = {}
@@ -54,6 +61,11 @@ class IndicatorCache:
         self._macd: Dict[Tuple[int, int, int], Tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
         self._keltner: Dict[Tuple[int, int, float], Tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
         self._keltner_pos: Dict[Tuple[int, int, float], np.ndarray] = {}
+        self._realized_vol: Dict[int, np.ndarray] = {}
+        self._gk_vol: Dict[int, np.ndarray] = {}
+        self._stochastic: Dict[Tuple[int, int, int], Tuple[np.ndarray, np.ndarray]] = {}
+        self._supertrend: Dict[Tuple[int, float], Tuple[np.ndarray, np.ndarray]] = {}
+        self._ichimoku: Dict[Tuple[int, int, int], Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = {}
 
     def ema(self, period: int) -> np.ndarray:
         if period not in self._ema:
@@ -138,3 +150,45 @@ class IndicatorCache:
                 self.closes, self.highs, self.lows, ema_period, atr_period, multiplier
             )
         return self._keltner_pos[key]
+
+    def realized_vol(self, period: int = 20) -> np.ndarray:
+        if period not in self._realized_vol:
+            self._realized_vol[period] = realized_volatility(self.closes, period)
+        return self._realized_vol[period]
+
+    def gk_vol(self, period: int = 20) -> np.ndarray:
+        if period not in self._gk_vol:
+            self._gk_vol[period] = garman_klass_volatility(
+                self.opens, self.highs, self.lows, self.closes, period
+            )
+        return self._gk_vol[period]
+
+    def stochastic(
+        self, k_period: int = 14, d_period: int = 3, smooth: int = 3
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        key = (k_period, d_period, smooth)
+        if key not in self._stochastic:
+            self._stochastic[key] = stochastic(
+                self.highs, self.lows, self.closes, k_period, d_period, smooth
+            )
+        return self._stochastic[key]
+
+    def supertrend(
+        self, period: int = 10, multiplier: float = 3.0
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        key = (period, multiplier)
+        if key not in self._supertrend:
+            self._supertrend[key] = supertrend(
+                self.highs, self.lows, self.closes, period, multiplier
+            )
+        return self._supertrend[key]
+
+    def ichimoku(
+        self, tenkan: int = 9, kijun: int = 26, senkou_b: int = 52
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        key = (tenkan, kijun, senkou_b)
+        if key not in self._ichimoku:
+            self._ichimoku[key] = ichimoku(
+                self.highs, self.lows, self.closes, tenkan, kijun, senkou_b
+            )
+        return self._ichimoku[key]

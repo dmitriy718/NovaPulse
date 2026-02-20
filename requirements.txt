@@ -20,6 +20,9 @@ scikit-learn==1.6.0
 # Database
 aiosqlite==0.20.0
 
+# Elasticsearch
+elasticsearch[async]>=8.12.0,<9
+
 # Security
 cryptography==44.0.0
 python-dotenv==1.0.1

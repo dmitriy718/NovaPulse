@@ -235,3 +235,22 @@ class SlackBot:
                 self._handler.close()
             except Exception:
                 pass
+
+    async def send_message(self, text: str, channel_id: Optional[str] = None) -> bool:
+        """Send an alert message to Slack."""
+        if not self._app:
+            return False
+        channel = channel_id or self.allowed_channel_id
+        if not channel:
+            return False
+        try:
+            loop = asyncio.get_running_loop()
+
+            def _post():
+                self._app.client.chat_postMessage(channel=channel, text=text)
+
+            await loop.run_in_executor(None, _post)
+            return True
+        except Exception as e:
+            logger.warning("Slack send_message failed", error=str(e))
+            return False

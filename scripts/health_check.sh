@@ -39,7 +39,7 @@ now_epoch=$(date +%s)
 # Prefer a compose-resolved container id (avoids collisions when multiple projects exist).
 container_name="$(cd "$BASE" && docker compose ps -q trading-bot 2>/dev/null | head -n 1 || true)"
 if [ -z "${container_name:-}" ]; then
-  container_name="ai-trading-bot"
+  container_name="novapulse"
 fi
 container_running="0"
 container_health="none"
@@ -117,16 +117,26 @@ format_duration() {
 }
 
 get_db_stats_host() {
-  # Use DB_PATH if configured; fall back to repo-local DB for container-only deployments.
-  db_path="${DB_PATH:-}"
-  if [ -z "$db_path" ] && [ -f "$BASE/.env" ]; then
-    db_path="$(
-      (grep -E '^DB_PATH=' "$BASE/.env" || true) \
-        | tail -n 1 \
-        | cut -d'=' -f2- \
-        | tr -d '[:space:]'
-    )"
-  fi
+  # Resolve using the same code path as runtime config (env + YAML + multi-exchange logic).
+  db_path="$(
+    cd "$BASE" && PYTHONPATH="$BASE" /usr/bin/python3 - <<'PY' 2>/dev/null || true
+from pathlib import Path
+import os
+from src.core.config import ConfigManager
+from src.core.multi_engine import resolve_db_path, resolve_exchange_names
+
+cfg = ConfigManager().config
+base = os.getenv("DB_PATH") or cfg.app.db_path or "data/trading.db"
+names = resolve_exchange_names(cfg.exchange.name)
+multi = len(names) > 1
+exchange = names[0] if names else (cfg.exchange.name or "kraken")
+resolved = resolve_db_path(base, exchange, multi=multi)
+p = Path(resolved)
+if not p.is_absolute():
+    p = (Path.cwd() / p).resolve()
+print(str(p))
+PY
+  )"
   if [ -z "$db_path" ]; then
     db_path="$BASE/data/trading.db"
   fi
@@ -195,7 +205,27 @@ PY
 get_db_stats_container() {
   INITIAL_BANKROLL="$BANKROLL" docker exec -i "${container_name}" python - <<'PY' 2>/dev/null || true
 import os, sqlite3
-db = "/app/data/trading.db"
+from pathlib import Path
+
+def resolve_runtime_db_path() -> str:
+    try:
+        from src.core.config import ConfigManager
+        from src.core.multi_engine import resolve_db_path, resolve_exchange_names
+
+        cfg = ConfigManager().config
+        base = os.getenv("DB_PATH") or cfg.app.db_path or "data/trading.db"
+        names = resolve_exchange_names(cfg.exchange.name)
+        multi = len(names) > 1
+        exchange = names[0] if names else (cfg.exchange.name or "kraken")
+        resolved = resolve_db_path(base, exchange, multi=multi)
+        p = Path(resolved)
+        if not p.is_absolute():
+            p = (Path("/app") / p).resolve()
+        return str(p)
+    except Exception:
+        return "/app/data/trading.db"
+
+db = resolve_runtime_db_path()
 initial_bankroll_raw = (os.environ.get("INITIAL_BANKROLL") or "").strip()
 initial_bankroll = 0.0
 if initial_bankroll_raw:

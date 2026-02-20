@@ -51,6 +51,12 @@ Thumbs.db
 # Docker
 docker-compose.override.yml
 
+# Frontend deps (local only)
+node_modules/
+
+# Local secret scratch files
+eskey
+
 # Testing
 .pytest_cache/
 .mypy_cache/

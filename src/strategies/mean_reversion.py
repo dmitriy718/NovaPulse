@@ -133,8 +133,18 @@ class MeanReversionStrategy(BaseStrategy):
         strength = 0.0
         confidence = 0.0
 
+        reversal_candle_long = len(closes) > 1 and closes[-1] > closes[-2]
+        reversal_candle_short = len(closes) > 1 and closes[-1] < closes[-2]
+
         # -- LONG (Buy at lower band) --
         if curr_bb_pos < 0.15 and curr_rsi < self.rsi_oversold:
+            long_confirmed = (
+                rsi_bull_divergence
+                or (vol_declining and reversal_candle_long)
+            )
+            if not long_confirmed:
+                return self._neutral_signal(pair, "No long reversion confirmation")
+
             direction = SignalDirection.LONG
 
             # Strength based on BB position depth
@@ -167,6 +177,13 @@ class MeanReversionStrategy(BaseStrategy):
 
         # -- SHORT (Sell at upper band) --
         elif curr_bb_pos > 0.85 and curr_rsi > self.rsi_overbought:
+            short_confirmed = (
+                rsi_bear_divergence
+                or (vol_declining and reversal_candle_short)
+            )
+            if not short_confirmed:
+                return self._neutral_signal(pair, "No short reversion confirmation")
+
             direction = SignalDirection.SHORT
 
             strength = 0.4 + min((curr_bb_pos - 0.85) * 2.0, 0.3)

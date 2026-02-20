@@ -39,6 +39,11 @@ Control Plane + Observability:
 28. Telegram command center (status, pause/resume, close_all, kill) + scheduled check-ins
 29. CSV export of trades for reconciliation
 30. 72-96 hour stress monitor (API/WS/data freshness/activity) with auth support
+31. Signed signal webhook intake (`/api/v1/signals/webhook`) with idempotency tracking
+32. Backtest + optimization API endpoints (`/api/v1/backtest/run`, `/api/v1/backtest/optimize`)
+33. Strategy marketplace templates + apply endpoint
+34. Copy-trading provider registry (tenant-scoped)
+35. Ops heartbeat endpoint + VPS watchdog helper (`scripts/vps_watchdog.py`)
 
 Resilience:
 - **Graceful Error Handler** ("Trade or Die"): classifies errors as CRITICAL / DEGRADED / TRANSIENT. Only exchange-auth or database failures stop trading. All other subsystem failures (Telegram, Discord, Slack, dashboard, ML, billing) are logged and skipped so the bot keeps trading.
@@ -125,13 +130,22 @@ Automated health checks and log watchers with Telegram notifications:
 ./scripts/log_watch.sh
 ```
 
+For unattended VPS operation, run:
+
+```bash
+python scripts/vps_watchdog.py --url "http://127.0.0.1:8090/api/v1/ops/heartbeat" --api-key "$DASHBOARD_READ_KEY"
+```
+
 ## Live Trading Checklist (Do Not Skip)
 
 1. Set `TRADING_MODE=paper` for 24h+ with stress monitor.
 2. Set `DASHBOARD_ADMIN_KEY` and `DASHBOARD_SESSION_SECRET` (strong, non-placeholder).
-3. Restrict API keys at the exchange: no withdrawals, least privilege, IP allowlist if possible.
-4. Keep dashboard bound to localhost, expose only via VPN/reverse-proxy auth if needed.
-5. Enable live mode only after backtests + paper performance gates pass.
+3. For production UI on `nova.horizonsvc.com`, set
+   `DASHBOARD_PUBLIC_ORIGIN=https://nova.horizonsvc.com` and
+   `DASHBOARD_CORS_ORIGINS=https://nova.horizonsvc.com`.
+4. Restrict API keys at the exchange: no withdrawals, least privilege, IP allowlist if possible.
+5. Keep dashboard bound to localhost, expose only via VPN/reverse-proxy auth if needed.
+6. Enable live mode only after backtests + paper performance gates pass.
 
 ## Architecture
 
@@ -150,7 +164,8 @@ main.py (lifecycle supervisor with retry + jitter)
        +-- OrderBookAnalyzer (microstructure scoring)
        +-- RiskManager (Kelly, trailing stops, circuit breakers)
        +-- TradeExecutor (limit orders, paper/live, partial fills)
-       +-- DatabaseManager (SQLite WAL, multi-tenant)
+       +-- DatabaseManager (SQLite WAL, multi-tenant, canonical ledger)
+       +-- Elasticsearch pipeline (analytics/enrichment mirror, non-canonical)
        +-- DashboardServer (FastAPI + WebSocket)
        +-- ControlRouter -> TelegramBot / DiscordBot / SlackBot
        +-- ModelTrainer + AutoRetrainer (ProcessPoolExecutor)

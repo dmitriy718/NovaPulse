@@ -161,7 +161,8 @@ class DatabaseManager:
             timestamp TEXT NOT NULL,
             metric_name TEXT NOT NULL,
             metric_value REAL NOT NULL,
-            tags TEXT  -- JSON blob
+            tags TEXT,  -- JSON blob
+            tenant_id TEXT DEFAULT 'default'
         );
 
         -- ML training data
@@ -214,6 +215,56 @@ class DatabaseManager:
             FOREIGN KEY (tenant_id) REFERENCES tenants(id)
         );
 
+        -- Processed Stripe webhook events (idempotency key = event_id)
+        CREATE TABLE IF NOT EXISTS stripe_webhook_events (
+            event_id TEXT PRIMARY KEY,
+            event_type TEXT,
+            payload_hash TEXT,
+            received_at TEXT NOT NULL
+        );
+
+        -- Processed trading signal webhook events (idempotency key = event_id)
+        CREATE TABLE IF NOT EXISTS signal_webhook_events (
+            event_id TEXT PRIMARY KEY,
+            source TEXT,
+            payload_hash TEXT,
+            received_at TEXT NOT NULL,
+            tenant_id TEXT DEFAULT 'default'
+        );
+
+        -- Backtest / optimization run history (dashboard + audit)
+        CREATE TABLE IF NOT EXISTS backtest_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id TEXT UNIQUE NOT NULL,
+            tenant_id TEXT DEFAULT 'default',
+            exchange TEXT,
+            pair TEXT NOT NULL,
+            timeframe TEXT,
+            mode TEXT,
+            status TEXT NOT NULL DEFAULT 'completed'
+                CHECK(status IN ('queued', 'running', 'completed', 'failed')),
+            run_type TEXT NOT NULL DEFAULT 'backtest'
+                CHECK(run_type IN ('backtest', 'optimization')),
+            params_json TEXT,
+            result_json TEXT,
+            started_at TEXT,
+            completed_at TEXT,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
+
+        -- Copy-trading provider registry (for webhook signal providers)
+        CREATE TABLE IF NOT EXISTS copy_trading_providers (
+            provider_id TEXT PRIMARY KEY,
+            tenant_id TEXT DEFAULT 'default',
+            name TEXT NOT NULL,
+            source TEXT,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            webhook_secret TEXT,
+            metadata_json TEXT,
+            created_at TEXT DEFAULT (datetime('now')),
+            updated_at TEXT DEFAULT (datetime('now'))
+        );
+
         -- Daily performance summary
         CREATE TABLE IF NOT EXISTS daily_summary (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -245,6 +296,11 @@ class DatabaseManager:
         CREATE INDEX IF NOT EXISTS idx_ml_features_pair ON ml_features(pair);
         CREATE INDEX IF NOT EXISTS idx_ml_features_label ON ml_features(label);
         CREATE INDEX IF NOT EXISTS idx_order_book_pair ON order_book_snapshots(pair);
+        CREATE INDEX IF NOT EXISTS idx_webhook_received_at ON stripe_webhook_events(received_at);
+        CREATE INDEX IF NOT EXISTS idx_signal_webhook_received_at ON signal_webhook_events(received_at);
+        CREATE INDEX IF NOT EXISTS idx_backtest_runs_tenant_created ON backtest_runs(tenant_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_backtest_runs_pair ON backtest_runs(pair);
+        CREATE INDEX IF NOT EXISTS idx_copy_trading_providers_tenant ON copy_trading_providers(tenant_id, updated_at);
         """
         await self._db.executescript(schema_sql)
         await self._db.commit()
@@ -263,6 +319,7 @@ class DatabaseManager:
         statements = [
             "CREATE INDEX IF NOT EXISTS idx_ml_features_trade_id ON ml_features(trade_id);",
             "CREATE INDEX IF NOT EXISTS idx_order_book_trade_id ON order_book_snapshots(trade_id);",
+            "CREATE INDEX IF NOT EXISTS idx_metrics_tenant ON metrics(tenant_id);",
         ]
         for stmt in statements:
             try:
@@ -289,6 +346,7 @@ class DatabaseManager:
             ("daily_summary", "tenant_id", "TEXT DEFAULT 'default'"),
             ("order_book_snapshots", "tenant_id", "TEXT DEFAULT 'default'"),
             ("order_book_snapshots", "trade_id", "TEXT"),
+            ("metrics", "tenant_id", "TEXT DEFAULT 'default'"),
         ]
         for table, column, col_def in tables_columns:
             try:
@@ -303,7 +361,7 @@ class DatabaseManager:
 
         # Backfill: SQLite ADD COLUMN does not populate existing rows with DEFAULT.
         # For strict tenant isolation, ensure no tenant_id is NULL.
-        for table in ("trades", "thought_log", "signals", "ml_features", "daily_summary", "order_book_snapshots"):
+        for table in ("trades", "thought_log", "signals", "ml_features", "daily_summary", "order_book_snapshots", "metrics"):
             try:
                 await self._db.execute(f"UPDATE {table} SET tenant_id = 'default' WHERE tenant_id IS NULL")
                 await self._db.commit()
@@ -604,17 +662,16 @@ class DatabaseManager:
                 params.append(tenant_id)
 
             await self._db.execute(
-                f"""UPDATE trades SET 
+                f"""UPDATE trades SET
                     exit_price = ?, pnl = ?, pnl_pct = ?, fees = ?,
                     slippage = ?, status = 'closed', exit_time = ?,
                     duration_seconds = ?, updated_at = datetime('now')
                 WHERE {where}""",
                 tuple(params),
             )
-            await self._db.commit()
 
             # Label any ML feature rows captured at entry time for this trade.
-            # Training data should never block trading: swallow all failures.
+            # Done before commit so both updates are in the same transaction.
             try:
                 label = 1.0 if float(pnl) > 0 else 0.0
                 ml_where = "trade_id = ? AND label IS NULL"
@@ -626,7 +683,6 @@ class DatabaseManager:
                     f"UPDATE ml_features SET label = ? WHERE {ml_where}",
                     tuple(ml_params),
                 )
-                await self._db.commit()
             except Exception as e:
                 try:
                     logger.warning(
@@ -638,6 +694,8 @@ class DatabaseManager:
                     )
                 except Exception:
                     pass
+
+            await self._db.commit()
 
     async def get_open_trades(
         self,
@@ -684,6 +742,26 @@ class DatabaseManager:
         rows = await cursor.fetchall()
         return [dict(zip(columns, row)) for row in rows]
 
+    async def count_trades_since(
+        self,
+        since_iso: str,
+        tenant_id: Optional[str] = "default",
+    ) -> int:
+        """Count non-cancelled trades with entry_time >= since_iso."""
+        sql = (
+            "SELECT COUNT(*) FROM trades WHERE status != 'cancelled' AND "
+            + self._sql_dt("entry_time")
+            + " >= "
+            + self._sql_dt("?")
+        )
+        params: List[Any] = [since_iso]
+        if tenant_id:
+            sql += " AND tenant_id = ?"
+            params.append(tenant_id)
+        cursor = await self._db.execute(sql, tuple(params))
+        row = await cursor.fetchone()
+        return int((row[0] if row else 0) or 0)
+
     # ------------------------------------------------------------------
     # Signal Operations
     # ------------------------------------------------------------------
@@ -715,29 +793,50 @@ class DatabaseManager:
     # ------------------------------------------------------------------
 
     async def insert_metric(
-        self, name: str, value: float, tags: Optional[Dict] = None
+        self,
+        name: str,
+        value: float,
+        tags: Optional[Dict] = None,
+        tenant_id: Optional[str] = "default",
     ) -> None:
-        """Insert a performance metric data point."""
+        """Insert a performance metric data point (optionally tenant-scoped)."""
         async with self._timed_lock():
             await self._db.execute(
-                "INSERT INTO metrics (timestamp, metric_name, metric_value, tags) VALUES (?, ?, ?, ?)",
-                (datetime.now(timezone.utc).isoformat(), name, value,
-                 json.dumps(tags or {}))
+                "INSERT INTO metrics (timestamp, metric_name, metric_value, tags, tenant_id) VALUES (?, ?, ?, ?, ?)",
+                (
+                    datetime.now(timezone.utc).isoformat(),
+                    name,
+                    value,
+                    json.dumps(tags or {}),
+                    tenant_id or "default",
+                )
             )
             await self._db.commit()
 
     async def get_metrics(
-        self, name: str, hours: int = 24, limit: int = 1000
+        self,
+        name: str,
+        hours: int = 24,
+        limit: int = 1000,
+        tenant_id: Optional[str] = "default",
     ) -> List[Tuple[str, float]]:
-        """Get metric time series for the last N hours."""
+        """Get metric time series for the last N hours (optionally tenant-scoped)."""
         cutoff = datetime.now(timezone.utc).timestamp() - float(hours) * 3600.0
         cutoff_str = datetime.fromtimestamp(cutoff, tz=timezone.utc).isoformat()
-        cursor = await self._db.execute(
+        sql = (
             """SELECT timestamp, metric_value FROM metrics
-            WHERE metric_name = ? AND """ + self._sql_dt("timestamp") + " >= " + self._sql_dt("?") + """
-            ORDER BY timestamp DESC LIMIT ?""",
-            (name, cutoff_str, limit)
+            WHERE metric_name = ? AND """
+            + self._sql_dt("timestamp")
+            + " >= "
+            + self._sql_dt("?")
         )
+        params: List[Any] = [name, cutoff_str]
+        if tenant_id:
+            sql += " AND tenant_id = ?"
+            params.append(tenant_id)
+        sql += " ORDER BY timestamp DESC LIMIT ?"
+        params.append(limit)
+        cursor = await self._db.execute(sql, tuple(params))
         return await cursor.fetchall()
 
     # ------------------------------------------------------------------
@@ -917,10 +1016,11 @@ class DatabaseManager:
 
     async def get_state(self, key: str, default: Any = None) -> Any:
         """Get a system state value."""
-        cursor = await self._db.execute(
-            "SELECT value FROM system_state WHERE key = ?", (key,)
-        )
-        row = await cursor.fetchone()
+        async with self._timed_lock():
+            cursor = await self._db.execute(
+                "SELECT value FROM system_state WHERE key = ?", (key,)
+            )
+            row = await cursor.fetchone()
         if row:
             try:
                 return json.loads(row[0])
@@ -1100,6 +1200,243 @@ class DatabaseManager:
         return result
 
     # ------------------------------------------------------------------
+    # Hourly Performance Stats (Session-Aware Trading)
+    # ------------------------------------------------------------------
+
+    async def get_hourly_stats(
+        self,
+        tenant_id: Optional[str] = "default",
+        pair: Optional[str] = None,
+    ) -> Dict[int, Dict[str, Any]]:
+        """Get per-hour trade performance.
+
+        Returns ``{hour: {"total": int, "wins": int, "avg_pnl": float}}``.
+        """
+        sql = """
+            SELECT CAST(strftime('%H', replace(substr(entry_time, 1, 19), 'T', ' ')) AS INTEGER) as hour,
+                   COUNT(*) as total,
+                   SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
+                   AVG(pnl) as avg_pnl
+            FROM trades
+            WHERE status = 'closed'
+        """
+        params: List[Any] = []
+        if tenant_id:
+            sql += " AND tenant_id = ?"
+            params.append(tenant_id)
+        if pair:
+            sql += " AND pair = ?"
+            params.append(pair)
+        sql += " GROUP BY hour"
+
+        cursor = await self._db.execute(sql, tuple(params))
+        rows = await cursor.fetchall()
+        result: Dict[int, Dict[str, Any]] = {}
+        for row in rows:
+            hour = int(row[0]) if row[0] is not None else 0
+            result[hour] = {
+                "total": int(row[1] or 0),
+                "wins": int(row[2] or 0),
+                "avg_pnl": float(row[3] or 0.0),
+            }
+        return result
+
+    # ------------------------------------------------------------------
+    # Backtesting / Optimization Runs
+    # ------------------------------------------------------------------
+
+    async def insert_backtest_run(
+        self,
+        *,
+        run_id: str,
+        pair: str,
+        run_type: str = "backtest",
+        status: str = "completed",
+        mode: str = "",
+        exchange: str = "",
+        timeframe: str = "",
+        params: Optional[Dict[str, Any]] = None,
+        result: Optional[Dict[str, Any]] = None,
+        tenant_id: Optional[str] = "default",
+        started_at: str = "",
+        completed_at: str = "",
+    ) -> None:
+        """Persist a backtest/optimization run for audit and dashboard history."""
+        self._ensure_ready()
+        async with self._timed_lock():
+            await self._db.execute(
+                """
+                INSERT OR REPLACE INTO backtest_runs
+                (run_id, tenant_id, exchange, pair, timeframe, mode, status, run_type,
+                 params_json, result_json, started_at, completed_at, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                """,
+                (
+                    run_id,
+                    tenant_id or "default",
+                    exchange,
+                    pair,
+                    timeframe,
+                    mode,
+                    status,
+                    run_type,
+                    json.dumps(params or {}),
+                    json.dumps(result or {}),
+                    started_at or datetime.now(timezone.utc).isoformat(),
+                    completed_at or datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+            await self._db.commit()
+
+    async def get_backtest_runs(
+        self,
+        *,
+        limit: int = 25,
+        tenant_id: Optional[str] = "default",
+    ) -> List[Dict[str, Any]]:
+        """List recent backtest/optimization runs."""
+        self._ensure_ready()
+        lim = max(1, min(int(limit), 250))
+        params: List[Any] = []
+        sql = """
+            SELECT run_id, tenant_id, exchange, pair, timeframe, mode, status, run_type,
+                   params_json, result_json, started_at, completed_at, created_at
+            FROM backtest_runs
+        """
+        if tenant_id:
+            sql += " WHERE tenant_id = ?"
+            params.append(tenant_id)
+        sql += " ORDER BY datetime(created_at) DESC LIMIT ?"
+        params.append(lim)
+
+        cursor = await self._db.execute(sql, tuple(params))
+        rows = await cursor.fetchall()
+        out: List[Dict[str, Any]] = []
+        for row in rows:
+            try:
+                params_json = json.loads(row[8] or "{}")
+            except Exception:
+                params_json = {}
+            try:
+                result_json = json.loads(row[9] or "{}")
+            except Exception:
+                result_json = {}
+            out.append(
+                {
+                    "run_id": row[0],
+                    "tenant_id": row[1],
+                    "exchange": row[2],
+                    "pair": row[3],
+                    "timeframe": row[4],
+                    "mode": row[5],
+                    "status": row[6],
+                    "run_type": row[7],
+                    "params": params_json,
+                    "result": result_json,
+                    "started_at": row[10],
+                    "completed_at": row[11],
+                    "created_at": row[12],
+                }
+            )
+        return out
+
+    async def upsert_copy_trading_provider(
+        self,
+        *,
+        provider_id: str,
+        name: str,
+        tenant_id: Optional[str] = "default",
+        source: str = "",
+        enabled: bool = True,
+        webhook_secret: str = "",
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Create or update a copy-trading provider record."""
+        self._ensure_ready()
+        async with self._timed_lock():
+            await self._db.execute(
+                """
+                INSERT INTO copy_trading_providers
+                (provider_id, tenant_id, name, source, enabled, webhook_secret, metadata_json, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+                ON CONFLICT(provider_id) DO UPDATE SET
+                    tenant_id = excluded.tenant_id,
+                    name = excluded.name,
+                    source = excluded.source,
+                    enabled = excluded.enabled,
+                    webhook_secret = excluded.webhook_secret,
+                    metadata_json = excluded.metadata_json,
+                    updated_at = datetime('now')
+                """,
+                (
+                    provider_id,
+                    tenant_id or "default",
+                    name,
+                    source,
+                    1 if enabled else 0,
+                    webhook_secret,
+                    json.dumps(metadata or {}),
+                ),
+            )
+            await self._db.commit()
+
+    async def get_copy_trading_providers(
+        self,
+        *,
+        tenant_id: Optional[str] = "default",
+        enabled_only: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """List copy-trading providers for a tenant."""
+        self._ensure_ready()
+        sql = """
+            SELECT provider_id, tenant_id, name, source, enabled, webhook_secret, metadata_json, created_at, updated_at
+            FROM copy_trading_providers
+            WHERE tenant_id = ?
+        """
+        params: List[Any] = [tenant_id or "default"]
+        if enabled_only:
+            sql += " AND enabled = 1"
+        sql += " ORDER BY datetime(updated_at) DESC"
+
+        cursor = await self._db.execute(sql, tuple(params))
+        rows = await cursor.fetchall()
+        out: List[Dict[str, Any]] = []
+        for row in rows:
+            try:
+                meta = json.loads(row[6] or "{}")
+            except Exception:
+                meta = {}
+            out.append(
+                {
+                    "provider_id": row[0],
+                    "tenant_id": row[1],
+                    "name": row[2],
+                    "source": row[3],
+                    "enabled": bool(row[4]),
+                    "webhook_secret": row[5] or "",
+                    "metadata": meta,
+                    "created_at": row[7],
+                    "updated_at": row[8],
+                }
+            )
+        return out
+
+    async def get_copy_trading_provider(
+        self,
+        *,
+        provider_id: str,
+        tenant_id: Optional[str] = "default",
+    ) -> Optional[Dict[str, Any]]:
+        """Get one copy-trading provider by id."""
+        if not provider_id:
+            return None
+        providers = await self.get_copy_trading_providers(tenant_id=tenant_id, enabled_only=False)
+        for p in providers:
+            if p.get("provider_id") == provider_id:
+                return p
+        return None
+
+    # ------------------------------------------------------------------
     # Tenants (multi-tenant / Stripe)
     # ------------------------------------------------------------------
 
@@ -1183,6 +1520,100 @@ class DatabaseManager:
         )
         row = await cursor.fetchone()
         return row[0] if row else None
+
+    # ------------------------------------------------------------------
+    # Billing Webhook Idempotency
+    # ------------------------------------------------------------------
+
+    async def has_processed_stripe_webhook_event(self, event_id: str) -> bool:
+        """Return True if the Stripe event_id has already been processed."""
+        self._ensure_ready()
+        if not event_id:
+            return False
+        cursor = await self._db.execute(
+            "SELECT 1 FROM stripe_webhook_events WHERE event_id = ?",
+            (event_id,),
+        )
+        row = await cursor.fetchone()
+        return bool(row)
+
+    async def mark_stripe_webhook_event_processed(
+        self,
+        event_id: str,
+        *,
+        event_type: str = "",
+        payload_hash: str = "",
+    ) -> bool:
+        """
+        Mark Stripe webhook event as processed.
+
+        Returns True if inserted now, False if this event_id already existed.
+        """
+        self._ensure_ready()
+        if not event_id:
+            return False
+        async with self._timed_lock():
+            cursor = await self._db.execute(
+                """
+                INSERT OR IGNORE INTO stripe_webhook_events
+                (event_id, event_type, payload_hash, received_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (
+                    event_id,
+                    event_type,
+                    payload_hash,
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+            await self._db.commit()
+            return bool(cursor.rowcount and cursor.rowcount > 0)
+
+    async def has_processed_signal_webhook_event(self, event_id: str) -> bool:
+        """Return True if the signal webhook event_id has already been processed."""
+        self._ensure_ready()
+        if not event_id:
+            return False
+        cursor = await self._db.execute(
+            "SELECT 1 FROM signal_webhook_events WHERE event_id = ?",
+            (event_id,),
+        )
+        row = await cursor.fetchone()
+        return bool(row)
+
+    async def mark_signal_webhook_event_processed(
+        self,
+        event_id: str,
+        *,
+        source: str = "",
+        payload_hash: str = "",
+        tenant_id: Optional[str] = "default",
+    ) -> bool:
+        """
+        Mark signal webhook event as processed.
+
+        Returns True if inserted now, False if this event_id already existed.
+        """
+        self._ensure_ready()
+        if not event_id:
+            return False
+        async with self._timed_lock():
+            cursor = await self._db.execute(
+                """
+                INSERT OR IGNORE INTO signal_webhook_events
+                (event_id, source, payload_hash, received_at, tenant_id)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    event_id,
+                    source,
+                    payload_hash,
+                    datetime.now(timezone.utc).isoformat(),
+                    tenant_id or "default",
+                ),
+            )
+            await self._db.commit()
+            return bool(cursor.rowcount and cursor.rowcount > 0)
 
     # ------------------------------------------------------------------
     # Cleanup & Close
