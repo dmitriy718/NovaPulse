@@ -100,7 +100,24 @@ Confirm from `/api/v1/status`:
 - `paused: true` (because `START_PAUSED=true`)
 - `ws_connected: true`
 
-### 4.4 Resume trading when checks are good
+### 4.4 Verify storage contract and ES target
+
+SQLite is canonical; Elasticsearch is analytics mirror only.
+
+```bash
+curl -s -H "X-API-Key: $DASHBOARD_READ_KEY" http://127.0.0.1:8090/api/v1/storage
+```
+
+Confirm:
+
+- `canonical_ledger: sqlite`
+- `elasticsearch_role: analytics_mirror`
+- every expected engine/account row appears with the correct `db_path_abs`
+- `es_target` matches your intended runtime sink (`cloud` or `hosts`)
+
+If `docker compose` local Elasticsearch is running while `es_target=cloud`, that local service is not your active analytics sink.
+
+### 4.5 Resume trading when checks are good
 
 ```bash
 curl -s -X POST \
@@ -227,4 +244,3 @@ Run walk-forward gate manually:
 ```bash
 python scripts/walk_forward_gate.py
 ```
-

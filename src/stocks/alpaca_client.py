@@ -132,6 +132,27 @@ class AlpacaClient:
         except Exception:
             return None
 
+    async def list_open_positions(self) -> list[Dict[str, Any]]:
+        """Return currently open broker positions."""
+        if not self.enabled:
+            return []
+        if self._client is None:
+            await self.initialize()
+        try:
+            resp = await self._client.get(f"{self.base_url}/v2/positions")
+            if resp.status_code == 200:
+                payload = resp.json()
+                return payload if isinstance(payload, list) else []
+            logger.warning(
+                "Alpaca list positions failed",
+                status_code=resp.status_code,
+                body=resp.text[:200],
+            )
+            return []
+        except Exception as e:
+            logger.warning("Alpaca list positions exception", error=repr(e))
+            return []
+
     @staticmethod
     def _is_filled(order: Dict[str, Any]) -> bool:
         try:

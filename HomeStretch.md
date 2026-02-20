@@ -214,6 +214,25 @@ Scope: Full codebase sweep (backend, frontend, crypto, stocks, ops scripts, conf
 - Approved release checklist owner and on-call owner for v4 cutover window.
 
 ## Current Readiness Snapshot
-- Test baseline: green (`93/93`).
+- Test baseline: green (`114/114`).
 - Architecture baseline: functional but not v4-final due P0/P1 items above.
 - Recommended v4 target condition: all P0 + P1 closed, 7-day soak complete, reconciliation proven across restart scenarios.
+
+## Execution Status (Completed)
+
+Date completed: 2026-02-20
+
+- HS-001: Completed. Persistence contract explicitly enforced/visible as SQLite canonical + ES analytics mirror. Added startup storage logs and `/api/v1/storage` mapping endpoint.
+- HS-008: Completed. Live stock pending-open reconciliation hardened to broker truth to prevent orphan local/broker divergence.
+- HS-002 + HS-015: Completed. Exchange/account routing normalization verified end-to-end (`exchange`, `account_id` split contract).
+- HS-006: Completed. Multi-engine critical loop parity verified (`critical=True` for restart-managed critical loops).
+- HS-012: Completed. Backtest friction model corrected to separate `slippage_pct` from `fee_pct`.
+- HS-013: Completed. Slack handlers now submit coroutines to captured running loop (no callback-thread loop lookup).
+- HS-014: Completed. Positions rendering hardening: pair/side escaped before insertion.
+- HS-009 + HS-011: Completed. Stock startup broker-position reconciliation added; stock close accounting now records net PnL with fees/slippage.
+- HS-003 + HS-005 + HS-004: Completed. ES drop telemetry already active; health script now aggregates all account DBs; docs now disambiguate local-vs-cloud ES sink target.
+- HS-007 + HS-010 + HS-016 + HS-017: Completed. Weighted Sharpe/Sortino aggregation; real stock win-rate/avg-pnl stats; holiday-aware stock market state badge; pytest asyncio loop scope fixed.
+
+Validation after fixes:
+
+- `pytest -q` => `114 passed in 4.15s`

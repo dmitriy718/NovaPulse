@@ -10,6 +10,7 @@ Uses control router for all control actions.
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import Future
 from typing import Any, Dict, List, Optional
 
 from src.core.logger import get_logger
@@ -39,6 +40,7 @@ class SlackBot:
         self._app = None
         self._handler = None
         self._enabled = bool(self.token and self.app_token)
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
 
     def set_control_router(self, router) -> None:
         """Inject the control router for pause/resume/close_all/kill."""
@@ -55,6 +57,7 @@ class SlackBot:
         if not self._enabled:
             logger.info("Slack bot disabled (no token or app_token)")
             return False
+        self._loop = asyncio.get_running_loop()
 
         try:
             from slack_bolt import App
@@ -72,7 +75,7 @@ class SlackBot:
                     say(text="Not authorized.", channel=command["channel_id"])
                     return
                 if router:
-                    asyncio.run_coroutine_threadsafe(router.pause(), asyncio.get_event_loop())
+                    self._submit_coro(router.pause())
                     say(text="Trading *paused*.", channel=command["channel_id"])
                 else:
                     say(text="Control router not set.", channel=command["channel_id"])
@@ -84,7 +87,7 @@ class SlackBot:
                     say(text="Not authorized.", channel=command["channel_id"])
                     return
                 if router:
-                    asyncio.run_coroutine_threadsafe(router.resume(), asyncio.get_event_loop())
+                    self._submit_coro(router.resume())
                     say(text="Trading *resumed*.", channel=command["channel_id"])
                 else:
                     say(text="Control router not set.", channel=command["channel_id"])
@@ -96,7 +99,7 @@ class SlackBot:
                     say(text="Not authorized.", channel=command["channel_id"])
                     return
                 if router:
-                    fut = asyncio.run_coroutine_threadsafe(router.close_all("slack"), asyncio.get_event_loop())
+                    fut = self._submit_coro(router.close_all("slack"))
                     try:
                         result = fut.result(timeout=30)
                     except Exception:
@@ -116,7 +119,7 @@ class SlackBot:
                     return
                 if router:
                     say(text="Emergency shutdown initiated.", channel=command["channel_id"])
-                    asyncio.run_coroutine_threadsafe(router.kill(), asyncio.get_event_loop())
+                    self._submit_coro(router.kill())
                 else:
                     say(text="Control router not set.", channel=command["channel_id"])
 
@@ -146,7 +149,7 @@ class SlackBot:
                     say(text="Not authorized.", channel=command["channel_id"])
                     return
                 if router:
-                    fut = asyncio.run_coroutine_threadsafe(router.get_pnl(), asyncio.get_event_loop())
+                    fut = self._submit_coro(router.get_pnl())
                     try:
                         data = fut.result(timeout=10)
                     except Exception:
@@ -168,7 +171,7 @@ class SlackBot:
                     say(text="Not authorized.", channel=command["channel_id"])
                     return
                 if router:
-                    fut = asyncio.run_coroutine_threadsafe(router.get_positions(), asyncio.get_event_loop())
+                    fut = self._submit_coro(router.get_positions())
                     try:
                         positions_list = fut.result(timeout=10)
                     except Exception:
@@ -235,6 +238,7 @@ class SlackBot:
                 self._handler.close()
             except Exception:
                 pass
+        self._loop = None
 
     async def send_message(self, text: str, channel_id: Optional[str] = None) -> bool:
         """Send an alert message to Slack."""
@@ -254,3 +258,12 @@ class SlackBot:
         except Exception as e:
             logger.warning("Slack send_message failed", error=str(e))
             return False
+
+    def _submit_coro(self, coro):
+        """Submit a coroutine to the main event loop from Slack callback threads."""
+        if self._loop is None or self._loop.is_closed():
+            fut: Future = Future()
+            fut.set_exception(RuntimeError("SlackBot event loop is unavailable"))
+            logger.error("Slack command rejected: event loop unavailable")
+            return fut
+        return asyncio.run_coroutine_threadsafe(coro, self._loop)

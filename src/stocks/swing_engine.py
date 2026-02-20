@@ -26,6 +26,8 @@ _ALPACA_TERMINAL_REJECT_STATUSES = {
     "stopped",
 }
 
+_BROKER_RECONCILE_INTERVAL_LOOPS = 4
+
 
 class _StockMarketDataView:
     """Lightweight market-data adapter for dashboard compatibility."""
@@ -75,6 +77,9 @@ class _StockRiskAdapter:
         self._daily_pnl = 0.0
         self._daily_trades = 0
         self._trade_count = 0
+        self._wins = 0
+        self._losses = 0
+        self._total_pnl = 0.0
         self._consecutive_wins = 0
         self._consecutive_losses = 0
         self._daily_reset_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -93,15 +98,45 @@ class _StockRiskAdapter:
         self._daily_trades += 1
         self._daily_pnl += float(pnl)
         self._trade_count += 1
+        self._total_pnl += float(pnl)
         self.current_bankroll += float(pnl)
         if self.current_bankroll > self._peak_bankroll:
             self._peak_bankroll = self.current_bankroll
         if pnl > 0:
+            self._wins += 1
             self._consecutive_wins += 1
             self._consecutive_losses = 0
         elif pnl < 0:
+            self._losses += 1
             self._consecutive_losses += 1
             self._consecutive_wins = 0
+        else:
+            self._losses += 1
+
+    def bootstrap_from_performance(self, perf: Dict[str, Any]) -> None:
+        """Restore core counters from persisted DB stats at startup."""
+        total_pnl = float(perf.get("total_pnl", 0.0) or 0.0)
+        total_trades = int(perf.get("total_trades", 0) or 0)
+        wins = int(perf.get("winning_trades", 0) or 0)
+        losses = int(perf.get("losing_trades", max(total_trades - wins, 0)) or 0)
+        self._trade_count = max(total_trades, 0)
+        self._wins = max(wins, 0)
+        self._losses = max(losses, 0)
+        self._total_pnl = total_pnl
+        self.current_bankroll = self.initial_bankroll + total_pnl
+        self._peak_bankroll = max(self.initial_bankroll, self.current_bankroll)
+
+    @property
+    def win_rate(self) -> float:
+        if self._trade_count <= 0:
+            return 0.0
+        return self._wins / float(self._trade_count)
+
+    @property
+    def avg_pnl(self) -> float:
+        if self._trade_count <= 0:
+            return 0.0
+        return self._total_pnl / float(self._trade_count)
 
     def get_risk_report(self, open_positions: int = 0) -> Dict[str, Any]:
         self._check_daily_reset()
@@ -216,6 +251,8 @@ class StockSwingEngine:
         await self.polygon.initialize()
         if self.mode == "live":
             await self.alpaca.initialize()
+            await self._reconcile_broker_positions(source="startup")
+        await self._load_historical_stats()
         await self.db.log_thought(
             "system",
             f"Stock swing engine initialized | symbols={','.join(self.pairs)}",
@@ -242,6 +279,133 @@ class StockSwingEngine:
         await self.polygon.close()
         await self.db.close()
 
+    async def _load_historical_stats(self) -> None:
+        """Prime in-memory strategy stats from persisted trade history."""
+        try:
+            perf = await self.db.get_performance_stats(tenant_id=self.tenant_id)
+            self.risk_manager.bootstrap_from_performance(perf)
+        except Exception as e:
+            logger.warning("Stock stats bootstrap failed", error=repr(e))
+
+    async def _normalize_broker_positions(self) -> Dict[str, Dict[str, Any]]:
+        """
+        Fetch and normalize open broker positions keyed by symbol.
+
+        Returns only long positions with positive quantity because this strategy is long-only.
+        """
+        if self.mode != "live":
+            return {}
+        rows = await self.alpaca.list_open_positions()
+        out: Dict[str, Dict[str, Any]] = {}
+        for row in rows:
+            try:
+                symbol = str(row.get("symbol", "")).upper().strip()
+                qty_signed = float(row.get("qty", 0.0) or 0.0)
+                qty = abs(qty_signed)
+                if not symbol or qty <= 0:
+                    continue
+                if qty_signed < 0:
+                    # Strategy does not support short inventory yet.
+                    await self.db.log_thought(
+                        "execution",
+                        f"Skipping unsupported short broker position {symbol} qty={qty:.4f}",
+                        severity="warning",
+                        tenant_id=self.tenant_id,
+                    )
+                    continue
+                avg_entry_price = float(row.get("avg_entry_price", 0.0) or 0.0)
+                if avg_entry_price <= 0:
+                    avg_entry_price = float(row.get("current_price", 0.0) or 0.0)
+                if avg_entry_price <= 0:
+                    continue
+                out[symbol] = {
+                    "symbol": symbol,
+                    "qty": qty,
+                    "avg_entry_price": avg_entry_price,
+                    "raw": row,
+                }
+            except Exception:
+                continue
+        return out
+
+    async def _materialize_broker_position(
+        self,
+        symbol: str,
+        broker_pos: Dict[str, Any],
+        *,
+        source: str,
+        pending_order_id: str = "",
+    ) -> bool:
+        """Persist a local open trade from broker truth when local state is missing."""
+        order_stub: Dict[str, Any] = {
+            "id": pending_order_id or f"reconciled-{symbol.lower()}",
+            "status": "filled",
+        }
+        opened = await self._persist_open_trade(
+            symbol=symbol,
+            fill_price=float(broker_pos.get("avg_entry_price", 0.0) or 0.0),
+            filled_qty=float(broker_pos.get("qty", 0.0) or 0.0),
+            order=order_stub,
+            count_fill=False,
+        )
+        if opened:
+            await self.db.log_thought(
+                "execution",
+                (
+                    f"Stock OPEN reconciled from broker {symbol} "
+                    f"qty={float(broker_pos.get('qty', 0.0) or 0.0):.4f} "
+                    f"entry={float(broker_pos.get('avg_entry_price', 0.0) or 0.0):.2f} "
+                    f"source={source}"
+                ),
+                severity="warning",
+                tenant_id=self.tenant_id,
+            )
+        return opened
+
+    async def _reconcile_broker_positions(self, *, source: str) -> None:
+        """Ensure local DB has an open row for every live broker position."""
+        broker_positions = await self._normalize_broker_positions()
+        open_rows = await self.db.get_open_trades(tenant_id=self.tenant_id)
+        open_by_symbol = {str(row.get("pair", "")).upper(): row for row in open_rows}
+
+        reconciled = 0
+        mismatched = 0
+        for symbol, broker_pos in broker_positions.items():
+            local = open_by_symbol.get(symbol)
+            if local:
+                try:
+                    local_qty = float(local.get("quantity", 0.0) or 0.0)
+                    broker_qty = float(broker_pos.get("qty", 0.0) or 0.0)
+                    if abs(local_qty - broker_qty) > 1e-6:
+                        mismatched += 1
+                        await self.db.log_thought(
+                            "execution",
+                            (
+                                f"Stock startup reconcile qty mismatch {symbol} "
+                                f"local={local_qty:.4f} broker={broker_qty:.4f}"
+                            ),
+                            severity="warning",
+                            tenant_id=self.tenant_id,
+                        )
+                except Exception:
+                    pass
+                continue
+
+            if await self._materialize_broker_position(symbol, broker_pos, source=source):
+                reconciled += 1
+
+        if reconciled or mismatched:
+            await self.db.log_thought(
+                "system",
+                (
+                    f"Stock {source} reconciliation complete "
+                    f"| broker_positions={len(broker_positions)} "
+                    f"reconciled={reconciled} mismatched={mismatched}"
+                ),
+                severity="warning" if mismatched else "info",
+                tenant_id=self.tenant_id,
+            )
+
     async def _auto_pause(self, reason: str, detail: str = "") -> None:
         if self._trading_paused:
             return
@@ -266,6 +430,11 @@ class StockSwingEngine:
                 self._scan_count += 1
 
                 await self._reconcile_pending_opens()
+                if (
+                    self.mode == "live"
+                    and self._scan_count % _BROKER_RECONCILE_INTERVAL_LOOPS == 0
+                ):
+                    await self._reconcile_broker_positions(source="periodic")
                 open_rows = await self.db.get_open_trades(tenant_id=self.tenant_id)
                 open_by_symbol = {str(row.get("pair", "")).upper(): row for row in open_rows}
                 pending_symbols = set(self._pending_opens.keys())
@@ -405,6 +574,7 @@ class StockSwingEngine:
         fill_price: float,
         filled_qty: float,
         order: Optional[Dict[str, Any]],
+        count_fill: bool = True,
     ) -> bool:
         if fill_price <= 0 or filled_qty <= 0:
             return False
@@ -440,7 +610,8 @@ class StockSwingEngine:
             },
             tenant_id=self.tenant_id,
         )
-        self._execution_stats["orders_filled"] += 1
+        if count_fill:
+            self._execution_stats["orders_filled"] += 1
         await self.db.log_thought(
             "execution",
             f"Stock BUY {symbol} qty={filled_qty:.4f} @ {fill_price:.2f}",
@@ -456,11 +627,24 @@ class StockSwingEngine:
 
         open_rows = await self.db.get_open_trades(tenant_id=self.tenant_id)
         open_symbols = {str(row.get("pair", "")).upper() for row in open_rows}
+        broker_positions = await self._normalize_broker_positions()
 
         for symbol in list(self._pending_opens.keys()):
             pending = self._pending_opens.get(symbol) or {}
             if symbol in open_symbols:
                 self._pending_opens.pop(symbol, None)
+                continue
+
+            broker_pos = broker_positions.get(symbol)
+            if broker_pos:
+                opened = await self._materialize_broker_position(
+                    symbol,
+                    broker_pos,
+                    source="pending_reconcile",
+                    pending_order_id=str(pending.get("order_id", "")).strip(),
+                )
+                if opened:
+                    self._pending_opens.pop(symbol, None)
                 continue
 
             order_id = str(pending.get("order_id", "")).strip()
@@ -480,7 +664,7 @@ class StockSwingEngine:
                     self._execution_stats["orders_rejected"] += 1
                     await self.db.log_thought(
                         "execution",
-                        f"Stock BUY pending timeout {symbol} order={order_id}",
+                        f"Stock BUY pending timeout {symbol} order={order_id} (no broker position)",
                         severity="warning",
                         tenant_id=self.tenant_id,
                     )
@@ -562,22 +746,35 @@ class StockSwingEngine:
             except Exception:
                 pass
 
-        pnl = (exit_price - entry) * qty
-        notional = entry * qty
-        pnl_pct = (pnl / notional) if notional > 0 else 0.0
+        gross_pnl = (exit_price - entry) * qty
+        entry_notional = abs(entry * qty)
+        exit_notional = abs(exit_price * qty)
+        fee_pct = max(0.0, float(getattr(self.config.stocks, "estimated_fee_pct_per_side", 0.0005) or 0.0))
+        slippage_pct = max(
+            0.0,
+            float(getattr(self.config.stocks, "estimated_slippage_pct_per_side", 0.0002) or 0.0),
+        )
+        fees = (entry_notional + exit_notional) * fee_pct
+        slippage = (entry_notional + exit_notional) * slippage_pct
+        pnl = gross_pnl - fees - slippage
+        pnl_pct = (pnl / entry_notional) if entry_notional > 0 else 0.0
         await self.db.close_trade(
             trade["trade_id"],
             exit_price=exit_price,
             pnl=pnl,
             pnl_pct=pnl_pct,
-            fees=0.0,
+            fees=fees,
+            slippage=slippage,
             tenant_id=self.tenant_id,
         )
         self.risk_manager.record_closed_trade(pnl)
         self._execution_stats["orders_closed"] += 1
         await self.db.log_thought(
             "execution",
-            f"Stock CLOSE {symbol} qty={qty:.4f} @ {exit_price:.2f} reason={reason} pnl={pnl:.2f}",
+            (
+                f"Stock CLOSE {symbol} qty={qty:.4f} @ {exit_price:.2f} reason={reason} "
+                f"gross={gross_pnl:.2f} fees={fees:.2f} slippage={slippage:.2f} net={pnl:.2f}"
+            ),
             severity="info",
             tenant_id=self.tenant_id,
         )
@@ -625,6 +822,7 @@ class StockSwingEngine:
             return None
 
     def get_algorithm_stats(self) -> List[Dict[str, Any]]:
+        total_pnl = float(self.risk_manager.current_bankroll - self.risk_manager.initial_bankroll)
         return [
             {
                 "name": "stock_swing",
@@ -632,9 +830,9 @@ class StockSwingEngine:
                 "kind": "strategy",
                 "weight": 1.0,
                 "trades": int(self.risk_manager._trade_count),
-                "win_rate": 0.0,
-                "total_pnl": round(self.risk_manager.current_bankroll - self.risk_manager.initial_bankroll, 2),
-                "avg_pnl": 0.0,
+                "win_rate": round(float(self.risk_manager.win_rate), 4),
+                "total_pnl": round(total_pnl, 2),
+                "avg_pnl": round(float(self.risk_manager.avg_pnl), 4),
                 "note": "daily swing strategy (Polygon + Alpaca)",
             }
         ]

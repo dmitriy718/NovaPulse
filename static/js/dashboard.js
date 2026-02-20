@@ -187,6 +187,10 @@ function renderPositions(positions) {
     }
     let html = '';
     for (const pos of cleaned) {
+        const pair = escHtml(String(pos?.pair || ''));
+        const sideRaw = String(pos?.side || '').trim().toLowerCase();
+        const sideClass = sideRaw === 'buy' ? 'side-buy' : (sideRaw === 'sell' ? 'side-sell' : '');
+        const sideLabel = sideRaw ? escHtml(sideRaw.toUpperCase()) : 'N/A';
         const qty = Number(pos.quantity) || 0;
         const entry = Number(pos.entry_price) || 0;
         const current = Number(pos.current_price) || 0;
@@ -195,8 +199,8 @@ function renderPositions(positions) {
         const sizeUsd = Math.abs((current || entry) * qty);
         const conf = resolveConfidence(pos);
         html += `<tr>
-            <td>${pos.pair}</td>
-            <td class="${pos.side === 'buy' ? 'side-buy' : 'side-sell'}">${pos.side.toUpperCase()}</td>
+            <td>${pair}</td>
+            <td class="${sideClass}">${sideLabel}</td>
             <td>
                 <div class="cell-stack">
                     <span class="cell-main">${formatQty(qty)}</span>
@@ -329,10 +333,14 @@ function parseScannerLabel(label) {
     };
 }
 
-function marketStateNow() {
-    const now = new Date();
+const nyseHolidayCache = {};
+
+function nyDateParts(now) {
     const parts = new Intl.DateTimeFormat('en-US', {
         timeZone: 'America/New_York',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
         weekday: 'short',
         hour: '2-digit',
         minute: '2-digit',
@@ -340,12 +348,99 @@ function marketStateNow() {
     }).formatToParts(now);
     const map = {};
     for (const p of parts) map[p.type] = p.value;
-    const wd = String(map.weekday || '');
-    const hour = Number(map.hour || 0);
-    const minute = Number(map.minute || 0);
+    return {
+        year: Number(map.year || 0),
+        month: Number(map.month || 0),
+        day: Number(map.day || 0),
+        weekday: String(map.weekday || ''),
+        hour: Number(map.hour || 0),
+        minute: Number(map.minute || 0),
+    };
+}
+
+function dateKey(year, month, day) {
+    const m = String(month).padStart(2, '0');
+    const d = String(day).padStart(2, '0');
+    return `${year}-${m}-${d}`;
+}
+
+function observedDate(year, month, day) {
+    const utc = new Date(Date.UTC(year, month - 1, day));
+    const wd = utc.getUTCDay(); // 0=Sun..6=Sat
+    if (wd === 6) utc.setUTCDate(utc.getUTCDate() - 1); // Saturday -> Friday
+    if (wd === 0) utc.setUTCDate(utc.getUTCDate() + 1); // Sunday -> Monday
+    return dateKey(utc.getUTCFullYear(), utc.getUTCMonth() + 1, utc.getUTCDate());
+}
+
+function nthWeekday(year, month, weekday, nth) {
+    const first = new Date(Date.UTC(year, month - 1, 1));
+    const firstWeekday = first.getUTCDay();
+    const delta = (weekday - firstWeekday + 7) % 7;
+    const day = 1 + delta + ((nth - 1) * 7);
+    return dateKey(year, month, day);
+}
+
+function lastWeekday(year, month, weekday) {
+    const last = new Date(Date.UTC(year, month, 0));
+    const lastWeekdayValue = last.getUTCDay();
+    const delta = (lastWeekdayValue - weekday + 7) % 7;
+    const day = last.getUTCDate() - delta;
+    return dateKey(year, month, day);
+}
+
+function easterSunday(year) {
+    const a = year % 19;
+    const b = Math.floor(year / 100);
+    const c = year % 100;
+    const d = Math.floor(b / 4);
+    const e = b % 4;
+    const f = Math.floor((b + 8) / 25);
+    const g = Math.floor((b - f + 1) / 3);
+    const h = (19 * a + b - d - g + 15) % 30;
+    const i = Math.floor(c / 4);
+    const k = c % 4;
+    const l = (32 + (2 * e) + (2 * i) - h - k) % 7;
+    const m = Math.floor((a + (11 * h) + (22 * l)) / 451);
+    const month = Math.floor((h + l - (7 * m) + 114) / 31);
+    const day = ((h + l - (7 * m) + 114) % 31) + 1;
+    return { month, day };
+}
+
+function nyseHolidays(year) {
+    const key = String(year);
+    if (nyseHolidayCache[key]) return nyseHolidayCache[key];
+
+    const out = new Set();
+    out.add(observedDate(year, 1, 1));   // New Year's Day
+    out.add(nthWeekday(year, 1, 1, 3));  // Martin Luther King Jr. Day
+    out.add(nthWeekday(year, 2, 1, 3));  // Presidents Day
+    out.add(lastWeekday(year, 5, 1));    // Memorial Day
+    out.add(observedDate(year, 6, 19));  // Juneteenth
+    out.add(observedDate(year, 7, 4));   // Independence Day
+    out.add(nthWeekday(year, 9, 1, 1));  // Labor Day
+    out.add(nthWeekday(year, 11, 4, 4)); // Thanksgiving
+    out.add(observedDate(year, 12, 25)); // Christmas
+
+    const easter = easterSunday(year);
+    const gf = new Date(Date.UTC(year, easter.month - 1, easter.day));
+    gf.setUTCDate(gf.getUTCDate() - 2);  // Good Friday
+    out.add(dateKey(gf.getUTCFullYear(), gf.getUTCMonth() + 1, gf.getUTCDate()));
+
+    nyseHolidayCache[key] = out;
+    return out;
+}
+
+function marketStateNow() {
+    const now = new Date();
+    const parts = nyDateParts(now);
+    const wd = parts.weekday;
+    const hour = parts.hour;
+    const minute = parts.minute;
     const mins = hour * 60 + minute;
+    const dayKey = dateKey(parts.year, parts.month, parts.day);
+    const holiday = nyseHolidays(parts.year).has(dayKey);
     const weekend = wd === 'Sat' || wd === 'Sun';
-    if (weekend) return { state: 'closed', label: 'MARKET CLOSED' };
+    if (weekend || holiday) return { state: 'closed', label: 'MARKET CLOSED' };
 
     const openStart = 9 * 60 + 30;
     const openEnd = 16 * 60;

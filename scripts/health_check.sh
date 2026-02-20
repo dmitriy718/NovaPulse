@@ -117,89 +117,89 @@ format_duration() {
 }
 
 get_db_stats_host() {
-  # Resolve using the same code path as runtime config (env + YAML + multi-exchange logic).
-  db_path="$(
-    cd "$BASE" && PYTHONPATH="$BASE" /usr/bin/python3 - <<'PY' 2>/dev/null || true
+  (
+    cd "$BASE" && INITIAL_BANKROLL="$BANKROLL" PYTHONPATH="$BASE" /usr/bin/python3 - <<'PY'
 from pathlib import Path
 import os
+import sqlite3
 from src.core.config import ConfigManager
-from src.core.multi_engine import resolve_db_path, resolve_exchange_names
+from src.core.multi_engine import resolve_db_path, resolve_trading_accounts
 
 cfg = ConfigManager().config
 base = os.getenv("DB_PATH") or cfg.app.db_path or "data/trading.db"
-names = resolve_exchange_names(cfg.exchange.name)
-multi = len(names) > 1
-exchange = names[0] if names else (cfg.exchange.name or "kraken")
-resolved = resolve_db_path(base, exchange, multi=multi)
-p = Path(resolved)
-if not p.is_absolute():
-    p = (Path.cwd() / p).resolve()
-print(str(p))
-PY
-  )"
-  if [ -z "$db_path" ]; then
-    db_path="$BASE/data/trading.db"
-  fi
+accounts = resolve_trading_accounts(cfg.exchange.name, getattr(cfg.app, "trading_accounts", ""))
+if not accounts:
+    accounts = [{"account_id": getattr(cfg.app, "account_id", "default"), "exchange": (cfg.exchange.name or "kraken")}]
+multi = len(accounts) > 1
+paths = []
+for spec in accounts:
+    ex = str(spec.get("exchange") or cfg.exchange.name or "kraken").strip().lower()
+    account_id = str(spec.get("account_id") or "default").strip().lower()
+    resolved = resolve_db_path(base, ex, multi=multi, account_id=account_id)
+    p = Path(resolved)
+    if not p.is_absolute():
+        p = (Path.cwd() / p).resolve()
+    if str(p) not in paths:
+        paths.append(str(p))
 
-  DB="$db_path" INITIAL_BANKROLL="$BANKROLL" /usr/bin/python3 - <<'PY' 2>/dev/null || true
-import os, sqlite3
-db = os.environ.get("DB")
 initial_bankroll = float(os.environ.get("INITIAL_BANKROLL", "10000") or 10000)
-
 total = max_id = open_positions = 0
 win_rate = 0.0
 drawdown_pnl = 0.0
 drawdown_pct = 0.0
 streak_label = "N/A"
+closed_rows = []
 
-if db and os.path.exists(db):
+for db in paths:
+    if not os.path.exists(db):
+        continue
     conn = sqlite3.connect(db, timeout=5)
     cur = conn.cursor()
     cur.execute("select count(*) from trades")
-    total = cur.fetchone()[0] or 0
+    total += int(cur.fetchone()[0] or 0)
     cur.execute("select max(id) from trades")
-    max_id = cur.fetchone()[0] or 0
+    max_id = max(max_id, int(cur.fetchone()[0] or 0))
     cur.execute("select count(*) from trades where status='open'")
-    open_positions = cur.fetchone()[0] or 0
-    cur.execute("select pnl from trades where status='closed' order by id asc")
-    rows = cur.fetchall()
-    if rows:
-        wins = sum(1 for (p,) in rows if (p or 0) > 0)
-        win_rate = wins / max(len(rows), 1)
-        cum = 0.0
-        peak = float(initial_bankroll)
-        for (p,) in rows:
-            cum += float(p or 0)
-            equity = initial_bankroll + cum
-            if equity > peak:
-                peak = equity
-        equity_now = initial_bankroll + cum
-        drawdown_pnl = max(0.0, peak - equity_now)
-        drawdown_pct = (drawdown_pnl / peak * 100.0) if peak > 0 else 0.0
-        # streak (wins/losses)
-        streak = 0
-        streak_type = ''
-        last = None
-        for (p,) in rows:
-            win = (float(p or 0) > 0)
-            if last is None:
-                streak = 1
-                streak_type = 'W' if win else 'L'
-            else:
-                if win and streak_type == 'W':
-                    streak += 1
-                elif (not win) and streak_type == 'L':
-                    streak += 1
-                else:
-                    streak = 1
-                    streak_type = 'W' if win else 'L'
-            last = win
-        if streak_type:
-            streak_label = f"{streak_type}{streak}"
+    open_positions += int(cur.fetchone()[0] or 0)
+    cur.execute("select coalesce(exit_time, entry_time, ''), pnl from trades where status='closed'")
+    for ts, pnl in cur.fetchall():
+        closed_rows.append((str(ts or ""), float(pnl or 0.0)))
     conn.close()
 
-print(f"{total} {max_id} {open_positions} {win_rate} {drawdown_pnl} {drawdown_pct} {streak_label}")
+closed_rows.sort(key=lambda r: r[0])
+if closed_rows:
+    wins = sum(1 for _, p in closed_rows if p > 0)
+    win_rate = wins / max(len(closed_rows), 1)
+    cum = 0.0
+    peak = float(initial_bankroll)
+    streak = 0
+    streak_type = ''
+    last = None
+    for _, p in closed_rows:
+        pnl_val = float(p or 0.0)
+        cum += pnl_val
+        equity = initial_bankroll + cum
+        if equity > peak:
+            peak = equity
+        win = pnl_val > 0
+        if last is None:
+            streak = 1
+            streak_type = 'W' if win else 'L'
+        elif win == last:
+            streak += 1
+        else:
+            streak = 1
+            streak_type = 'W' if win else 'L'
+        last = win
+    equity_now = initial_bankroll + cum
+    drawdown_pnl = max(0.0, peak - equity_now)
+    drawdown_pct = (drawdown_pnl / peak * 100.0) if peak > 0 else 0.0
+    if streak_type:
+        streak_label = f"{streak_type}{streak}"
+
+print(f"{total} {max_id} {open_positions} {win_rate} {drawdown_pnl} {drawdown_pct} {streak_label} {len(paths)}")
 PY
+  ) 2>/dev/null || true
 }
 
 get_db_stats_container() {
@@ -207,25 +207,32 @@ get_db_stats_container() {
 import os, sqlite3
 from pathlib import Path
 
-def resolve_runtime_db_path() -> str:
+def resolve_runtime_db_paths():
     try:
         from src.core.config import ConfigManager
-        from src.core.multi_engine import resolve_db_path, resolve_exchange_names
+        from src.core.multi_engine import resolve_db_path, resolve_trading_accounts
 
         cfg = ConfigManager().config
         base = os.getenv("DB_PATH") or cfg.app.db_path or "data/trading.db"
-        names = resolve_exchange_names(cfg.exchange.name)
-        multi = len(names) > 1
-        exchange = names[0] if names else (cfg.exchange.name or "kraken")
-        resolved = resolve_db_path(base, exchange, multi=multi)
-        p = Path(resolved)
-        if not p.is_absolute():
-            p = (Path("/app") / p).resolve()
-        return str(p)
+        accounts = resolve_trading_accounts(cfg.exchange.name, getattr(cfg.app, "trading_accounts", ""))
+        if not accounts:
+            accounts = [{"account_id": getattr(cfg.app, "account_id", "default"), "exchange": (cfg.exchange.name or "kraken")}]
+        multi = len(accounts) > 1
+        paths = []
+        for spec in accounts:
+            ex = str(spec.get("exchange") or cfg.exchange.name or "kraken").strip().lower()
+            account_id = str(spec.get("account_id") or "default").strip().lower()
+            resolved = resolve_db_path(base, ex, multi=multi, account_id=account_id)
+            p = Path(resolved)
+            if not p.is_absolute():
+                p = (Path("/app") / p).resolve()
+            if str(p) not in paths:
+                paths.append(str(p))
+        return paths
     except Exception:
-        return "/app/data/trading.db"
+        return ["/app/data/trading.db"]
 
-db = resolve_runtime_db_path()
+db_paths = resolve_runtime_db_paths()
 initial_bankroll_raw = (os.environ.get("INITIAL_BANKROLL") or "").strip()
 initial_bankroll = 0.0
 if initial_bankroll_raw:
@@ -251,67 +258,70 @@ win_rate = 0.0
 drawdown_pnl = 0.0
 drawdown_pct = 0.0
 streak_label = "N/A"
+closed_rows = []
 
-if os.path.exists(db):
+for db in db_paths:
+    if not os.path.exists(db):
+        continue
     conn = sqlite3.connect(db, timeout=5)
     cur = conn.cursor()
     cur.execute("select count(*) from trades")
-    total = cur.fetchone()[0] or 0
+    total += int(cur.fetchone()[0] or 0)
     cur.execute("select max(id) from trades")
-    max_id = cur.fetchone()[0] or 0
+    max_id = max(max_id, int(cur.fetchone()[0] or 0))
     cur.execute("select count(*) from trades where status='open'")
-    open_positions = cur.fetchone()[0] or 0
-    cur.execute("select pnl from trades where status='closed' order by id asc")
-    rows = cur.fetchall()
-    if rows:
-        wins = sum(1 for (p,) in rows if (p or 0) > 0)
-        win_rate = wins / max(len(rows), 1)
-        cum = 0.0
-        peak = float(initial_bankroll)
-        for (p,) in rows:
-            cum += float(p or 0)
-            equity = initial_bankroll + cum
-            if equity > peak:
-                peak = equity
-        equity_now = initial_bankroll + cum
-        drawdown_pnl = max(0.0, peak - equity_now)
-        drawdown_pct = (drawdown_pnl / peak * 100.0) if peak > 0 else 0.0
-        streak = 0
-        streak_type = ''
-        last = None
-        for (p,) in rows:
-            win = (float(p or 0) > 0)
-            if last is None:
-                streak = 1
-                streak_type = 'W' if win else 'L'
-            else:
-                if win and streak_type == 'W':
-                    streak += 1
-                elif (not win) and streak_type == 'L':
-                    streak += 1
-                else:
-                    streak = 1
-                    streak_type = 'W' if win else 'L'
-            last = win
-        if streak_type:
-            streak_label = f"{streak_type}{streak}"
+    open_positions += int(cur.fetchone()[0] or 0)
+    cur.execute("select coalesce(exit_time, entry_time, ''), pnl from trades where status='closed'")
+    for ts, pnl in cur.fetchall():
+        closed_rows.append((str(ts or ""), float(pnl or 0.0)))
     conn.close()
 
-print(f"{total} {max_id} {open_positions} {win_rate} {drawdown_pnl} {drawdown_pct} {streak_label}")
+closed_rows.sort(key=lambda r: r[0])
+if closed_rows:
+    wins = sum(1 for _, p in closed_rows if p > 0)
+    win_rate = wins / max(len(closed_rows), 1)
+    cum = 0.0
+    peak = float(initial_bankroll)
+    streak = 0
+    streak_type = ''
+    last = None
+    for _, p in closed_rows:
+        pnl_val = float(p or 0.0)
+        cum += pnl_val
+        equity = initial_bankroll + cum
+        if equity > peak:
+            peak = equity
+        win = pnl_val > 0
+        if last is None:
+            streak = 1
+            streak_type = 'W' if win else 'L'
+        elif win == last:
+            streak += 1
+        else:
+            streak = 1
+            streak_type = 'W' if win else 'L'
+        last = win
+    equity_now = initial_bankroll + cum
+    drawdown_pnl = max(0.0, peak - equity_now)
+    drawdown_pct = (drawdown_pnl / peak * 100.0) if peak > 0 else 0.0
+    if streak_type:
+        streak_label = f"{streak_type}{streak}"
+
+print(f"{total} {max_id} {open_positions} {win_rate} {drawdown_pnl} {drawdown_pct} {streak_label} {len(db_paths)}")
 PY
 }
 
-stats="0 0 0 0.0 0.0 0.0 N/A"
+stats="0 0 0 0.0 0.0 0.0 N/A 0"
 if [ "$container_running" = "1" ]; then
   stats="$(get_db_stats_container)"
 else
   stats="$(get_db_stats_host)"
 fi
 if [ -z "${stats:-}" ]; then
-  stats="0 0 0 0.0 0.0 0.0 N/A"
+  stats="0 0 0 0.0 0.0 0.0 N/A 0"
 fi
 
-read -r total_trades max_id open_positions win_rate drawdown_pnl drawdown_pct streak_label <<<"$stats" || true
+read -r total_trades max_id open_positions win_rate drawdown_pnl drawdown_pct streak_label db_count <<<"$stats" || true
 total_trades="${total_trades:-0}"
 max_id="${max_id:-0}"
 open_positions="${open_positions:-0}"
@@ -319,6 +329,7 @@ win_rate="${win_rate:-0.0}"
 drawdown_pnl="${drawdown_pnl:-0.0}"
 drawdown_pct="${drawdown_pct:-0.0}"
 streak_label="${streak_label:-N/A}"
+db_count="${db_count:-0}"
 
 last_id=0
 if [ -f "$STATE" ]; then
@@ -344,8 +355,8 @@ if [ "$container_running" = "1" ]; then
   container_line=$(printf "\n*Container:* %s (%s)" "${clabel}" "${container_health}")
 fi
 
-msg=$(printf "✨ *All Systems Check* ✨\n\n*Host:* %s\n*Status:* %s %s%s%s\n*Uptime:* %s\n*Open Positions:* %s\n*Win Rate:* %s\n*Drawdown:* %s\n*Streak:* %s\n*Total Trades:* %s\n*New Trades:* %s\n*Time:* %s" \
-  "${host_label}" "${status_emoji}" "${status}" "${restart_note}" "${container_line}" "${uptime_fmt}" "${open_positions}" "${win_rate_pct}" "${drawdown_line}" "${streak_label}" "${total_trades}" "${new_trades}" "${now_iso}")
+msg=$(printf "✨ *All Systems Check* ✨\n\n*Host:* %s\n*Status:* %s %s%s%s\n*Uptime:* %s\n*DBs:* %s\n*Open Positions:* %s\n*Win Rate:* %s\n*Drawdown:* %s\n*Streak:* %s\n*Total Trades:* %s\n*New Trades:* %s\n*Time:* %s" \
+  "${host_label}" "${status_emoji}" "${status}" "${restart_note}" "${container_line}" "${uptime_fmt}" "${db_count}" "${open_positions}" "${win_rate_pct}" "${drawdown_line}" "${streak_label}" "${total_trades}" "${new_trades}" "${now_iso}")
 
 {
   echo "---- $(date -Is) ----"

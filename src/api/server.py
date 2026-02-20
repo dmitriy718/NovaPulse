@@ -303,12 +303,24 @@ class DashboardServer:
         if total_losses > 0:
             agg["avg_loss"] = sum_loss / total_losses
 
-        # Pass through Sharpe/Sortino from first engine (computed on full PnL series)
+        # Multi-engine note: use weighted average by realized trade count rather than
+        # passing through the first engine's risk ratios.
+        risk_rows: List[Tuple[float, float, int]] = []
         for s in stats_list:
-            if s and "sharpe_ratio" in s:
-                agg["sharpe_ratio"] = s["sharpe_ratio"]
-                agg["sortino_ratio"] = s.get("sortino_ratio", 0.0)
-                break
+            if not s:
+                continue
+            try:
+                sharpe = float(s.get("sharpe_ratio", 0.0) or 0.0)
+                sortino = float(s.get("sortino_ratio", 0.0) or 0.0)
+                trades = int(s.get("total_trades", 0) or 0)
+                if trades > 0:
+                    risk_rows.append((sharpe, sortino, trades))
+            except Exception:
+                continue
+        if risk_rows:
+            total_weight = sum(max(r[2], 1) for r in risk_rows)
+            agg["sharpe_ratio"] = sum(r[0] * max(r[2], 1) for r in risk_rows) / total_weight
+            agg["sortino_ratio"] = sum(r[1] * max(r[2], 1) for r in risk_rows) / total_weight
 
         return agg
 
@@ -453,6 +465,20 @@ class DashboardServer:
                     return eng
 
         return engines[0]
+
+    @staticmethod
+    def _resolve_backtest_friction(engine: Any, body: Dict[str, Any]) -> Tuple[float, float]:
+        """
+        Resolve backtest friction knobs.
+
+        - `fee_pct` defaults to exchange taker fee.
+        - `slippage_pct` defaults to 0.1% unless explicitly provided.
+        """
+        exch = getattr(getattr(engine, "config", None), "exchange", None)
+        fee_default = float(getattr(exch, "taker_fee", 0.0026) or 0.0026)
+        fee_pct = max(0.0, float(body.get("fee_pct", fee_default) or fee_default))
+        slippage_pct = max(0.0, float(body.get("slippage_pct", 0.001) or 0.001))
+        return slippage_pct, fee_pct
 
     def _aggregate_cached_bars(
         self,
@@ -942,8 +968,26 @@ class DashboardServer:
             if not password:
                 return False
             if self._admin_password_hash:
+                # docker compose expands '$' from .env unless escaped as '$$'.
+                # Normalize here so stored hashes remain valid for verification.
+                stored_hash = self._admin_password_hash.replace("$$", "$")
+                if stored_hash.startswith(("$2a$", "$2b$", "$2y$")):
+                    try:
+                        import bcrypt
+                    except Exception:
+                        logger.error("bcrypt hash configured but bcrypt package unavailable")
+                        return False
+                    try:
+                        return bool(
+                            bcrypt.checkpw(
+                                password.encode("utf-8"),
+                                stored_hash.encode("utf-8"),
+                            )
+                        )
+                    except Exception:
+                        return False
                 try:
-                    return bool(_hasher().verify(self._admin_password_hash, password))
+                    return bool(_hasher().verify(stored_hash, password))
                 except Exception:
                     return False
             # Dev fallback only; disallow plaintext in production.
@@ -1711,6 +1755,46 @@ class DashboardServer:
                 )
             return {"integrations": rows, "count": len(rows)}
 
+        @self.app.get("/api/v1/storage")
+        async def get_storage_contract(
+            request: Request,
+            x_api_key: str = Header(default="", alias="X-API-Key"),
+        ):
+            """Return canonical persistence contract and resolved storage targets."""
+            await _require_read_access(request, x_api_key=x_api_key)
+            engines = self._get_engines()
+            rows: List[Dict[str, Any]] = []
+            for eng in engines:
+                db = getattr(eng, "db", None)
+                db_rel = str(getattr(db, "db_path", "") or "")
+                db_abs = str(Path(db_rel).resolve()) if db_rel else ""
+                rows.append(
+                    {
+                        "exchange": str(getattr(eng, "exchange_name", "unknown")).lower(),
+                        "account_id": str(getattr(eng, "tenant_id", "default")),
+                        "db_path": db_rel,
+                        "db_path_abs": db_abs,
+                        "db_exists": bool(db_abs and Path(db_abs).exists()),
+                        "db_wal_exists": bool(db_abs and Path(f"{db_abs}-wal").exists()),
+                        "db_shm_exists": bool(db_abs and Path(f"{db_abs}-shm").exists()),
+                    }
+                )
+
+            primary = engines[0] if engines else None
+            es_cfg = getattr(getattr(primary, "config", None), "elasticsearch", None)
+            return {
+                "canonical_ledger": "sqlite",
+                "elasticsearch_role": "analytics_mirror",
+                "es_enabled": bool(getattr(es_cfg, "enabled", False)),
+                "es_index_prefix": str(getattr(es_cfg, "index_prefix", "novapulse")),
+                "es_target": (
+                    "cloud"
+                    if bool(getattr(es_cfg, "cloud_id", ""))
+                    else ("hosts" if bool(getattr(es_cfg, "hosts", [])) else "disabled")
+                ),
+                "engines": rows,
+            }
+
         _MARKETPLACE_TEMPLATES: Dict[str, Dict[str, Any]] = {
             "keltner_focus": {
                 "id": "keltner_focus",
@@ -2047,12 +2131,13 @@ class DashboardServer:
 
             from src.ml.backtester import Backtester
 
+            slippage_pct, fee_pct = self._resolve_backtest_friction(eng, body)
             backtester = Backtester(
                 initial_balance=initial_balance,
                 risk_per_trade=risk_per_trade,
                 max_position_pct=max_position_pct,
-                slippage_pct=float(getattr(eng.config.exchange, "taker_fee", 0.0026)),
-                fee_pct=float(getattr(eng.config.exchange, "taker_fee", 0.0026)),
+                slippage_pct=slippage_pct,
+                fee_pct=fee_pct,
             )
             df = self._candles_to_dataframe(candles)
             started_at = datetime.now(timezone.utc).isoformat()
@@ -2105,6 +2190,8 @@ class DashboardServer:
                         "initial_balance": initial_balance,
                         "risk_per_trade": risk_per_trade,
                         "max_position_pct": max_position_pct,
+                        "slippage_pct": slippage_pct,
+                        "fee_pct": fee_pct,
                     },
                     result=result_dict,
                     tenant_id=getattr(eng, "tenant_id", "default"),
@@ -2188,12 +2275,13 @@ class DashboardServer:
                 raise HTTPException(status_code=400, detail="empty parameter grid")
 
             df = self._candles_to_dataframe(candles)
+            slippage_pct, fee_pct = self._resolve_backtest_friction(eng, body)
             backtester = Backtester(
                 initial_balance=float(eng.config.risk.initial_bankroll),
                 risk_per_trade=float(eng.config.risk.max_risk_per_trade),
                 max_position_pct=0.05,
-                slippage_pct=float(getattr(eng.config.exchange, "taker_fee", 0.0026)),
-                fee_pct=float(getattr(eng.config.exchange, "taker_fee", 0.0026)),
+                slippage_pct=slippage_pct,
+                fee_pct=fee_pct,
             )
 
             started_at = datetime.now(timezone.utc).isoformat()
@@ -2252,6 +2340,8 @@ class DashboardServer:
                         "bars": len(candles),
                         "source": source,
                         "grid_size": len(grid),
+                        "slippage_pct": slippage_pct,
+                        "fee_pct": fee_pct,
                     },
                     result={
                         "best": best,

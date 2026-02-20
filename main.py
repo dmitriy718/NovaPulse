@@ -182,6 +182,33 @@ async def run_bot():
     if not account_specs:
         account_specs = [{"account_id": "default", "exchange": (default_exchange or "kraken")}]
     multi = len(account_specs) > 1
+    base_db_path = os.getenv("DB_PATH", root_cfg.app.db_path or "data/trading.db")
+
+    def _storage_targets(specs, *, multi_mode: bool):
+        targets = []
+        for spec in specs:
+            ex = (spec.get("exchange") or default_exchange or "kraken").strip().lower()
+            acc = (spec.get("account_id") or "default").strip().lower()
+            rel = resolve_db_path(base_db_path, ex, multi=multi_mode, account_id=acc)
+            abs_path = str(Path(rel).resolve())
+            targets.append(
+                {
+                    "exchange": ex,
+                    "account_id": acc,
+                    "db_path": rel,
+                    "db_path_abs": abs_path,
+                    "db_exists": Path(abs_path).exists(),
+                }
+            )
+        return targets
+
+    logger.info(
+        "Storage targets resolved",
+        mode="multi" if multi else "single",
+        canonical_ledger="sqlite",
+        elasticsearch_role="analytics_mirror",
+        targets=_storage_targets(account_specs, multi_mode=multi),
+    )
 
     shutdown_event = asyncio.Event()
 
@@ -258,8 +285,6 @@ async def run_bot():
         spec = account_specs[0]
         account_id = (spec.get("account_id") or "default").strip().lower()
         exchange_name = (spec.get("exchange") or default_exchange or "kraken").strip().lower()
-        base_db_path = os.getenv("DB_PATH", root_cfg.app.db_path or "data/trading.db")
-
         if exchange_name != (default_exchange or "").strip().lower() or account_id != "default":
             db_path = resolve_db_path(base_db_path, exchange_name, multi=False, account_id=account_id)
             overrides = {
@@ -322,6 +347,15 @@ async def run_bot():
         await engine.db.log_thought(
             "system",
             "Bot engine STARTED - All systems operational",
+            severity="info",
+            tenant_id=engine.tenant_id,
+        )
+        await engine.db.log_thought(
+            "system",
+            (
+                "Storage map | canonical=sqlite | "
+                f"db={Path(engine.config.app.db_path).resolve()} | es_role=analytics_mirror"
+            ),
             severity="info",
             tenant_id=engine.tenant_id,
         )
@@ -431,7 +465,6 @@ async def run_bot():
 
     # ---- Multi-exchange / multi-account mode ----
     engines = []
-    base_db_path = os.getenv("DB_PATH", ConfigManager().config.app.db_path or "data/trading.db")
     start_time = time.time()
 
     for spec in account_specs:
@@ -455,6 +488,15 @@ async def run_bot():
             await eng.db.log_thought(
                 "system",
                 f"Bot engine STARTED ({name}:{account_id}) - All systems operational",
+                severity="info",
+                tenant_id=eng.tenant_id,
+            )
+            await eng.db.log_thought(
+                "system",
+                (
+                    "Storage map | canonical=sqlite | "
+                    f"db={Path(eng.config.app.db_path).resolve()} | es_role=analytics_mirror"
+                ),
                 severity="info",
                 tenant_id=eng.tenant_id,
             )
