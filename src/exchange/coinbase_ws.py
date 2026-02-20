@@ -69,7 +69,9 @@ class CoinbaseWebSocketClient:
                     ping_interval=20,
                     ping_timeout=10,
                     close_timeout=5,
-                    max_size=2 ** 20,
+                    # Coinbase level2 snapshots for multiple products can exceed 1 MiB.
+                    # Use a higher cap to avoid reconnect loops on code 1009.
+                    max_size=8 * (2 ** 20),
                 )
                 self._connected = True
                 self._reconnect_count = 0
