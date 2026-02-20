@@ -119,6 +119,8 @@ def _apply_env_overrides(config: Dict[str, Any]) -> None:
         "STOCKS_MAX_HOLD_DAYS": ("stocks", "max_hold_days", int),
         "STOCKS_MAX_OPEN_POSITIONS": ("stocks", "max_open_positions", int),
         "STOCKS_MAX_POSITION_USD": ("stocks", "max_position_usd", float),
+        "STOCKS_ESTIMATED_FEE_PCT_PER_SIDE": ("stocks", "estimated_fee_pct_per_side", float),
+        "STOCKS_ESTIMATED_SLIPPAGE_PCT_PER_SIDE": ("stocks", "estimated_slippage_pct_per_side", float),
         "STOCKS_DB_PATH": ("stocks", "db_path"),
         "POLYGON_API_KEY": ("stocks", "polygon_api_key"),
         "POLYGON_BASE_URL": ("stocks", "polygon_base_url"),
@@ -595,6 +597,9 @@ class StocksConfig(BaseModel):
     max_hold_days: int = 7
     max_open_positions: int = 4
     max_position_usd: float = 500.0
+    # Friction model used for net PnL in stock closes (entry + exit side costs).
+    estimated_fee_pct_per_side: float = 0.0005
+    estimated_slippage_pct_per_side: float = 0.0002
     db_path: str = "data/stocks.db"
     polygon_api_key: str = ""
     polygon_base_url: str = "https://api.polygon.io"
@@ -614,6 +619,13 @@ class StocksConfig(BaseModel):
     def validate_max_hold_days(cls, v):
         if v < 1:
             raise ValueError("max_hold_days must be >= 1")
+        return v
+
+    @field_validator("estimated_fee_pct_per_side", "estimated_slippage_pct_per_side")
+    @classmethod
+    def validate_non_negative_costs(cls, v):
+        if v < 0:
+            raise ValueError("stock friction values must be >= 0")
         return v
 
     @model_validator(mode="after")

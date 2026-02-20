@@ -421,11 +421,24 @@ class BotEngine:
         db_path = self.config.app.db_path
         self.db = DatabaseManager(db_path)
         await self.db.initialize()
-        logger.info("Database initialized", path=db_path)
+        db_abs = str(Path(db_path).resolve())
+        logger.info(
+            "Database initialized",
+            path=db_path,
+            path_abs=db_abs,
+            exists=Path(db_abs).exists(),
+            wal_exists=Path(f"{db_abs}-wal").exists(),
+            shm_exists=Path(f"{db_abs}-shm").exists(),
+            exchange=self.exchange_name,
+            account_id=self.tenant_id,
+        )
         logger.info(
             "Persistence contract",
             canonical_ledger="sqlite",
             elasticsearch_role="analytics_mirror",
+            sqlite_path=db_abs,
+            exchange=self.exchange_name,
+            account_id=self.tenant_id,
         )
 
         # Wire up error handler's DB logging now that DB is ready.
@@ -874,6 +887,7 @@ class BotEngine:
                 )
                 connected = await self.es_client.connect()
                 if connected:
+                    es_target = "cloud" if es_cfg.cloud_id else "hosts"
                     self.market_data_indexer = MarketDataIndexer(
                         es=self.es_client,
                         market_data=self.market_data,
@@ -895,7 +909,14 @@ class BotEngine:
                     # Wire into ML trainer
                     if hasattr(self, "ml_trainer") and self.ml_trainer:
                         self.ml_trainer.set_es_provider(self.es_training_provider)
-                    logger.info("Elasticsearch data pipeline initialized")
+                    logger.info(
+                        "Elasticsearch data pipeline initialized",
+                        target=es_target,
+                        hosts=list(es_cfg.hosts or []),
+                        cloud_id_set=bool(es_cfg.cloud_id),
+                        index_prefix=es_cfg.index_prefix,
+                        role="analytics_mirror_only",
+                    )
                 else:
                     logger.warning("Elasticsearch connection failed, data pipeline disabled")
                     self.es_client = None

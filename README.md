@@ -130,6 +130,8 @@ Automated health checks and log watchers with Telegram notifications:
 ./scripts/log_watch.sh
 ```
 
+`scripts/health_check.sh` now aggregates across all resolved account/exchange DB files (not just the first DB).
+
 For unattended VPS operation, run:
 
 ```bash
@@ -171,6 +173,34 @@ main.py (lifecycle supervisor with retry + jitter)
        +-- ModelTrainer + AutoRetrainer (ProcessPoolExecutor)
        +-- StripeService (billing webhooks)
 ```
+
+## Persistence Contract and Storage Paths
+
+Canonical ledger and source of truth:
+
+- SQLite is the only canonical trading ledger.
+- Elasticsearch is analytics/enrichment mirror only (non-canonical).
+
+Where data is saved:
+
+- Crypto engine DB (single account): `data/trading.db`
+- Crypto engine DB (multi-account): `data/trading_<exchange>_<account>.db`
+- Stocks engine DB: `data/stocks.db`
+- Model artifacts: `models/trade_predictor.tflite`, `models/normalization.json`, `models/continuous_sgd.joblib`
+- Runtime logs: `logs/trading_bot.log`, `logs/errors.log`
+
+How to verify live storage mapping:
+
+```bash
+curl -s -H "X-API-Key: $DASHBOARD_READ_KEY" http://127.0.0.1:8090/api/v1/storage
+```
+
+Startup logs now print:
+
+- resolved SQLite absolute path per engine/account
+- WAL/SHM file presence
+- explicit persistence contract (`canonical_ledger=sqlite`, `elasticsearch_role=analytics_mirror`)
+- ES sink target (`cloud` or `hosts`) and index prefix
 
 ## v3.0.0 Changelog
 
