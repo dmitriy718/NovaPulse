@@ -178,7 +178,7 @@ class VWAPMomentumAlphaStrategy(BaseStrategy):
                 confidence += 0.1
             if mom_improving:
                 confidence += 0.1
-            if vwap_slope / curr_vwap > 0.001:
+            if curr_vwap > 0 and vwap_slope / curr_vwap > 0.001:
                 confidence += 0.1
             if zscore < -1.0:
                 confidence += 0.1
@@ -196,7 +196,7 @@ class VWAPMomentumAlphaStrategy(BaseStrategy):
                 confidence += 0.1
             if mom_weakening:
                 confidence += 0.1
-            if abs(vwap_slope / curr_vwap) > 0.001:
+            if curr_vwap > 0 and abs(vwap_slope / curr_vwap) > 0.001:
                 confidence += 0.1
             if zscore > 1.0:
                 confidence += 0.1

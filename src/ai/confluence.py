@@ -16,22 +16,24 @@ import asyncio
 import math
 import traceback
 import time
+from collections import deque
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Deque, Dict, List, Optional, Tuple
 
 import numpy as np
 
 from src.core.logger import get_logger
 from src.exchange.market_data import MarketDataCache
 from src.strategies.base import BaseStrategy, SignalDirection, StrategySignal
-from src.strategies.breakout import BreakoutStrategy
+from src.strategies.ichimoku import IchimokuStrategy
 from src.strategies.keltner import KeltnerStrategy
 from src.strategies.mean_reversion import MeanReversionStrategy
-from src.strategies.momentum import MomentumStrategy
+from src.strategies.order_flow import OrderFlowStrategy
 from src.strategies.reversal import ReversalStrategy
-from src.strategies.rsi_mean_reversion import RSIMeanReversionStrategy
+from src.strategies.stochastic_divergence import StochasticDivergenceStrategy
+from src.strategies.supertrend import SupertrendStrategy
 from src.strategies.trend import TrendStrategy
-from src.strategies.vwap_momentum_alpha import VWAPMomentumAlphaStrategy
+from src.strategies.volatility_squeeze import VolatilitySqueezeStrategy
 from src.utils.indicator_cache import IndicatorCache
 from src.utils.indicators import order_book_imbalance
 
@@ -63,6 +65,8 @@ class ConfluenceSignal:
         take_profit: float = 0.0,
         regime: Optional[str] = None,
         volatility_regime: Optional[str] = None,
+        vol_level: float = 0.5,
+        vol_expanding: bool = False,
         timeframe_agreement: int = 1,
         timeframes: Optional[Dict[str, str]] = None,
     ):
@@ -81,6 +85,8 @@ class ConfluenceSignal:
         self.take_profit = take_profit
         self.regime = regime
         self.volatility_regime = volatility_regime
+        self.vol_level = vol_level
+        self.vol_expanding = vol_expanding
         self.timeframe_agreement = timeframe_agreement
         self.timeframes = timeframes or {}
         self.timestamp = datetime.now(timezone.utc).isoformat()
@@ -101,6 +107,8 @@ class ConfluenceSignal:
             "take_profit": float(self.take_profit),
             "regime": self.regime,
             "volatility_regime": self.volatility_regime,
+            "vol_level": round(float(self.vol_level), 4),
+            "vol_expanding": bool(self.vol_expanding),
             "timeframe_agreement": int(self.timeframe_agreement),
             "timeframes": dict(self.timeframes),
             "timestamp": self.timestamp,
@@ -137,6 +145,13 @@ class ConfluenceDetector:
         timeframes: Optional[List[int]] = None,
         multi_timeframe_min_agreement: int = 1,
         primary_timeframe: int = 1,
+        session_analyzer: Optional[Any] = None,
+        strategy_guardrails_enabled: bool = True,
+        strategy_guardrails_min_trades: int = 20,
+        strategy_guardrails_window_trades: int = 30,
+        strategy_guardrails_min_win_rate: float = 0.35,
+        strategy_guardrails_min_profit_factor: float = 0.85,
+        strategy_guardrails_disable_minutes: int = 120,
     ):
         self.market_data = market_data
         self.confluence_threshold = confluence_threshold
@@ -155,58 +170,72 @@ class ConfluenceDetector:
         self.multi_timeframe_min_agreement = max(1, int(multi_timeframe_min_agreement))
         self.primary_timeframe = primary_timeframe if primary_timeframe in self.timeframes else 1
 
-        # Initialize strategies — Keltner is our primary high-WR strategy
+        # Initialize strategies — Keltner + Mean Reversion are proven winners
         self.strategies: List[BaseStrategy] = [
             KeltnerStrategy(weight=0.30),
-            TrendStrategy(weight=0.20),
-            MeanReversionStrategy(weight=0.15),
-            MomentumStrategy(weight=0.15),
-            VWAPMomentumAlphaStrategy(weight=0.12),
-            RSIMeanReversionStrategy(weight=0.12),
-            BreakoutStrategy(weight=0.10),
+            MeanReversionStrategy(weight=0.25),
+            IchimokuStrategy(weight=0.15),
+            OrderFlowStrategy(weight=0.15),
+            TrendStrategy(weight=0.15),
+            StochasticDivergenceStrategy(weight=0.12),
+            VolatilitySqueezeStrategy(weight=0.12),
+            SupertrendStrategy(weight=0.10),
             ReversalStrategy(weight=0.10),
         ]
 
         self._last_confluence: Dict[str, ConfluenceSignal] = {}
-        self._signal_history: List[ConfluenceSignal] = []
+        self._signal_history: Deque[ConfluenceSignal] = deque(maxlen=1000)
         self._cooldown_checker = None
+        self.session_analyzer = session_analyzer
+        self.strategy_guardrails_enabled = bool(strategy_guardrails_enabled)
+        self.strategy_guardrails_min_trades = max(5, int(strategy_guardrails_min_trades))
+        self.strategy_guardrails_window_trades = max(
+            self.strategy_guardrails_min_trades, int(strategy_guardrails_window_trades)
+        )
+        self.strategy_guardrails_min_win_rate = float(strategy_guardrails_min_win_rate)
+        self.strategy_guardrails_min_profit_factor = float(strategy_guardrails_min_profit_factor)
+        self.strategy_guardrails_disable_minutes = max(1, int(strategy_guardrails_disable_minutes))
+        self._runtime_disabled_until: Dict[str, float] = {}
+        self._runtime_disable_reason: Dict[str, str] = {}
 
         # Default regime multipliers (fallback if config missing)
         self._default_trend_weights = {
             "trend": 1.3,
-            "momentum": 1.2,
-            "vwap_momentum_alpha": 1.2,
-            "breakout": 1.1,
+            "ichimoku": 1.2,
+            "supertrend": 1.2,
+            "order_flow": 1.1,
             "mean_reversion": 0.8,
-            "rsi_mean_reversion": 0.8,
+            "stochastic_divergence": 0.8,
             "reversal": 0.7,
             "keltner": 0.9,
+            "volatility_squeeze": 1.1,
         }
         self._default_range_weights = {
             "mean_reversion": 1.3,
-            "rsi_mean_reversion": 1.3,
+            "stochastic_divergence": 1.3,
             "keltner": 1.2,
             "reversal": 1.1,
+            "order_flow": 1.1,
             "trend": 0.8,
-            "momentum": 0.8,
-            "vwap_momentum_alpha": 0.8,
-            "breakout": 0.8,
+            "ichimoku": 0.8,
+            "supertrend": 0.8,
+            "volatility_squeeze": 0.9,
         }
         self._default_high_vol_weights = {
-            "breakout": 1.2,
-            "momentum": 1.1,
-            "vwap_momentum_alpha": 1.1,
+            "volatility_squeeze": 1.3,
+            "supertrend": 1.1,
+            "order_flow": 1.1,
             "mean_reversion": 0.9,
-            "rsi_mean_reversion": 0.9,
+            "stochastic_divergence": 0.9,
             "reversal": 0.9,
         }
         self._default_low_vol_weights = {
             "mean_reversion": 1.2,
-            "rsi_mean_reversion": 1.2,
+            "stochastic_divergence": 1.2,
             "keltner": 1.1,
-            "breakout": 0.9,
-            "momentum": 0.9,
-            "vwap_momentum_alpha": 0.9,
+            "volatility_squeeze": 0.8,
+            "supertrend": 0.9,
+            "ichimoku": 0.9,
         }
 
     def configure_strategies(
@@ -215,12 +244,13 @@ class ConfluenceDetector:
         """Configure strategies from config dict. If single_strategy_mode is set, only that strategy runs."""
         strategy_map = {
             "keltner": KeltnerStrategy,
-            "trend": TrendStrategy,
             "mean_reversion": MeanReversionStrategy,
-            "momentum": MomentumStrategy,
-            "vwap_momentum_alpha": VWAPMomentumAlphaStrategy,
-            "rsi_mean_reversion": RSIMeanReversionStrategy,
-            "breakout": BreakoutStrategy,
+            "ichimoku": IchimokuStrategy,
+            "order_flow": OrderFlowStrategy,
+            "trend": TrendStrategy,
+            "stochastic_divergence": StochasticDivergenceStrategy,
+            "volatility_squeeze": VolatilitySqueezeStrategy,
+            "supertrend": SupertrendStrategy,
             "reversal": ReversalStrategy,
         }
 
@@ -297,15 +327,15 @@ class ConfluenceDetector:
             if len(closes) < 50:
                 continue
 
-            indicator_cache = IndicatorCache(closes, highs, lows, volumes)
-            trend_regime, vol_regime = self._detect_regime(indicator_cache, closes)
+            indicator_cache = IndicatorCache(closes, highs, lows, volumes, opens)
+            trend_regime, vol_regime, vol_level, vol_expanding = self._detect_regime(indicator_cache, closes)
             signals = await self._run_strategies(
                 pair, closes, highs, lows, volumes, opens, indicator_cache,
                 trend_regime=trend_regime,
                 vol_regime=vol_regime,
             )
             timeframe_results[tf] = self._compute_confluence(
-                pair, signals, trend_regime, vol_regime
+                pair, signals, trend_regime, vol_regime, vol_level, vol_expanding
             )
 
         return self._combine_timeframes(pair, timeframe_results)
@@ -327,6 +357,8 @@ class ConfluenceDetector:
         for strategy in self.strategies:
             if not strategy.enabled:
                 continue
+            if self._is_runtime_disabled(strategy.name):
+                continue
             try:
                 signal = await asyncio.wait_for(
                     strategy.analyze(
@@ -336,6 +368,7 @@ class ConfluenceDetector:
                         trend_regime=trend_regime,
                         vol_regime=vol_regime,
                         round_trip_fee_pct=self.round_trip_fee_pct,
+                        market_data=self.market_data,
                     ),
                     timeout=5.0,
                 )
@@ -368,6 +401,63 @@ class ConfluenceDetector:
                 )
 
         return signals
+
+    def _is_runtime_disabled(self, strategy_name: str) -> bool:
+        until = float(self._runtime_disabled_until.get(strategy_name, 0.0) or 0.0)
+        now = time.time()
+        if until <= now:
+            self._runtime_disabled_until.pop(strategy_name, None)
+            self._runtime_disable_reason.pop(strategy_name, None)
+            return False
+        return True
+
+    def _evaluate_strategy_guardrail(self, strategy: BaseStrategy) -> None:
+        if not self.strategy_guardrails_enabled:
+            return
+
+        window = list(strategy._recent_trades)[-self.strategy_guardrails_window_trades :]
+        if len(window) < self.strategy_guardrails_min_trades:
+            return
+
+        pnls = [float(t[0]) for t in window]
+        wins = sum(1 for p in pnls if p > 0)
+        losses = sum(1 for p in pnls if p < 0)
+        win_rate = wins / len(pnls) if pnls else 0.0
+        gross_profit = sum(p for p in pnls if p > 0)
+        gross_loss = abs(sum(p for p in pnls if p < 0))
+        if gross_loss == 0:
+            profit_factor = float("inf") if gross_profit > 0 else 0.0
+        else:
+            profit_factor = gross_profit / gross_loss
+
+        degraded = (
+            win_rate < self.strategy_guardrails_min_win_rate
+            and profit_factor < self.strategy_guardrails_min_profit_factor
+        )
+        if not degraded:
+            return
+
+        now = time.time()
+        disable_seconds = float(self.strategy_guardrails_disable_minutes) * 60.0
+        disabled_until = now + disable_seconds
+        existing_until = float(self._runtime_disabled_until.get(strategy.name, 0.0) or 0.0)
+        if existing_until > now:
+            disabled_until = max(disabled_until, existing_until)
+
+        reason = (
+            f"guardrail: wr={win_rate:.2f} pf={profit_factor:.2f} "
+            f"window={len(window)}"
+        )
+        self._runtime_disabled_until[strategy.name] = disabled_until
+        self._runtime_disable_reason[strategy.name] = reason
+        logger.warning(
+            "Strategy auto-disabled by runtime guardrail",
+            strategy=strategy.name,
+            win_rate=round(win_rate, 4),
+            profit_factor=round(profit_factor, 4),
+            window=len(window),
+            disabled_minutes=self.strategy_guardrails_disable_minutes,
+        )
 
     def _resample_ohlcv(
         self,
@@ -442,12 +532,22 @@ class ConfluenceDetector:
             np.array(agg_opens),
         )
 
+    # Timeframe confidence weights: higher TFs carry more weight
+    _TF_WEIGHTS = {1: 1.0, 5: 1.3, 15: 1.5, 30: 1.7, 60: 2.0}
+
     def _combine_timeframes(
         self,
         pair: str,
         results: Dict[int, ConfluenceSignal],
     ) -> ConfluenceSignal:
-        """Combine per-timeframe confluence signals into a final decision."""
+        """Combine per-timeframe confluence signals into a final decision.
+
+        Enhanced logic:
+        - Primary TF drives direction; fallback to strongest non-primary if
+          primary is NEUTRAL but majority of other TFs agree.
+        - SL/TP taken from the highest agreeing timeframe (wider = more survivable).
+        - Confidence bonus scaled by timeframe weight and unanimity.
+        """
         if not results:
             return ConfluenceSignal(
                 pair=pair,
@@ -460,13 +560,38 @@ class ConfluenceDetector:
 
         primary_tf = self.primary_timeframe if self.primary_timeframe in results else min(results.keys())
         base = results[primary_tf]
+
+        # If primary is neutral, try to use the strongest non-primary signal
+        # that has majority agreement from other timeframes
+        if base.direction == SignalDirection.NEUTRAL:
+            non_primary = {
+                tf: sig for tf, sig in results.items()
+                if tf != primary_tf and sig.direction != SignalDirection.NEUTRAL
+            }
+            if non_primary:
+                # Count directions among non-primary
+                directions: Dict[str, list] = {}
+                for tf, sig in non_primary.items():
+                    directions.setdefault(sig.direction.value, []).append((tf, sig))
+                # Find if any direction has enough agreement
+                for dir_val, tf_sigs in directions.items():
+                    if len(tf_sigs) >= self.multi_timeframe_min_agreement:
+                        # Use the highest TF signal as base
+                        best_tf, best_sig = max(tf_sigs, key=lambda x: x[0])
+                        base = best_sig
+                        primary_tf = best_tf
+                        break
+
         if base.direction == SignalDirection.NEUTRAL:
             return base
 
+        # Compute agreement with TF weighting
         agreement = [
             tf for tf, sig in results.items()
             if sig.direction == base.direction
         ]
+        total_tfs = len(results)
+
         if len(agreement) < self.multi_timeframe_min_agreement:
             return ConfluenceSignal(
                 pair=pair,
@@ -479,11 +604,32 @@ class ConfluenceDetector:
                 timeframes={str(tf): sig.direction.value for tf, sig in results.items()},
             )
 
-        bonus = min(0.05 * (len(agreement) - 1), 0.15)
+        # Weighted agreement bonus based on TF weights
+        tf_weight_sum = sum(self._TF_WEIGHTS.get(tf, 1.0) for tf in agreement)
+        max_possible_weight = sum(self._TF_WEIGHTS.get(tf, 1.0) for tf in results.keys())
+        weighted_agreement = tf_weight_sum / max_possible_weight if max_possible_weight > 0 else 0
+
+        # Bonus: scaled by agreement quality
+        # 2/3 TFs agreeing → modest bonus; 3/3 unanimous → strong bonus
+        if len(agreement) == total_tfs and total_tfs >= 3:
+            bonus = 0.15  # Unanimous across 3+ TFs
+        elif len(agreement) == total_tfs and total_tfs == 2:
+            bonus = 0.10  # Unanimous across 2 TFs
+        else:
+            bonus = min(weighted_agreement * 0.12, 0.10)  # Partial agreement
+
         base.strength = min(base.strength + bonus, 1.0)
         base.confidence = min(base.confidence + bonus, 1.0)
         base.timeframe_agreement = len(agreement)
         base.timeframes = {str(tf): sig.direction.value for tf, sig in results.items()}
+
+        # Use SL/TP from the highest agreeing timeframe for wider, more robust stops
+        highest_tf = max(agreement)
+        highest_sig = results[highest_tf]
+        if highest_sig.stop_loss > 0 and highest_sig.take_profit > 0:
+            base.stop_loss = highest_sig.stop_loss
+            base.take_profit = highest_sig.take_profit
+
         return base
 
     def _compute_confluence(
@@ -492,6 +638,8 @@ class ConfluenceDetector:
         signals: List[StrategySignal],
         trend_regime: Optional[str] = None,
         vol_regime: Optional[str] = None,
+        vol_level: float = 0.5,
+        vol_expanding: bool = False,
     ) -> ConfluenceSignal:
         """
         Compute confluence from multiple strategy signals.
@@ -673,6 +821,14 @@ class ConfluenceDetector:
         if self._is_regime_aligned(trend_regime, directional_signals):
             weighted_confidence = min(weighted_confidence + 0.03, 1.0)
 
+        # Session-aware multiplier: adjust confidence by hour-of-day performance
+        if self.session_analyzer:
+            from datetime import datetime, timezone as _tz
+            hour = datetime.now(_tz.utc).hour
+            session_mult = self.session_analyzer.get_multiplier(hour)
+            weighted_confidence *= session_mult
+            weighted_confidence = max(0.0, min(1.0, weighted_confidence))
+
         # "Sure Fire" detection: threshold strategies + OBI agreement
         is_sure_fire = (
             confluence_count >= self.confluence_threshold and
@@ -721,14 +877,12 @@ class ConfluenceDetector:
             take_profit=take_profit,
             regime=trend_regime,
             volatility_regime=vol_regime,
+            vol_level=vol_level,
+            vol_expanding=vol_expanding,
         )
 
         self._last_confluence[pair] = result
         self._signal_history.append(result)
-
-        # Keep history manageable
-        if len(self._signal_history) > 1000:
-            self._signal_history = self._signal_history[-500:]
 
         return result
 
@@ -738,8 +892,8 @@ class ConfluenceDetector:
         """Return True if the dominant strategy set matches the trend regime."""
         if not trend_regime:
             return False
-        trend_set = {"trend", "momentum", "breakout", "vwap_momentum_alpha"}
-        range_set = {"mean_reversion", "rsi_mean_reversion", "reversal", "keltner"}
+        trend_set = {"trend", "ichimoku", "supertrend", "volatility_squeeze"}
+        range_set = {"mean_reversion", "stochastic_divergence", "reversal", "keltner"}
         strategy_names = {s.strategy_name for s in signals}
         if trend_regime == "trend":
             return len(strategy_names & trend_set) > 0
@@ -779,16 +933,17 @@ class ConfluenceDetector:
         trend_regime: Optional[str] = None,
         vol_regime: Optional[str] = None,
     ) -> float:
-        """Get the weight for a strategy, considering performance + regime adjustment."""
+        """Get the weight for a strategy, considering adaptive performance + regime adjustment."""
         if strategy_name == "order_book":
             return self.obi_weight
         for strategy in self.strategies:
             if strategy.name == strategy_name:
-                # Performance-adjusted weight
                 base_weight = strategy.weight
-                if strategy._trade_count > 10:
-                    performance_factor = max(0.5, min(1.5, 0.5 + strategy.win_rate))
-                    base_weight *= performance_factor
+                # Adaptive performance factor from sliding window of recent trades
+                perf_factor = strategy.adaptive_performance_factor(
+                    trend_regime or "", vol_regime or ""
+                )
+                base_weight *= perf_factor
                 return base_weight * self._get_regime_multiplier(
                     strategy_name, trend_regime, vol_regime
                 )
@@ -796,8 +951,13 @@ class ConfluenceDetector:
 
     def _detect_regime(
         self, indicator_cache: IndicatorCache, closes: np.ndarray
-    ) -> Tuple[str, str]:
-        """Detect trend + volatility regime for the current pair."""
+    ) -> Tuple[str, str, float, bool]:
+        """Detect trend + volatility regime for the current pair.
+
+        Returns (trend_regime, vol_regime, vol_level, vol_expanding).
+        All values are returned rather than stored on self to avoid race
+        conditions when multiple pairs are scanned in parallel.
+        """
         adx_vals = indicator_cache.adx(14)
         atr_vals = indicator_cache.atr(14)
 
@@ -822,7 +982,25 @@ class ConfluenceDetector:
         else:
             vol_regime = "mid_vol"
 
-        return trend_regime, vol_regime
+        # Compute vol_level (percentile of current GK vol vs. rolling window)
+        gk = indicator_cache.gk_vol(20)
+        valid_gk = gk[np.isfinite(gk)]
+        if len(valid_gk) >= 20:
+            curr_gk = float(valid_gk[-1])
+            lookback = valid_gk[-100:] if len(valid_gk) >= 100 else valid_gk
+            vol_level = float(np.searchsorted(np.sort(lookback), curr_gk) / len(lookback))
+        else:
+            vol_level = 0.5
+
+        # Vol expanding: current vol > 1.5x vol from 10 bars ago
+        vol_expanding = False
+        if len(valid_gk) >= 11:
+            curr_v = float(valid_gk[-1])
+            prev_v = float(valid_gk[-11])
+            if prev_v > 0 and curr_v > 1.5 * prev_v:
+                vol_expanding = True
+
+        return trend_regime, vol_regime, vol_level, vol_expanding
 
     def _get_regime_value(self, key: str, default: float) -> float:
         """Fetch regime config value with safe fallback."""
@@ -875,14 +1053,28 @@ class ConfluenceDetector:
         for s in self.strategies:
             item = s.get_stats()
             item["kind"] = "strategy"
+            is_disabled = self._is_runtime_disabled(s.name)
+            disable_until = self._runtime_disabled_until.get(s.name)
+            item["runtime_disabled"] = is_disabled
+            item["runtime_disabled_until"] = (
+                datetime.fromtimestamp(disable_until, timezone.utc).isoformat()
+                if is_disabled and disable_until
+                else None
+            )
+            item["runtime_disable_reason"] = self._runtime_disable_reason.get(s.name)
             stats.append(item)
         return stats
 
-    def record_trade_result(self, strategy_name: str, pnl: float) -> None:
+    def record_trade_result(
+        self, strategy_name: str, pnl: float,
+        trend_regime: str = "",
+        vol_regime: str = "",
+    ) -> None:
         """Record a trade result for adaptive strategy weighting."""
         for strategy in self.strategies:
             if strategy.name == strategy_name:
-                strategy.record_trade_result(pnl)
+                strategy.record_trade_result(pnl, trend_regime, vol_regime)
+                self._evaluate_strategy_guardrail(strategy)
                 break
 
     def get_last_confluence(self, pair: str) -> Optional[ConfluenceSignal]:

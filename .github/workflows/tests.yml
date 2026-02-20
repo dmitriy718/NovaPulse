@@ -25,4 +25,7 @@ jobs:
       - name: Run tests
         run: |
           python -m pytest -q
-
+      - name: Walk-forward OOS gate
+        if: matrix.python-version == '3.12'
+        run: |
+          python scripts/walk_forward_gate.py

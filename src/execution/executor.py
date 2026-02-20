@@ -20,7 +20,7 @@ import json
 import math
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Callable
 
 from src.ai.confluence import ConfluenceSignal
@@ -65,7 +65,9 @@ class TradeExecutor:
         limit_chase_attempts: int = 2,
         limit_chase_delay_seconds: float = 2.0,
         limit_fallback_to_market: bool = True,
+        es_client: Optional[Any] = None,
         strategy_result_cb: Optional[Callable[[str, float], None]] = None,
+        max_trades_per_hour: int = 0,
     ):
         self.rest_client = rest_client
         self.market_data = market_data
@@ -79,7 +81,9 @@ class TradeExecutor:
         self.limit_chase_attempts = max(0, int(limit_chase_attempts))
         self.limit_chase_delay_seconds = max(0.0, float(limit_chase_delay_seconds))
         self.limit_fallback_to_market = bool(limit_fallback_to_market)
+        self.es_client = es_client
         self._strategy_result_cb = strategy_result_cb
+        self.max_trades_per_hour = max(0, int(max_trades_per_hour or 0))
 
         self.continuous_learner: Optional[ContinuousLearner] = None
 
@@ -105,9 +109,42 @@ class TradeExecutor:
             "total_fees": 0.0,
         }
 
+        # Smart Exit config — loaded lazily from config on first use
+        self._smart_exit_enabled: Optional[bool] = None
+        self._smart_exit_tiers: Optional[list] = None
+
     def set_continuous_learner(self, learner: ContinuousLearner) -> None:
         """Attach the continuous learner for online ML updates."""
         self.continuous_learner = learner
+
+    def set_es_client(self, es_client: Any) -> None:
+        """Attach Elasticsearch client for trade event mirroring."""
+        self.es_client = es_client
+
+    @staticmethod
+    def _shift_levels_to_fill(
+        planned_entry: float,
+        fill_price: float,
+        stop_loss: float,
+        take_profit: float,
+    ) -> tuple[float, float]:
+        """
+        Shift SL/TP by entry delta so risk distances stay consistent after fill.
+
+        This prevents unintentional stop tightening/widening when the actual fill
+        differs from the signal entry.
+        """
+        if planned_entry <= 0 or fill_price <= 0:
+            return stop_loss, take_profit
+
+        shift = fill_price - planned_entry
+        adj_sl = stop_loss
+        adj_tp = take_profit
+        if stop_loss > 0:
+            adj_sl = max(stop_loss + shift, 0.0)
+        if take_profit > 0:
+            adj_tp = max(take_profit + shift, 0.0)
+        return adj_sl, adj_tp
 
     async def reinitialize_positions(self) -> None:
         """Restore position and stop-loss state from database after restart."""
@@ -214,6 +251,23 @@ class TradeExecutor:
             if current_utc_hour in quiet_hours:
                 return None
 
+        # Trade-rate throttle: cap new entries in a rolling 1-hour window.
+        if self.max_trades_per_hour > 0:
+            cutoff = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+            recent_trades = await self.db.count_trades_since(
+                cutoff, tenant_id=self.tenant_id
+            )
+            if recent_trades >= self.max_trades_per_hour:
+                await self.db.log_thought(
+                    "risk",
+                    f"Trade blocked: trade-rate limit reached "
+                    f"({recent_trades}/{self.max_trades_per_hour} in last hour)",
+                    severity="warning",
+                    metadata={"pair": signal.pair, "cutoff": cutoff},
+                    tenant_id=self.tenant_id,
+                )
+                return None
+
         # Block duplicate pair — only one position per pair at a time
         open_trades = await self.db.get_open_trades(
             pair=signal.pair, tenant_id=self.tenant_id
@@ -269,6 +323,9 @@ class TradeExecutor:
             avg_win_loss_ratio=win_loss_ratio,
             confidence=signal.confidence,
             spread_pct=spread_pct,
+            vol_regime=getattr(signal, "volatility_regime", "") or "",
+            vol_level=getattr(signal, "vol_level", 0.5),
+            vol_expanding=getattr(signal, "vol_expanding", False),
         )
 
         if not size_result.allowed:
@@ -329,8 +386,15 @@ class TradeExecutor:
             )
             return None
 
+        adjusted_stop_loss, adjusted_take_profit = self._shift_levels_to_fill(
+            planned_entry=signal.entry_price,
+            fill_price=fill_price,
+            stop_loss=signal.stop_loss,
+            take_profit=signal.take_profit,
+        )
+
         # Stage 4: Record trade
-        slippage = abs(fill_price - signal.entry_price) / signal.entry_price
+        slippage = abs(fill_price - signal.entry_price) / signal.entry_price if signal.entry_price > 0 else 0.0
         filled_size_usd = filled_units * fill_price
         # Prefer actual fee if provided; fallback to heuristic
         if entry_fee and entry_fee > 0:
@@ -350,8 +414,8 @@ class TradeExecutor:
             "status": "open",
             "strategy": primary_strategy,
             "confidence": signal.confidence,
-            "stop_loss": signal.stop_loss,
-            "take_profit": signal.take_profit,
+            "stop_loss": adjusted_stop_loss,
+            "take_profit": adjusted_take_profit,
             "entry_time": datetime.now(timezone.utc).isoformat(),
             "metadata": {
                 "confluence_count": signal.confluence_count,
@@ -372,10 +436,35 @@ class TradeExecutor:
                 "mode": self.mode,
                 "order_type": "limit",
                 "post_only": self.post_only,
+                "planned_entry_price": signal.entry_price,
+                "planned_stop_loss": signal.stop_loss,
+                "planned_take_profit": signal.take_profit,
+                "trend_regime": getattr(signal, "regime", "") or "",
+                "vol_regime": getattr(signal, "volatility_regime", "") or "",
+                "vol_level": round(getattr(signal, "vol_level", 0.5), 4),
+                "vol_expanding": getattr(signal, "vol_expanding", False),
             }
         }
 
         await self.db.insert_trade(trade_record, tenant_id=self.tenant_id)
+        self._enqueue_trade_event(
+            "opened",
+            {
+                "trade_id": trade_id,
+                "tenant_id": self.tenant_id,
+                "pair": signal.pair,
+                "side": side,
+                "strategy": primary_strategy,
+                "mode": self.mode,
+                "status": "open",
+                "entry_price": fill_price,
+                "quantity": filled_units,
+                "size_usd": filled_size_usd,
+                "stop_loss": adjusted_stop_loss,
+                "take_profit": adjusted_take_profit,
+                "confidence": signal.confidence,
+            },
+        )
 
         # Record ML features at entry so they can be labeled on close and used for training.
         try:
@@ -466,7 +555,7 @@ class TradeExecutor:
 
         # Initialize stop loss tracking
         self.risk_manager.initialize_stop_loss(
-            trade_id, fill_price, signal.stop_loss, side
+            trade_id, fill_price, adjusted_stop_loss, side
         )
 
         # Register position with risk manager
@@ -485,7 +574,7 @@ class TradeExecutor:
             "trade",
             f"{'📈' if side == 'buy' else '📉'} {side.upper()} {signal.pair} @ "
             f"${fill_price:.2f} (Limit) | Size: ${filled_size_usd:.2f} | "
-            f"SL: ${signal.stop_loss:.2f} | TP: ${signal.take_profit:.2f} | "
+            f"SL: ${adjusted_stop_loss:.2f} | TP: ${adjusted_take_profit:.2f} | "
             f"Confluence: {signal.confluence_count} | "
             f"{'SURE FIRE' if signal.is_sure_fire else 'Standard'}",
             severity="info",
@@ -534,6 +623,11 @@ class TradeExecutor:
         entry_price = trade["entry_price"]
         quantity = trade["quantity"]
 
+        # Skip managing positions with stale data — stale prices from a
+        # disconnected WS could trigger false stop-outs or take-profits
+        if self.market_data.is_stale(pair, max_age_seconds=120):
+            return
+
         current_price = self.market_data.get_latest_price(pair)
         if current_price <= 0:
             return
@@ -574,6 +668,12 @@ class TradeExecutor:
                 strategy=trade.get("strategy"),
             )
             return
+
+        # Smart exit: partial closes at tiered TP levels
+        if self._is_smart_exit_enabled():
+            partial_closed = await self._check_smart_exit(trade, current_price)
+            if partial_closed:
+                return  # Tier triggered, position updated — skip flat TP check
 
         # Check take profit
         take_profit = trade.get("take_profit", 0)
@@ -708,6 +808,8 @@ class TradeExecutor:
                             "status": "error",
                         }, tenant_id=tid)
                         logger.critical("Exit order permanently failed", trade_id=trade_id)
+                        # Clean up risk manager state so the position slot is freed
+                        self.risk_manager.close_position(trade_id, 0.0)
                         return
 
         if actual_quantity <= 0:
@@ -737,6 +839,10 @@ class TradeExecutor:
 
         pnl -= fees  # Net P&L after ALL fees
 
+        # Add accumulated partial P&L from smart exit tiers
+        partial_pnl = float(meta.get("partial_pnl_accumulated", 0.0) or 0.0)
+        pnl += partial_pnl
+
         # M28 FIX: Calculate pnl_pct AFTER fee deduction
         pnl_pct = pnl / (entry_price * actual_quantity) if entry_price * actual_quantity > 0 else 0
 
@@ -744,6 +850,24 @@ class TradeExecutor:
         await self.db.close_trade(
             trade_id, actual_exit_price, pnl, pnl_pct, fees,
             tenant_id=tid,
+        )
+        self._enqueue_trade_event(
+            "closed",
+            {
+                "trade_id": trade_id,
+                "tenant_id": tid,
+                "pair": pair,
+                "side": side,
+                "mode": self.mode,
+                "status": "closed",
+                "entry_price": entry_price,
+                "exit_price": actual_exit_price,
+                "quantity": actual_quantity,
+                "pnl": pnl,
+                "pnl_pct": pnl_pct,
+                "reason": reason,
+                "fees": fees,
+            },
         )
         # Label the ML row for this trade (1=win, 0=loss/breakeven).
         ml_label = 1.0 if pnl > 0 else 0.0
@@ -775,7 +899,9 @@ class TradeExecutor:
         self.risk_manager.close_position(trade_id, pnl)
         if self._strategy_result_cb and strategy:
             try:
-                self._strategy_result_cb(strategy, pnl)
+                trend_regime = meta.get("trend_regime", "") if meta else ""
+                vol_regime = meta.get("vol_regime", "") if meta else ""
+                self._strategy_result_cb(strategy, pnl, trend_regime, vol_regime)
             except Exception as e:
                 logger.debug("Strategy result callback failed (non-fatal)", strategy=strategy, error=repr(e))
 
@@ -805,6 +931,202 @@ class TradeExecutor:
             pnl=round(pnl, 2),
             reason=reason,
         )
+
+    # ------------------------------------------------------------------
+    # Smart Exit (Partial Close Tiers)
+    # ------------------------------------------------------------------
+
+    def _is_smart_exit_enabled(self) -> bool:
+        """Check and cache smart exit config."""
+        if self._smart_exit_enabled is not None:
+            return self._smart_exit_enabled
+        try:
+            from src.core.config import get_config
+            se_cfg = get_config().risk.smart_exit
+            self._smart_exit_enabled = bool(se_cfg.enabled)
+            self._smart_exit_tiers = se_cfg.tiers if se_cfg.enabled else []
+        except Exception:
+            self._smart_exit_enabled = False
+            self._smart_exit_tiers = []
+        return self._smart_exit_enabled
+
+    async def _check_smart_exit(self, trade: Dict[str, Any], current_price: float) -> bool:
+        """Check if a smart exit tier should trigger. Returns True if a partial close happened."""
+        tiers = self._smart_exit_tiers or []
+        if not tiers:
+            return False
+
+        meta = {}
+        if trade.get("metadata"):
+            try:
+                meta = json.loads(trade["metadata"]) if isinstance(trade["metadata"], str) else dict(trade["metadata"])
+            except Exception:
+                meta = {}
+
+        current_tier = int(meta.get("exit_tier", 0))
+        if current_tier >= len(tiers):
+            return False  # All tiers exhausted
+
+        tier = tiers[current_tier]
+        tp_mult = float(tier.tp_mult) if hasattr(tier, "tp_mult") else float(tier.get("tp_mult", 0))
+        tier_pct = float(tier.pct) if hasattr(tier, "pct") else float(tier.get("pct", 0))
+
+        if tp_mult <= 0:
+            return False  # This tier = trailing stop only, handled by normal SL logic
+
+        entry = trade["entry_price"]
+        original_tp = trade.get("take_profit", 0)
+        if not original_tp or original_tp <= 0 or entry <= 0:
+            return False
+
+        tp_distance = abs(original_tp - entry)
+        side = trade["side"]
+
+        if side == "buy":
+            tier_target = entry + tp_distance * tp_mult
+            triggered = current_price >= tier_target
+        else:
+            tier_target = entry - tp_distance * tp_mult
+            triggered = current_price <= tier_target
+
+        if triggered:
+            partial_qty = trade["quantity"] * tier_pct
+            if partial_qty <= 0:
+                return False
+            # If the tier effectively closes the full remaining position,
+            # route through the normal close path to avoid zero-quantity remnants.
+            if partial_qty >= (trade["quantity"] - 1e-8):
+                await self._close_position(
+                    trade["trade_id"],
+                    trade["pair"],
+                    side,
+                    entry,
+                    current_price,
+                    trade["quantity"],
+                    f"smart_exit_tier_{current_tier + 1}",
+                    metadata=trade.get("metadata"),
+                    strategy=trade.get("strategy"),
+                )
+                return True
+            await self._close_partial(trade, current_price, partial_qty, current_tier, meta)
+            return True
+        return False
+
+    async def _close_partial(
+        self,
+        trade: Dict[str, Any],
+        exit_price: float,
+        partial_qty: float,
+        tier_idx: int,
+        meta: Dict[str, Any],
+    ) -> None:
+        """Close a partial position at a smart exit tier."""
+        trade_id = trade["trade_id"]
+        side = trade["side"]
+        entry_price = trade["entry_price"]
+        quantity = trade["quantity"]
+
+        # Compute partial P&L
+        if side == "buy":
+            partial_pnl = (exit_price - entry_price) * partial_qty
+        else:
+            partial_pnl = (entry_price - exit_price) * partial_qty
+
+        # Subtract fees for this partial close
+        fee = abs(exit_price * partial_qty) * self.taker_fee
+        partial_pnl -= fee
+
+        # Update metadata
+        partial_exits = meta.get("partial_exits", [])
+        partial_exits.append({
+            "tier": tier_idx,
+            "qty": round(partial_qty, 8),
+            "price": round(exit_price, 2),
+            "pnl": round(partial_pnl, 4),
+            "fee": round(fee, 4),
+            "time": datetime.now(timezone.utc).isoformat(),
+        })
+        meta["partial_exits"] = partial_exits
+        meta["exit_tier"] = tier_idx + 1
+        accumulated = float(meta.get("partial_pnl_accumulated", 0.0))
+        meta["partial_pnl_accumulated"] = round(accumulated + partial_pnl, 4)
+
+        # Update remaining quantity
+        remaining = max(0.0, quantity - partial_qty)
+
+        # Persist to DB
+        await self.db.update_trade(trade_id, {
+            "quantity": remaining,
+            "metadata": meta,
+        }, tenant_id=self.tenant_id)
+
+        # Reduce risk manager exposure
+        reduction_fraction = (partial_qty / quantity) if quantity > 0 else 0.0
+        self.risk_manager.reduce_position_size(
+            trade_id,
+            reduction_fraction=reduction_fraction,
+        )
+
+        # If position is fully closed, close it properly
+        if remaining < 1e-8:
+            await self._close_position(
+                trade_id,
+                trade["pair"],
+                side,
+                entry_price,
+                exit_price,
+                0.0,  # remaining quantity is 0
+                "smart_exit_final",
+                metadata=meta,
+                strategy=trade.get("strategy"),
+            )
+            return
+
+        # Log the partial exit
+        await self.db.log_thought(
+            "trade",
+            f"📊 PARTIAL EXIT tier {tier_idx + 1} | {trade['pair']} | "
+            f"Closed {partial_qty:.6f} @ ${exit_price:.2f} | "
+            f"PnL: ${partial_pnl:.2f} | Remaining: {remaining:.6f}",
+            severity="info",
+            metadata={
+                "trade_id": trade_id,
+                "tier": tier_idx,
+                "partial_pnl": partial_pnl,
+                "remaining_qty": remaining,
+            },
+            tenant_id=self.tenant_id,
+        )
+
+        logger.info(
+            "Smart exit partial close",
+            trade_id=trade_id,
+            tier=tier_idx + 1,
+            partial_qty=round(partial_qty, 8),
+            exit_price=round(exit_price, 2),
+            partial_pnl=round(partial_pnl, 4),
+            remaining=round(remaining, 8),
+        )
+
+    def _enqueue_trade_event(self, event: str, payload: Dict[str, Any]) -> None:
+        """Mirror trade lifecycle events to Elasticsearch (best-effort)."""
+        if not self.es_client:
+            return
+        now = time.time()
+        doc: Dict[str, Any] = {
+            "event": event,
+            "timestamp": int(now),
+            **payload,
+        }
+        # Persistence contract: SQLite is the canonical ledger; ES is mirror-only.
+        doc["canonical_source"] = "sqlite"
+        doc["analytics_mirror"] = True
+        trade_id = str(payload.get("trade_id", "") or "")
+        doc_id = f"{trade_id}:{event}:{int(now)}" if trade_id else None
+        try:
+            self.es_client.enqueue("trades", doc, doc_id=doc_id, timestamp=now)
+        except Exception as e:
+            logger.debug("Trade event ES enqueue failed", event=event, error=repr(e))
 
     # ------------------------------------------------------------------
     # Fill Processing

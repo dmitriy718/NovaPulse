@@ -4,8 +4,10 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>NovaPulse - Command Center</title>
-    <link rel="stylesheet" href="/static/css/dashboard.css">
-    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;500;700;900&family=Rajdhani:wght@300;400;500;600;700&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/css/dashboard.css?v=20260219g">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@300;400;500;600;700&family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
 </head>
 <body>
     <!-- Animated Background -->
@@ -18,7 +20,7 @@
             <div class="logo">
                 <span class="logo-icon">◆</span>
                 <span class="logo-text">NOVA|PULSE</span>
-                <span class="logo-version">v3.0</span>
+                <span class="logo-version">v3.5</span>
             </div>
             <div class="status-indicator" id="statusIndicator">
                 <span class="pulse"></span>
@@ -41,6 +43,7 @@
         </div>
         <div class="hud-right">
             <button class="control-btn" id="logoutBtn" onclick="logout()">⎋ LOGOUT</button>
+            <button class="control-btn settings-header-btn" id="settingsHeaderBtn" onclick="openSettingsModal()">⚙ SETTINGS</button>
             <button class="control-btn pause-btn" id="pauseBtn" onclick="togglePause()">⏸ PAUSE</button>
             <button class="control-btn danger-btn" id="closeAllBtn" onclick="closeAll()">⚠ CLOSE ALL</button>
         </div>
@@ -141,7 +144,7 @@
         <!-- Algo Pulse (Strategy Monitor) -->
         <section class="glass-card strategy-card">
             <div class="card-header">
-                <h2>⚡ ALGO PULSE</h2>
+                <h2>⚡ NOVA|PLAYBOOK</h2>
             </div>
             <div class="strategy-grid" id="strategyGrid">
                 <div class="strategy-item">
@@ -162,15 +165,15 @@
             </div>
         </section>
 
-        <!-- Settings Launcher -->
-        <section class="glass-card settings-card settings-launcher" onclick="openSettingsModal()">
+        <!-- Stock Scanner -->
+        <section class="glass-card stock-scanner-card" id="stockScannerCard">
             <div class="card-header">
-                <h2>⚙️ SETTINGS</h2>
-                <span class="settings-open-hint">CLICK TO CONFIGURE</span>
+                <h2 id="stockScannerTitle">STOCK SCANNER | MARKET OPEN</h2>
             </div>
-            <div class="settings-grid">
-                <p class="settings-hint">AI, Risk, Trading & ML parameters. Changes are applied immediately and saved permanently.</p>
+            <div class="stock-scanner-grid" id="stockScannerGrid">
+                <div class="stock-item empty">No stock symbols tracked yet</div>
             </div>
+            <div class="stock-scanner-overlay" id="stockScannerOverlay">MARKET CLOSED</div>
         </section>
 
         <!-- Risk Monitor -->
@@ -211,6 +214,47 @@
 
     <div id="algoTooltip" class="algo-tooltip hidden"></div>
 
+    <!-- Scanner Chart Modal -->
+    <div id="chartOverlay" class="chart-modal-overlay hidden" onclick="if(event.target===this)closeChartModal()">
+        <div class="chart-modal">
+            <div class="chart-modal-header">
+                <div>
+                    <h2 id="chartTitle">HEIKIN ASHI</h2>
+                    <div class="chart-meta" id="chartMeta">Loading...</div>
+                </div>
+                <button class="chart-close-btn" type="button" onclick="closeChartModal()">&times;</button>
+            </div>
+            <div class="chart-tf-row" id="chartTfRow">
+                <button class="chart-tf-btn" type="button" data-tf="1m">1</button>
+                <button class="chart-tf-btn active" type="button" data-tf="5m">5</button>
+                <button class="chart-tf-btn" type="button" data-tf="15m">15</button>
+                <button class="chart-tf-btn" type="button" data-tf="30m">30</button>
+                <button class="chart-tf-btn" type="button" data-tf="1h">1H</button>
+                <button class="chart-tf-btn" type="button" data-tf="1d">1D</button>
+                <span class="chart-status" id="chartStatus"></span>
+            </div>
+            <div class="chart-share-row" id="chartShareRow">
+                <button class="chart-share-btn share-facebook" type="button" data-share="facebook" aria-label="Share to Facebook" title="Share to Facebook"></button>
+                <button class="chart-share-btn share-x" type="button" data-share="x" aria-label="Share to X" title="Share to X"></button>
+                <button class="chart-share-btn share-instagram" type="button" data-share="instagram" aria-label="Share to Instagram" title="Share to Instagram"></button>
+                <button class="chart-share-btn share-reddit" type="button" data-share="reddit" aria-label="Share to Reddit" title="Share to Reddit"></button>
+                <button class="chart-share-btn share-discord" type="button" data-share="discord" aria-label="Share to Discord" title="Share to Discord"></button>
+                <button class="chart-share-btn share-telegram" type="button" data-share="telegram" aria-label="Share to Telegram" title="Share to Telegram"></button>
+                <button class="chart-share-btn share-stocktwits" type="button" data-share="stocktwits" aria-label="Share to Stocktwits" title="Share to Stocktwits"></button>
+                <button class="chart-share-btn share-gmail" type="button" data-share="gmail" aria-label="Share to Gmail" title="Share to Gmail"></button>
+            </div>
+            <div class="chart-panels">
+                <canvas id="priceChartCanvas" class="chart-canvas price"></canvas>
+                <canvas id="rsiChartCanvas" class="chart-canvas rsi"></canvas>
+                <canvas id="macdChartCanvas" class="chart-canvas macd"></canvas>
+            </div>
+            <div class="chart-watermark">
+                <div>Nova by Horizon</div>
+                <div id="chartWatermarkUrl">https://nova.horizonsvc.com</div>
+            </div>
+        </div>
+    </div>
+
     <!-- Settings Modal Overlay -->
     <div id="settingsOverlay" class="settings-modal-overlay hidden" onclick="if(event.target===this)closeSettingsModal()">
         <div class="settings-modal">
@@ -240,6 +284,6 @@
     <!-- Settings Toast -->
     <div id="settingsToast" class="settings-toast hidden"></div>
 
-    <script src="/static/js/dashboard.js"></script>
+    <script src="/static/js/dashboard.js?v=20260219g"></script>
 </body>
 </html>

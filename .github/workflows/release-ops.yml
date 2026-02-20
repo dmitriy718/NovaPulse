@@ -1,0 +1,58 @@
+name: release-ops
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "Operation to run"
+        required: true
+        type: choice
+        options:
+          - snapshot
+          - rollback
+      snapshot_id:
+        description: "Snapshot ID (required for rollback unless using latest)"
+        required: false
+        default: ""
+      label:
+        description: "Optional label for snapshot"
+        required: false
+        default: ""
+      latest:
+        description: "Use latest snapshot for rollback"
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Create release snapshot
+        if: inputs.action == 'snapshot'
+        run: |
+          python scripts/release_snapshot.py --label "${{ inputs.label }}"
+
+      - name: Rollback to snapshot
+        if: inputs.action == 'rollback' && inputs.latest == false
+        run: |
+          python scripts/release_rollback.py \
+            --snapshot-id "${{ inputs.snapshot_id }}"
+
+      - name: Rollback to latest snapshot
+        if: inputs.action == 'rollback' && inputs.latest == true
+        run: |
+          python scripts/release_rollback.py --latest
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-ops-artifacts
+          path: .release
+          if-no-files-found: ignore

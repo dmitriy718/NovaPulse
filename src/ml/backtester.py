@@ -27,14 +27,15 @@ from src.ai.predictor import TFLitePredictor
 from src.exchange.market_data import MarketDataCache
 from src.execution.risk_manager import RiskManager
 from src.strategies.base import BaseStrategy, SignalDirection, StrategySignal
-from src.strategies.breakout import BreakoutStrategy
+from src.strategies.ichimoku import IchimokuStrategy
 from src.strategies.keltner import KeltnerStrategy
 from src.strategies.mean_reversion import MeanReversionStrategy
-from src.strategies.momentum import MomentumStrategy
+from src.strategies.order_flow import OrderFlowStrategy
 from src.strategies.reversal import ReversalStrategy
-from src.strategies.rsi_mean_reversion import RSIMeanReversionStrategy
+from src.strategies.stochastic_divergence import StochasticDivergenceStrategy
+from src.strategies.supertrend import SupertrendStrategy
 from src.strategies.trend import TrendStrategy
-from src.strategies.vwap_momentum_alpha import VWAPMomentumAlphaStrategy
+from src.strategies.volatility_squeeze import VolatilitySqueezeStrategy
 from src.utils.indicators import atr
 
 logger = get_logger("backtester")
@@ -206,12 +207,13 @@ class Backtester:
         if strategies is None:
             strategies = [
                 KeltnerStrategy(),
-                TrendStrategy(),
                 MeanReversionStrategy(),
-                RSIMeanReversionStrategy(),
-                MomentumStrategy(),
-                VWAPMomentumAlphaStrategy(),
-                BreakoutStrategy(),
+                IchimokuStrategy(),
+                OrderFlowStrategy(),
+                TrendStrategy(),
+                StochasticDivergenceStrategy(),
+                VolatilitySqueezeStrategy(),
+                SupertrendStrategy(),
                 ReversalStrategy(),
             ]
 
@@ -477,6 +479,12 @@ class Backtester:
             timeframes=getattr(cfg.trading, "timeframes", [1]),
             multi_timeframe_min_agreement=getattr(cfg.ai, "multi_timeframe_min_agreement", 1),
             primary_timeframe=getattr(cfg.ai, "primary_timeframe", 1),
+            strategy_guardrails_enabled=getattr(cfg.ai, "strategy_guardrails_enabled", True),
+            strategy_guardrails_min_trades=getattr(cfg.ai, "strategy_guardrails_min_trades", 20),
+            strategy_guardrails_window_trades=getattr(cfg.ai, "strategy_guardrails_window_trades", 30),
+            strategy_guardrails_min_win_rate=getattr(cfg.ai, "strategy_guardrails_min_win_rate", 0.35),
+            strategy_guardrails_min_profit_factor=getattr(cfg.ai, "strategy_guardrails_min_profit_factor", 0.85),
+            strategy_guardrails_disable_minutes=getattr(cfg.ai, "strategy_guardrails_disable_minutes", 120),
         )
         confluence.configure_strategies(
             cfg.strategies.model_dump(),

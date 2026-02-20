@@ -105,17 +105,67 @@ def resolve_exchange_names(default: Optional[str] = None) -> List[str]:
     return deduped
 
 
-def resolve_db_path(base_path: str, exchange: str, multi: bool) -> str:
+def resolve_trading_accounts(
+    default_exchange: Optional[str] = None,
+    config_accounts: str = "",
+) -> List[Dict[str, str]]:
+    """
+    Resolve account/exchange specs from env/config.
+
+    Format:
+    - `TRADING_ACCOUNTS=main:kraken,main:coinbase,swing:kraken`
+    - falls back to exchange-only mode with account_id=default
+    """
+    raw = (os.getenv("TRADING_ACCOUNTS") or config_accounts or "").strip()
+    specs: List[Dict[str, str]] = []
+    if raw:
+        for token in raw.split(","):
+            item = token.strip()
+            if not item:
+                continue
+            if ":" in item:
+                account_id, exchange = item.split(":", 1)
+                acc = (account_id or "default").strip().lower()
+                ex = (exchange or default_exchange or "kraken").strip().lower()
+            else:
+                acc = "default"
+                ex = item.strip().lower() or (default_exchange or "kraken")
+            specs.append({"account_id": acc, "exchange": ex})
+    else:
+        exchanges = resolve_exchange_names(default_exchange)
+        specs = [{"account_id": "default", "exchange": ex} for ex in exchanges]
+
+    # Stable de-duplication
+    deduped: List[Dict[str, str]] = []
+    seen = set()
+    for spec in specs:
+        key = (spec["account_id"], spec["exchange"])
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(spec)
+    return deduped
+
+
+def resolve_db_path(base_path: str, exchange: str, multi: bool, account_id: str = "") -> str:
     if not base_path:
         base_path = "data/trading.db"
-    if not multi:
+    account = "".join(ch if ch.isalnum() else "_" for ch in (account_id or "").lower()).strip("_")
+    if not multi and not account:
         return base_path
 
     exchange_key = "".join(ch if ch.isalnum() else "_" for ch in exchange.lower())
     if "{exchange}" in base_path:
-        return base_path.format(exchange=exchange_key)
+        db_path = base_path.format(exchange=exchange_key)
+    else:
+        path = Path(base_path)
+        stem = path.stem or "trading"
+        suffix = path.suffix or ".db"
+        db_path = str(path.with_name(f"{stem}_{exchange_key}{suffix}"))
 
-    path = Path(base_path)
-    stem = path.stem or "trading"
-    suffix = path.suffix or ".db"
-    return str(path.with_name(f"{stem}_{exchange_key}{suffix}"))
+    if account:
+        p = Path(db_path)
+        stem = p.stem or "trading"
+        suffix = p.suffix or ".db"
+        db_path = str(p.with_name(f"{stem}_{account}{suffix}"))
+    return db_path

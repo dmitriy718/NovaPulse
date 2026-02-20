@@ -180,6 +180,11 @@ class ModelTrainer:
         self._training_history: List[Dict[str, Any]] = []
         self._executor: Optional[concurrent.futures.ProcessPoolExecutor] = None
         self.tenant_id = tenant_id or "default"
+        self._es_provider = None  # Optional ESTrainingDataProvider
+
+    def set_es_provider(self, provider) -> None:
+        """Set optional Elasticsearch training data provider for feature enrichment."""
+        self._es_provider = provider
 
     def _get_executor(self) -> concurrent.futures.ProcessPoolExecutor:
         """Lazy-init executor so it can be shut down cleanly."""
@@ -217,6 +222,13 @@ class ModelTrainer:
             result["message"] = f"Insufficient training data: {len(training_data)} samples (need 20+)"
             logger.warning(result["message"])
             return result
+
+        # Step 1b: Enrich with ES context features (best-effort)
+        if self._es_provider:
+            try:
+                training_data = await self._es_provider.build_enriched_dataset(training_data)
+            except Exception as e:
+                logger.warning("ES enrichment failed, using base features", error=repr(e))
 
         # Step 2: Prepare data
         X_train, y_train, X_val, y_val = self._prepare_data(training_data)

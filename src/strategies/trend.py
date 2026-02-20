@@ -108,9 +108,9 @@ class TrendStrategy(BaseStrategy):
         # EMA spread strength
         ema_spread = abs(curr_ema_f - curr_ema_s) / curr_ema_s if curr_ema_s > 0 else 0
 
-        # Trend slope (acceleration)
+        # Trend slope (acceleration) — per-bar average change over 2 bars
         if len(ts) >= 3:
-            slope = ts[-1] - ts[-3]
+            slope = (ts[-1] - ts[-3]) / 2
         else:
             slope = 0.0
 

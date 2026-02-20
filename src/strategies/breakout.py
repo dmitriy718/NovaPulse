@@ -124,6 +124,20 @@ class BreakoutStrategy(BaseStrategy):
 
         # -- BULLISH BREAKOUT --
         if curr_price > n_period_high and candle_body > 0:
+            long_confirmation_hits = 0
+            if vol_confirmed:
+                long_confirmation_hits += 1
+            if body_ratio > 0.6:
+                long_confirmation_hits += 1
+            if volatility_expanding:
+                long_confirmation_hits += 1
+            if curr_rsi < 70:
+                long_confirmation_hits += 1
+
+            # Avoid acting on weak level pokes with no real confirmation.
+            if long_confirmation_hits < 2:
+                return self._neutral_signal(pair, "Weak breakout confirmation")
+
             direction = SignalDirection.LONG
 
             # Base strength from breakout distance
@@ -158,6 +172,19 @@ class BreakoutStrategy(BaseStrategy):
 
         # -- BEARISH BREAKDOWN --
         elif curr_price < n_period_low and candle_body < 0:
+            short_confirmation_hits = 0
+            if vol_confirmed:
+                short_confirmation_hits += 1
+            if body_ratio > 0.6:
+                short_confirmation_hits += 1
+            if volatility_expanding:
+                short_confirmation_hits += 1
+            if curr_rsi > 30:
+                short_confirmation_hits += 1
+
+            if short_confirmation_hits < 2:
+                return self._neutral_signal(pair, "Weak breakdown confirmation")
+
             direction = SignalDirection.SHORT
 
             breakdown_pct = (n_period_low - curr_price) / n_period_low

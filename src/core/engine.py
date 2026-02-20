@@ -20,7 +20,7 @@ import traceback
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from src.ai.confluence import ConfluenceDetector
+from src.ai.confluence import ConfluenceDetector, ConfluenceSignal
 from src.ai.order_book import OrderBookAnalyzer
 from src.ai.predictor import TFLitePredictor
 from src.api.server import DashboardServer
@@ -36,7 +36,11 @@ from src.execution.executor import TradeExecutor
 from src.execution.risk_manager import RiskManager
 from src.ml.trainer import ModelTrainer, AutoRetrainer
 from src.ml.continuous_learner import ContinuousLearner
-from src.strategies.base import SignalDirection
+from src.ml.strategy_tuner import StrategyTuner, AutoTuner
+from src.ai.session_analyzer import SessionAnalyzer
+from src.strategies.base import SignalDirection, StrategySignal
+from src.utils.discord_bot import DiscordBot
+from src.utils.slack_bot import SlackBot
 from src.utils.telegram import TelegramBot
 
 logger = get_logger("engine")
@@ -62,10 +66,24 @@ class BotEngine:
     def __init__(self, config_override: Optional[Any] = None, enable_dashboard: bool = True):
         self.config = config_override or get_config()
         self.mode = self.config.app.mode
-        self.pairs = self.config.trading.pairs
+        self.canary_mode = bool(getattr(self.config.trading, "canary_mode", False))
+        configured_pairs = list(self.config.trading.pairs or [])
+        self.pairs = configured_pairs
         self.scan_interval = self.config.trading.scan_interval_seconds
+        if self.canary_mode:
+            canary_pairs = list(getattr(self.config.trading, "canary_pairs", []) or [])
+            max_pairs = max(1, int(getattr(self.config.trading, "canary_max_pairs", 2) or 2))
+            if canary_pairs:
+                self.pairs = canary_pairs[:max_pairs]
+            else:
+                self.pairs = configured_pairs[:max_pairs]
+            canary_scan_interval = max(
+                1, int(getattr(self.config.trading, "canary_scan_interval_seconds", self.scan_interval) or self.scan_interval)
+            )
+            self.scan_interval = max(self.scan_interval, canary_scan_interval)
         self.position_check_interval = self.config.trading.position_check_interval_seconds
         self.tenant_id = self.config.billing.tenant.default_tenant_id
+        self.account_id = getattr(self.config.app, "account_id", "default")
         self._enable_dashboard = enable_dashboard
 
         # Core components (initialized in start())
@@ -82,7 +100,15 @@ class BotEngine:
         self.dashboard: Optional[DashboardServer] = None
         self.control_router: Optional[ControlRouter] = None
         self.telegram_bot: Optional[TelegramBot] = None
+        self.discord_bot: Optional[DiscordBot] = None
+        self.slack_bot: Optional[SlackBot] = None
         self.error_handler: GracefulErrorHandler = GracefulErrorHandler()
+
+        # Elasticsearch data pipeline (initialized in initialize() if enabled)
+        self.es_client = None
+        self.market_data_indexer = None
+        self.external_data_collector = None
+        self.es_training_provider = None
 
         # State
         self._running = False
@@ -110,7 +136,12 @@ class BotEngine:
         self._recent_event_count = 0
         self._event_window_start = 0.0
 
-    async def _auto_pause_trading(self, reason: str, detail: str = "") -> None:
+    async def _auto_pause_trading(
+        self,
+        reason: str,
+        detail: str = "",
+        emergency_close: Optional[bool] = None,
+    ) -> None:
         """Pause trading with audit logging and optional Telegram alert (idempotent)."""
         if self._trading_paused:
             return
@@ -134,6 +165,26 @@ class BotEngine:
                 await self.telegram_bot.send_message(f"🛑 *AUTO-PAUSE*\n{msg}")
         except Exception:
             pass
+        do_emergency_close = bool(
+            getattr(self.config.monitoring, "emergency_close_on_auto_pause", False)
+            if emergency_close is None
+            else emergency_close
+        )
+        if do_emergency_close and self.executor:
+            try:
+                closed = await self.executor.close_all_positions(
+                    reason=f"auto_pause:{reason}",
+                    tenant_id=self.tenant_id,
+                )
+                if self.db:
+                    await self.db.log_thought(
+                        "system",
+                        f"AUTO-PAUSE emergency close executed: {closed} positions closed",
+                        severity="warning",
+                        tenant_id=self.tenant_id,
+                    )
+            except Exception:
+                pass
 
     async def _apply_circuit_breakers(self, stale_pairs: List[str]) -> None:
         """Apply simple circuit breakers (stale data, WS disconnect) to reduce blow-ups in live mode."""
@@ -171,6 +222,178 @@ class BotEngine:
             if self._ws_disconnected_since is not None and (now - self._ws_disconnected_since) >= limit_s:
                 await self._auto_pause_trading("ws_disconnected", detail=f">{limit_s}s")
 
+        # Consecutive loss breaker
+        if getattr(mon, "auto_pause_on_consecutive_losses", True) and self.risk_manager:
+            report = self.risk_manager.get_risk_report()
+            losses = int(report.get("consecutive_losses", 0) or 0)
+            threshold = max(1, int(getattr(mon, "consecutive_losses_pause_threshold", 4) or 4))
+            if losses >= threshold:
+                await self._auto_pause_trading(
+                    "consecutive_losses",
+                    detail=f"{losses} consecutive losses (threshold={threshold})",
+                )
+
+        # Drawdown breaker
+        if getattr(mon, "auto_pause_on_drawdown", True) and self.risk_manager:
+            report = self.risk_manager.get_risk_report()
+            drawdown = float(report.get("current_drawdown", 0.0) or 0.0)
+            threshold_pct = max(0.1, float(getattr(mon, "drawdown_pause_pct", 8.0) or 8.0))
+            if drawdown >= threshold_pct:
+                await self._auto_pause_trading(
+                    "drawdown_limit",
+                    detail=f"drawdown={drawdown:.2f}% threshold={threshold_pct:.2f}%",
+                )
+
+    async def execute_external_signal(
+        self,
+        payload: Dict[str, Any],
+        *,
+        source: str = "webhook",
+    ) -> Dict[str, Any]:
+        """
+        Execute a signed external signal (TradingView/custom provider).
+
+        Expected payload fields:
+        - pair (required)
+        - direction: long/short/buy/sell (required)
+        - confidence, strength, confluence_count (optional)
+        - entry_price, stop_loss, take_profit (optional; defaults are derived)
+        - strategy/provider/timestamp (optional metadata)
+        """
+        if not self.executor:
+            return {"ok": False, "error": "executor not available"}
+        if self._trading_paused:
+            return {"ok": False, "error": "trading paused"}
+
+        pair_raw = str(payload.get("pair") or "").strip().upper().replace("-", "/")
+        if not pair_raw:
+            return {"ok": False, "error": "pair is required"}
+        pair = pair_raw
+
+        known_pairs = {str(p).upper() for p in (self.pairs or [])}
+        if known_pairs and pair not in known_pairs:
+            return {"ok": False, "error": f"pair not configured: {pair}"}
+
+        direction_raw = str(payload.get("direction") or "").strip().lower()
+        if direction_raw in ("buy", "long"):
+            direction = SignalDirection.LONG
+            side = "buy"
+        elif direction_raw in ("sell", "short"):
+            direction = SignalDirection.SHORT
+            side = "sell"
+        else:
+            return {"ok": False, "error": "direction must be long/short or buy/sell"}
+
+        try:
+            market_price = float(self.market_data.get_latest_price(pair)) if self.market_data else 0.0
+        except Exception:
+            market_price = 0.0
+        try:
+            entry_price = float(payload.get("entry_price") or market_price)
+        except Exception:
+            entry_price = market_price
+        if entry_price <= 0:
+            return {"ok": False, "error": "entry_price missing and no market price available"}
+
+        min_conf = float(getattr(self.config.ai, "min_confidence", 0.6) or 0.6)
+        confidence = payload.get("confidence", min_conf)
+        strength = payload.get("strength", confidence)
+        confluence_count = payload.get("confluence_count", max(2, int(self.config.ai.confluence_threshold)))
+
+        try:
+            confidence = max(0.0, min(1.0, float(confidence)))
+        except Exception:
+            confidence = min_conf
+        try:
+            strength = max(0.0, min(1.0, float(strength)))
+        except Exception:
+            strength = confidence
+        try:
+            confluence_count = max(1, int(confluence_count))
+        except Exception:
+            confluence_count = max(2, int(self.config.ai.confluence_threshold))
+
+        # Derive defaults if SL/TP omitted.
+        try:
+            stop_loss = float(payload.get("stop_loss") or 0.0)
+        except Exception:
+            stop_loss = 0.0
+        try:
+            take_profit = float(payload.get("take_profit") or 0.0)
+        except Exception:
+            take_profit = 0.0
+
+        try:
+            stop_pct = max(0.001, float(payload.get("stop_pct", 0.01)))
+        except Exception:
+            stop_pct = 0.01
+        try:
+            rr = max(1.0, float(payload.get("risk_reward", max(1.2, self.config.ai.min_risk_reward_ratio))))
+        except Exception:
+            rr = max(1.2, self.config.ai.min_risk_reward_ratio)
+
+        if stop_loss <= 0:
+            stop_loss = entry_price * (1.0 - stop_pct) if side == "buy" else entry_price * (1.0 + stop_pct)
+        if take_profit <= 0:
+            tp_pct = stop_pct * rr
+            take_profit = entry_price * (1.0 + tp_pct) if side == "buy" else entry_price * (1.0 - tp_pct)
+
+        strategy_name = str(payload.get("strategy") or f"external_{source}").strip() or f"external_{source}"
+        provider = str(payload.get("provider") or "").strip()
+        timestamp = str(payload.get("timestamp") or datetime.now(timezone.utc).isoformat())
+
+        strategy_signal = StrategySignal(
+            strategy_name=strategy_name,
+            pair=pair,
+            direction=direction,
+            strength=float(strength),
+            confidence=float(confidence),
+            entry_price=float(entry_price),
+            stop_loss=float(stop_loss),
+            take_profit=float(take_profit),
+            timestamp=timestamp,
+            metadata={
+                "external": True,
+                "source": source,
+                "provider": provider,
+            },
+        )
+        confluence_signal = ConfluenceSignal(
+            pair=pair,
+            direction=direction,
+            strength=float(strength),
+            confidence=float(confidence),
+            confluence_count=int(confluence_count),
+            signals=[strategy_signal],
+            obi=0.0,
+            book_score=0.0,
+            obi_agrees=False,
+            is_sure_fire=False,
+            entry_price=float(entry_price),
+            stop_loss=float(stop_loss),
+            take_profit=float(take_profit),
+        )
+        confluence_signal.timestamp = timestamp
+
+        trade_id = await self.executor.execute_signal(confluence_signal)
+        if not trade_id:
+            return {"ok": False, "error": "signal rejected by risk/execution"}
+
+        if self.db:
+            await self.db.log_thought(
+                "signal",
+                f"External signal executed | {pair} {direction.value.upper()} | source={source}",
+                severity="info",
+                metadata={
+                    "source": source,
+                    "provider": provider,
+                    "trade_id": trade_id,
+                    "signal": confluence_signal.to_dict(),
+                },
+                tenant_id=self.tenant_id,
+            )
+        return {"ok": True, "trade_id": trade_id}
+
     async def initialize(self) -> None:
         """Initialize all subsystems with graceful error handling.
 
@@ -181,11 +404,29 @@ class BotEngine:
         from src import __version__
         logger.info("Initializing AI Trading Bot", mode=self.mode, version=__version__)
 
+        account_id = str(getattr(self.config.app, "account_id", self.tenant_id) or self.tenant_id).strip().lower()
+
+        def _env_for_account(name: str, default: str = "") -> str:
+            # Supports multi-account secret names like:
+            # MAIN_KRAKEN_API_KEY, SWING_COINBASE_KEY_NAME, etc.
+            if account_id and account_id != "default":
+                prefix = "".join(ch if ch.isalnum() else "_" for ch in account_id.upper())
+                scoped_key = f"{prefix}_{name}"
+                scoped = os.getenv(scoped_key)
+                if scoped is not None and scoped != "":
+                    return scoped
+            return os.getenv(name, default)
+
         # ---- CRITICAL: Database ----
         db_path = self.config.app.db_path
         self.db = DatabaseManager(db_path)
         await self.db.initialize()
         logger.info("Database initialized", path=db_path)
+        logger.info(
+            "Persistence contract",
+            canonical_ledger="sqlite",
+            elasticsearch_role="analytics_mirror",
+        )
 
         # Wire up error handler's DB logging now that DB is ready.
         self.error_handler.set_db_log_fn(
@@ -199,34 +440,38 @@ class BotEngine:
             from src.exchange.coinbase_rest import CoinbaseAuthConfig, CoinbaseRESTClient
             from src.exchange.coinbase_ws import CoinbaseWebSocketClient
 
-            is_sandbox = os.getenv("COINBASE_SANDBOX", "false").lower() in ("true", "1", "yes")
+            is_sandbox = _env_for_account("COINBASE_SANDBOX", "false").lower() in ("true", "1", "yes")
             rest_url = self.config.exchange.rest_url
             ws_url = self.config.exchange.ws_url
             if "kraken" in rest_url:
                 rest_url = CoinbaseRESTClient.DEFAULT_SANDBOX_URL if is_sandbox else CoinbaseRESTClient.DEFAULT_REST_URL
             if "kraken" in ws_url:
                 ws_url = CoinbaseWebSocketClient.DEFAULT_WS_URL
-            market_data_url = os.getenv("COINBASE_MARKET_DATA_URL", "").strip() or None
+            market_data_url = _env_for_account("COINBASE_MARKET_DATA_URL", "").strip() or None
             if is_sandbox and not market_data_url:
                 logger.warning(
                     "Coinbase sandbox has limited market data endpoints",
                     hint="Set COINBASE_MARKET_DATA_URL to production if needed",
                 )
 
-            key_name = os.getenv("COINBASE_KEY_NAME", "").strip()
+            key_name = _env_for_account("COINBASE_KEY_NAME", "").strip()
             if not key_name:
-                org_id = os.getenv("COINBASE_ORG_ID", "").strip()
-                key_id = os.getenv("COINBASE_KEY_ID", "").strip()
+                org_id = _env_for_account("COINBASE_ORG_ID", "").strip()
+                key_id = _env_for_account("COINBASE_KEY_ID", "").strip()
                 if org_id and key_id:
                     key_name = f"organizations/{org_id}/apiKeys/{key_id}"
 
             private_key_pem = ""
-            key_path = os.getenv("COINBASE_PRIVATE_KEY_PATH", "").strip()
-            if key_path and os.path.exists(key_path):
-                with open(key_path, "r") as f:
-                    private_key_pem = f.read()
-                if "\\n" in private_key_pem and "\n" not in private_key_pem:
-                    private_key_pem = private_key_pem.replace("\\n", "\n")
+            inline_private_key = _env_for_account("COINBASE_PRIVATE_KEY", "").strip()
+            if inline_private_key:
+                private_key_pem = inline_private_key
+            else:
+                key_path = _env_for_account("COINBASE_PRIVATE_KEY_PATH", "").strip()
+                if key_path and os.path.exists(key_path):
+                    with open(key_path, "r") as f:
+                        private_key_pem = f.read()
+            if "\\n" in private_key_pem and "\n" not in private_key_pem:
+                private_key_pem = private_key_pem.replace("\\n", "\n")
 
             auth_cfg = None
             if key_name and private_key_pem:
@@ -251,6 +496,7 @@ class BotEngine:
             logger.info(
                 "REST client initialized",
                 exchange="coinbase",
+                account=account_id,
                 sandbox=is_sandbox,
                 mode=self.mode,
                 has_key=bool(auth_cfg),
@@ -258,9 +504,9 @@ class BotEngine:
 
             self.ws_client = CoinbaseWebSocketClient(url=ws_url)
         else:
-            api_key = os.getenv("KRAKEN_API_KEY", "")
-            api_secret = os.getenv("KRAKEN_API_SECRET", "")
-            is_sandbox = os.getenv("KRAKEN_SANDBOX", "false").lower() in ("true", "1", "yes")
+            api_key = _env_for_account("KRAKEN_API_KEY", "")
+            api_secret = _env_for_account("KRAKEN_API_SECRET", "")
+            is_sandbox = _env_for_account("KRAKEN_SANDBOX", "false").lower() in ("true", "1", "yes")
 
             self.rest_client = KrakenRESTClient(
                 api_key=api_key,
@@ -272,6 +518,7 @@ class BotEngine:
             logger.info(
                 "REST client initialized",
                 exchange="kraken",
+                account=account_id,
                 sandbox=is_sandbox,
                 mode=self.mode,
                 has_key=bool(api_key),
@@ -285,6 +532,22 @@ class BotEngine:
         self.market_data = MarketDataCache(
             max_bars=self.config.trading.warmup_bars,
         )
+
+        # ---- NON-CRITICAL: Session Analyzer ----
+        self.session_analyzer: Optional[SessionAnalyzer] = None
+        try:
+            session_cfg = getattr(self.config.ai, "session", None)
+            if session_cfg and getattr(session_cfg, "enabled", True):
+                self.session_analyzer = SessionAnalyzer(
+                    db=self.db,
+                    min_trades_per_hour=getattr(session_cfg, "min_trades_per_hour", 5),
+                    max_boost=getattr(session_cfg, "max_boost", 1.15),
+                    max_penalty=getattr(session_cfg, "max_penalty", 0.70),
+                    tenant_id=self.tenant_id,
+                )
+                logger.info("Session analyzer initialized")
+        except Exception as e:
+            await self.error_handler.handle(e, component="session_analyzer", context="init")
 
         # ---- NON-CRITICAL: AI Components ----
         try:
@@ -305,6 +568,17 @@ class BotEngine:
                 timeframes=getattr(self.config.trading, "timeframes", [1]),
                 multi_timeframe_min_agreement=getattr(self.config.ai, "multi_timeframe_min_agreement", 1),
                 primary_timeframe=getattr(self.config.ai, "primary_timeframe", 1),
+                session_analyzer=self.session_analyzer,
+                strategy_guardrails_enabled=getattr(self.config.ai, "strategy_guardrails_enabled", True),
+                strategy_guardrails_min_trades=getattr(self.config.ai, "strategy_guardrails_min_trades", 20),
+                strategy_guardrails_window_trades=getattr(self.config.ai, "strategy_guardrails_window_trades", 30),
+                strategy_guardrails_min_win_rate=getattr(self.config.ai, "strategy_guardrails_min_win_rate", 0.35),
+                strategy_guardrails_min_profit_factor=getattr(
+                    self.config.ai, "strategy_guardrails_min_profit_factor", 0.85
+                ),
+                strategy_guardrails_disable_minutes=getattr(
+                    self.config.ai, "strategy_guardrails_disable_minutes", 120
+                ),
             )
             self.confluence.configure_strategies(
                 self.config.strategies.model_dump(),
@@ -353,23 +627,42 @@ class BotEngine:
 
         # Risk Manager
         initial_bankroll = float(self.config.risk.initial_bankroll)
+        max_risk_per_trade = float(self.config.risk.max_risk_per_trade)
+        max_position_usd = float(self.config.risk.max_position_usd)
+        max_concurrent_positions = int(self.config.trading.max_concurrent_positions)
+        cooldown_seconds = 60 if self.mode == "paper" else int(self.config.trading.cooldown_seconds)
+        if self.canary_mode:
+            max_risk_per_trade = min(
+                max_risk_per_trade,
+                float(getattr(self.config.trading, "canary_max_risk_per_trade", max_risk_per_trade)),
+            )
+            max_position_usd = min(
+                max_position_usd,
+                float(getattr(self.config.trading, "canary_max_position_usd", max_position_usd)),
+            )
+            max_concurrent_positions = 1
+            cooldown_seconds = max(cooldown_seconds, int(self.config.trading.cooldown_seconds))
+
         self.risk_manager = RiskManager(
             initial_bankroll=initial_bankroll,
-            max_risk_per_trade=self.config.risk.max_risk_per_trade,
+            max_risk_per_trade=max_risk_per_trade,
             max_daily_loss=self.config.risk.max_daily_loss,
-            max_position_usd=self.config.risk.max_position_usd,
+            max_position_usd=max_position_usd,
             kelly_fraction=self.config.risk.kelly_fraction,
             max_kelly_size=self.config.risk.max_kelly_size,
             risk_of_ruin_threshold=self.config.risk.risk_of_ruin_threshold,
+            max_daily_trades=getattr(self.config.risk, "max_daily_trades", 0),
+            max_total_exposure_pct=getattr(self.config.risk, "max_total_exposure_pct", 0.50),
             atr_multiplier_sl=self.config.risk.atr_multiplier_sl,
             atr_multiplier_tp=self.config.risk.atr_multiplier_tp,
             trailing_activation_pct=self.config.risk.trailing_activation_pct,
             trailing_step_pct=self.config.risk.trailing_step_pct,
             breakeven_activation_pct=self.config.risk.breakeven_activation_pct,
-            cooldown_seconds=60 if self.mode == "paper" else self.config.trading.cooldown_seconds,
-            max_concurrent_positions=self.config.trading.max_concurrent_positions,
+            cooldown_seconds=cooldown_seconds,
+            max_concurrent_positions=max_concurrent_positions,
             strategy_cooldowns=self.config.trading.strategy_cooldowns_seconds,
             global_cooldown_seconds_on_loss=self.config.risk.global_cooldown_seconds_on_loss,
+            min_risk_reward_ratio=getattr(self.config.ai, "min_risk_reward_ratio", 1.2),
         )
         # Sync bankroll with historical P/L from DB so restarts don't
         # cause a mismatch between the displayed total P/L (from DB) and
@@ -411,7 +704,9 @@ class BotEngine:
             limit_chase_attempts=self.config.exchange.limit_chase_attempts,
             limit_chase_delay_seconds=self.config.exchange.limit_chase_delay_seconds,
             limit_fallback_to_market=self.config.exchange.limit_fallback_to_market,
+            es_client=self.es_client,
             strategy_result_cb=self.confluence.record_trade_result if self.confluence else None,
+            max_trades_per_hour=getattr(self.config.trading, "max_trades_per_hour", 0),
         )
         if self.continuous_learner:
             self.executor.set_continuous_learner(self.continuous_learner)
@@ -435,6 +730,29 @@ class BotEngine:
             # Provide a no-op retrainer so background loops don't crash.
             self.retrainer = type("_NoOp", (), {"run": staticmethod(lambda: asyncio.sleep(3600))})()
 
+        # ---- NON-CRITICAL: Auto Strategy Tuner ----
+        self.auto_tuner = None
+        try:
+            tuner_cfg = getattr(self.config, "tuner", None)
+            if tuner_cfg and getattr(tuner_cfg, "enabled", True):
+                weight_bounds = tuple(getattr(tuner_cfg, "weight_bounds", [0.05, 0.50]))
+                strategy_tuner = StrategyTuner(
+                    db=self.db,
+                    config_path="config/config.yaml",
+                    min_trades_per_strategy=getattr(tuner_cfg, "min_trades_per_strategy", 15),
+                    weight_bounds=weight_bounds,
+                    auto_disable_sharpe=getattr(tuner_cfg, "auto_disable_sharpe", -0.3),
+                    auto_disable_min_trades=getattr(tuner_cfg, "auto_disable_min_trades", 30),
+                    tenant_id=self.tenant_id,
+                )
+                self.auto_tuner = AutoTuner(
+                    tuner=strategy_tuner,
+                    interval_hours=getattr(tuner_cfg, "interval_hours", 168),
+                )
+                logger.info("Auto strategy tuner initialized", interval_hours=tuner_cfg.interval_hours)
+        except Exception as e:
+            await self.error_handler.handle(e, component="strategy_tuner", context="init")
+
         # Restore open positions state
         await self.executor.reinitialize_positions()
 
@@ -451,6 +769,7 @@ class BotEngine:
                 await self.error_handler.handle(e, component="dashboard", context="init")
 
         # ---- NON-CRITICAL: Telegram ----
+        notification_targets = []
         try:
             tcfg = getattr(self.config, "control", None)
             tcfg = getattr(tcfg, "telegram", None) if tcfg else None
@@ -465,14 +784,58 @@ class BotEngine:
                 self.telegram_bot.set_bot_engine(self)
                 self.telegram_bot.set_control_router(self.control_router)
                 await self.telegram_bot.initialize()
-                # Wire up Telegram notifications for errors
-                self.error_handler.set_notify_fn(self.telegram_bot.send_message)
+                notification_targets.append(self.telegram_bot.send_message)
                 # Attach Telegram alerts to root logger so ALL ERROR+ logs
                 # are automatically forwarded to Telegram.
                 from src.core.logger import attach_telegram_alerts
                 attach_telegram_alerts(self.telegram_bot, min_interval=10.0)
         except Exception as e:
             await self.error_handler.handle(e, component="telegram", context="init")
+
+        # ---- NON-CRITICAL: Discord ----
+        try:
+            dcfg = getattr(self.config, "control", None)
+            dcfg = getattr(dcfg, "discord", None) if dcfg else None
+            if dcfg and getattr(dcfg, "enabled", False):
+                self.discord_bot = DiscordBot(
+                    token=dcfg.token,
+                    allowed_channel_ids=dcfg.allowed_channel_ids,
+                    allowed_guild_id=dcfg.allowed_guild_id,
+                )
+                self.discord_bot.set_control_router(self.control_router)
+                ok = await self.discord_bot.initialize()
+                if ok:
+                    notification_targets.append(self.discord_bot.send_message)
+        except Exception as e:
+            await self.error_handler.handle(e, component="discord", context="init")
+
+        # ---- NON-CRITICAL: Slack ----
+        try:
+            scfg = getattr(self.config, "control", None)
+            scfg = getattr(scfg, "slack", None) if scfg else None
+            if scfg and getattr(scfg, "enabled", False):
+                self.slack_bot = SlackBot(
+                    token=scfg.token,
+                    signing_secret=scfg.signing_secret,
+                    app_token=scfg.app_token,
+                    allowed_channel_id=scfg.allowed_channel_id,
+                )
+                self.slack_bot.set_control_router(self.control_router)
+                ok = await self.slack_bot.initialize()
+                if ok:
+                    notification_targets.append(self.slack_bot.send_message)
+        except Exception as e:
+            await self.error_handler.handle(e, component="slack", context="init")
+
+        if notification_targets:
+            async def _notify_all(msg: str) -> None:
+                for notify in notification_targets:
+                    try:
+                        await notify(msg)
+                    except Exception:
+                        continue
+
+            self.error_handler.set_notify_fn(_notify_all)
 
         # ---- NON-CRITICAL: Billing (Stripe) ----
         try:
@@ -491,6 +854,55 @@ class BotEngine:
         except Exception as e:
             await self.error_handler.handle(e, component="billing", context="init")
 
+        # ---- NON-CRITICAL: Elasticsearch Data Pipeline ----
+        try:
+            es_cfg = getattr(self.config, "elasticsearch", None)
+            if es_cfg and getattr(es_cfg, "enabled", False):
+                from src.data.es_client import ESClient
+                from src.data.ingestion import ExternalDataCollector, MarketDataIndexer
+                from src.data.training_data import ESTrainingDataProvider
+
+                self.es_client = ESClient(
+                    hosts=es_cfg.hosts,
+                    index_prefix=es_cfg.index_prefix,
+                    bulk_size=es_cfg.bulk_size,
+                    flush_interval=es_cfg.flush_interval_seconds,
+                    buffer_maxlen=es_cfg.buffer_maxlen,
+                    retention_days=es_cfg.retention_days,
+                    api_key=es_cfg.api_key,
+                    cloud_id=es_cfg.cloud_id,
+                )
+                connected = await self.es_client.connect()
+                if connected:
+                    self.market_data_indexer = MarketDataIndexer(
+                        es=self.es_client,
+                        market_data=self.market_data,
+                    )
+                    polls = es_cfg.poll_intervals or {}
+                    self.external_data_collector = ExternalDataCollector(
+                        es=self.es_client,
+                        pairs=self.pairs,
+                        coingecko_api_key=es_cfg.coingecko_api_key,
+                        cryptopanic_api_key=es_cfg.cryptopanic_api_key,
+                        fear_greed_interval=polls.get("fear_greed", 3600),
+                        coingecko_interval=polls.get("coingecko", 600),
+                        cryptopanic_interval=polls.get("cryptopanic", 600),
+                        onchain_interval=polls.get("onchain", 3600),
+                    )
+                    self.es_training_provider = ESTrainingDataProvider(es=self.es_client)
+                    if self.executor:
+                        self.executor.set_es_client(self.es_client)
+                    # Wire into ML trainer
+                    if hasattr(self, "ml_trainer") and self.ml_trainer:
+                        self.ml_trainer.set_es_provider(self.es_training_provider)
+                    logger.info("Elasticsearch data pipeline initialized")
+                else:
+                    logger.warning("Elasticsearch connection failed, data pipeline disabled")
+                    self.es_client = None
+        except Exception as e:
+            await self.error_handler.handle(e, component="elasticsearch", context="init")
+            self.es_client = None
+
         await self.db.log_thought(
             "system",
             f"Bot initialized in {self.mode.upper()} mode | "
@@ -499,6 +911,14 @@ class BotEngine:
             severity="info",
             tenant_id=self.tenant_id,
         )
+        if self.canary_mode:
+            await self.db.log_thought(
+                "system",
+                f"Canary mode ACTIVE | pairs={','.join(self.pairs)} | "
+                f"risk_cap={max_risk_per_trade:.4f} | position_cap=${max_position_usd:.2f}",
+                severity="warning",
+                tenant_id=self.tenant_id,
+            )
 
         if self._start_paused_requested:
             self._trading_paused = True
@@ -550,11 +970,33 @@ class BotEngine:
         )
 
     async def _warmup_pair(self, pair: str) -> int:
-        """Warmup a single pair with historical data."""
+        """Warmup a single pair with historical data.
+
+        Kraken returns max 720 bars per OHLC request.  When warmup_bars
+        exceeds 720 we make two calls to cover the full range.
+        """
         try:
-            ohlc = await self.rest_client.get_ohlc(
-                pair, interval=1, since=None
-            )
+            target_bars = self.config.trading.warmup_bars
+            if target_bars > 720:
+                # First call: fetch older chunk via `since`
+                since_ts = int(time.time()) - target_bars * 60
+                older = await self.rest_client.get_ohlc(pair, interval=1, since=since_ts)
+                # Second call: fetch latest chunk (may overlap)
+                recent = await self.rest_client.get_ohlc(pair, interval=1, since=None)
+
+                # Merge by timestamp (both are sorted ascending)
+                seen = set()
+                merged: list = []
+                for bar in (older or []) + (recent or []):
+                    ts = bar[0] if bar else None
+                    if ts is not None and ts not in seen:
+                        seen.add(ts)
+                        merged.append(bar)
+                merged.sort(key=lambda b: b[0])
+                ohlc = merged
+            else:
+                ohlc = await self.rest_client.get_ohlc(pair, interval=1, since=None)
+
             if ohlc:
                 bars = await self.market_data.warmup(pair, ohlc)
                 logger.debug("Pair warmup complete", pair=pair, bars=bars)
@@ -587,6 +1029,11 @@ class BotEngine:
                 )
 
         # Now safe to close resources
+        if self.es_client:
+            try:
+                await self.es_client.close()
+            except Exception:
+                pass
         if self.ws_client:
             await self.ws_client.disconnect()
         if self.rest_client:
@@ -603,6 +1050,16 @@ class BotEngine:
         if self.telegram_bot:
             try:
                 await self.telegram_bot.stop()
+            except Exception:
+                pass
+        if self.discord_bot:
+            try:
+                await self.discord_bot.stop()
+            except Exception:
+                pass
+        if self.slack_bot:
+            try:
+                await self.slack_bot.stop()
             except Exception:
                 pass
 
@@ -633,7 +1090,14 @@ class BotEngine:
                     await asyncio.sleep(self.scan_interval)
                     continue
 
-                # Step 2: Run confluence analysis on event-driven pairs
+                # Step 2: Refresh session analyzer (hourly, non-blocking)
+                if self.session_analyzer:
+                    try:
+                        await self.session_analyzer.maybe_refresh()
+                    except Exception:
+                        pass  # Non-critical
+
+                # Step 3: Run confluence analysis on event-driven pairs
                 pairs_to_scan, from_event = await self._collect_scan_pairs()
                 if not self.confluence:
                     logger.warning("Confluence detector not initialized, skipping scan")
@@ -649,14 +1113,33 @@ class BotEngine:
                 min_confluence = max(2, min_confluence)  # At least 2 strategies must agree
                 exec_confidence = getattr(self.config.ai, "min_confidence", 0.50)
                 exec_confidence = max(0.45, min(exec_confidence, 0.75))  # Keep within sane bounds
+                if self.canary_mode:
+                    min_confluence = max(
+                        min_confluence,
+                        int(getattr(self.config.trading, "canary_min_confluence", 3)),
+                    )
+                    exec_confidence = max(
+                        exec_confidence,
+                        float(getattr(self.config.trading, "canary_min_confidence", 0.68)),
+                    )
                 allow_keltner_solo = getattr(self.config.ai, "allow_keltner_solo", False)
                 allow_any_solo = getattr(self.config.ai, "allow_any_solo", False)
+                if self.canary_mode:
+                    allow_keltner_solo = False
+                    allow_any_solo = False
                 keltner_solo_min = getattr(self.config.ai, "keltner_solo_min_confidence", 0.60)
                 solo_min = getattr(self.config.ai, "solo_min_confidence", 0.65)
 
                 for signal in confluence_signals:
                     if signal.direction == SignalDirection.NEUTRAL:
                         continue
+
+                    # Distinguish real strategy votes from synthetic order-book vote.
+                    directional_real_votes = sum(
+                        1
+                        for s in signal.signals
+                        if s.direction == signal.direction and s.strategy_name != "order_book"
+                    )
 
                     # AI verification for all non-neutral signals
                     prediction_features = self._build_prediction_features(signal)
@@ -685,10 +1168,12 @@ class BotEngine:
 
                     # Blend: for solo signals let strategy dominate so we still collect data.
                     pre_blend = signal.confidence
-                    if signal.confluence_count == 1:
+                    if directional_real_votes <= 1:
                         signal.confidence = 0.7 * pre_blend + 0.3 * ai_confidence
                     else:
-                        signal.confidence = (pre_blend + ai_confidence) / 2
+                        blended = (pre_blend + ai_confidence) / 2
+                        # Prevent AI from fully vetoing strong multi-strategy consensus.
+                        signal.confidence = max(blended, pre_blend * 0.85)
 
                     try:
                         setattr(signal, "online_ai_confidence", online_ai)
@@ -719,10 +1204,19 @@ class BotEngine:
                         for s in signal.signals
                         if s.direction == signal.direction
                     )
-                    keltner_solo_ok = allow_keltner_solo and has_keltner and signal.confidence >= keltner_solo_min
-                    any_solo_ok = allow_any_solo and signal.confluence_count == 1 and signal.confidence >= solo_min
+                    keltner_solo_ok = (
+                        allow_keltner_solo
+                        and has_keltner
+                        and directional_real_votes == 1
+                        and signal.confidence >= keltner_solo_min
+                    )
+                    any_solo_ok = (
+                        allow_any_solo
+                        and directional_real_votes == 1
+                        and signal.confidence >= solo_min
+                    )
 
-                    if signal.confluence_count < min_confluence and not keltner_solo_ok and not any_solo_ok:
+                    if directional_real_votes < min_confluence and not keltner_solo_ok and not any_solo_ok:
                         continue
 
                     # Skip trades with poor risk/reward (TP distance should be at least min_rr * SL distance)
@@ -735,8 +1229,14 @@ class BotEngine:
                     # Skip if spread too wide
                     max_spread = getattr(self.config.trading, "max_spread_pct", 0.0) or 0.0
                     if max_spread > 0:
+                        book = self.market_data.get_order_book(signal.pair) if self.market_data else {}
+                        book_age = time.time() - float(book.get("updated_at", 0) or 0)
+                        max_book_age = max(
+                            1.0,
+                            float(getattr(self.config.ai, "book_score_max_age_seconds", 5) or 5),
+                        )
                         spread = self.market_data.get_spread(signal.pair)
-                        if spread > max_spread:
+                        if spread <= 0 or book_age > max_book_age or spread > max_spread:
                             continue
 
                     # Execute if meets threshold
@@ -754,7 +1254,11 @@ class BotEngine:
                 cycle_time = (time.time() - cycle_start) * 1000
                 active_count = sum(1 for s in confluence_signals if s.direction != SignalDirection.NEUTRAL)
                 if self._scan_count % 10 == 0 or active_count > 0:
-                    await self.db.insert_metric("scan_cycle_ms", cycle_time)
+                    await self.db.insert_metric(
+                        "scan_cycle_ms",
+                        cycle_time,
+                        tenant_id=self.tenant_id,
+                    )
                     await self.db.log_thought(
                         "system",
                         f"Scan #{self._scan_count} | {cycle_time:.0f}ms | "
@@ -902,10 +1406,16 @@ class BotEngine:
                 await self._apply_circuit_breakers(stale_pairs)
 
                 # Log health status
-                await self.db.insert_metric("uptime_seconds", time.time() - self._start_time)
-                await self.db.insert_metric("open_positions", len(
-                    await self.db.get_open_trades(tenant_id=self.tenant_id)
-                ))
+                await self.db.insert_metric(
+                    "uptime_seconds",
+                    time.time() - self._start_time,
+                    tenant_id=self.tenant_id,
+                )
+                await self.db.insert_metric(
+                    "open_positions",
+                    len(await self.db.get_open_trades(tenant_id=self.tenant_id)),
+                    tenant_id=self.tenant_id,
+                )
 
             except asyncio.CancelledError:
                 break
@@ -925,6 +1435,14 @@ class BotEngine:
                 await self.db.cleanup_old_data(
                     self.config.monitoring.metrics_retention_hours
                 )
+                # ES index retention cleanup
+                if self.es_client:
+                    try:
+                        deleted = await self.es_client.cleanup_old_indices()
+                        if deleted:
+                            logger.info("ES index cleanup", deleted=deleted)
+                    except Exception:
+                        pass
                 logger.info("Database cleanup completed")
             except asyncio.CancelledError:
                 break
@@ -1045,6 +1563,20 @@ class BotEngine:
                         })
                         if is_new_bar:
                             self._enqueue_pair(symbol, "bar_close")
+                            # Index candle to ES
+                            try:
+                                if self.market_data_indexer:
+                                    self.market_data_indexer.index_candle(symbol, {
+                                        "time": self._parse_ts(candle.get("interval_begin", candle.get("timestamp", time.time()))),
+                                        "open": float(candle.get("open", 0)),
+                                        "high": float(candle.get("high", 0)),
+                                        "low": float(candle.get("low", 0)),
+                                        "close": float(candle.get("close", 0)),
+                                        "volume": float(candle.get("volume", 0)),
+                                        "vwap": float(candle.get("vwap", 0)),
+                                    })
+                            except Exception:
+                                pass
         except Exception as e:
             logger.warning("OHLC handler error", error=str(e))
 
@@ -1067,9 +1599,16 @@ class BotEngine:
                                 symbol, bids, asks, price
                             )
                             if analysis:
+                                analysis_dict = analysis.to_dict()
                                 self.market_data.update_order_book_analysis(
-                                    symbol, analysis.to_dict()
+                                    symbol, analysis_dict
                                 )
+                                # Index orderbook snapshot to ES
+                                try:
+                                    if self.market_data_indexer:
+                                        self.market_data_indexer.index_orderbook(symbol, analysis_dict)
+                                except Exception:
+                                    pass
         except Exception as e:
             logger.debug("Book handler error", error=str(e))
 

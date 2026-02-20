@@ -1,0 +1,28 @@
+name: load-tests
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_url:
+        description: "Target NovaPulse base URL (e.g. https://staging.example.com)"
+        required: true
+        default: "http://127.0.0.1:8080"
+
+jobs:
+  k6:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: grafana/setup-k6-action@v1
+      - name: API load test
+        env:
+          BASE_URL: ${{ inputs.base_url }}
+          READ_KEY: ${{ secrets.LOAD_TEST_READ_KEY }}
+        run: |
+          k6 run load/api_dashboard.js
+      - name: WebSocket load test
+        env:
+          BASE_URL: ${{ inputs.base_url }}
+          READ_KEY: ${{ secrets.LOAD_TEST_READ_KEY }}
+        run: |
+          k6 run load/ws_live.js

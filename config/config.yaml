@@ -8,6 +8,9 @@ app:
   mode: "paper"  # paper | live
   log_level: "INFO"
   db_path: "data/trading.db"
+  trading_exchanges: ""  # e.g. "kraken,coinbase" (env TRADING_EXCHANGES also supported)
+  account_id: "default"
+  trading_accounts: ""  # e.g. "main:kraken,main:coinbase,swing:kraken"
 
 exchange:
   name: "kraken"  # kraken | coinbase
@@ -39,28 +42,38 @@ trading:
   position_check_interval_seconds: 2
   hft_scan_interval_seconds: 1
   candle_poll_seconds: 60     # REST candle poll interval (used for Coinbase)
-  warmup_bars: 720     # 12 hours of 1-min data for indicator convergence
+  warmup_bars: 900     # 15 hours of 1-min data — ensures 60 fifteen-min candles for MTF
   warmup_timeframe: "1m"
-  timeframes: [1, 5, 15]
+  timeframes: [1, 5, 15]   # Multi-timeframe: run strategies on all 3, require 2/3 agreement
   max_concurrent_positions: 5
   cooldown_seconds: 120
   max_spread_pct: 0.0015
   use_closed_candles_only: true
   strategy_cooldowns_seconds:
     keltner: 300
-    trend: 300
     mean_reversion: 300
-    momentum: 300
-    vwap_momentum_alpha: 300
-    rsi_mean_reversion: 300
-    breakout: 300
+    ichimoku: 300
+    order_flow: 300
+    trend: 300
+    stochastic_divergence: 300
+    volatility_squeeze: 300
+    supertrend: 300
     reversal: 300
   event_price_move_pct: 0.003
   single_strategy_mode: null    # or "keltner", "trend", "mean_reversion", etc. for testing
   quiet_hours_utc: [2, 3, 4, 5]  # Skip new entries during low-liquidity UTC hours (empty list = disabled)
+  max_trades_per_hour: 8
+  canary_mode: true
+  canary_pairs: ["BTC/USD", "ETH/USD"]  # Optional explicit subset; empty = first N from trading.pairs
+  canary_max_pairs: 2
+  canary_max_position_usd: 100.0
+  canary_max_risk_per_trade: 0.005
+  canary_min_confidence: 0.68
+  canary_min_confluence: 3
+  canary_scan_interval_seconds: 60
 
 strategies:
-  # Keltner Channel — primary strategy for high win rate
+  # Keltner Channel — proven winner (100% WR, 2 trades)
   keltner:
     enabled: true
     ema_period: 20
@@ -70,62 +83,80 @@ strategies:
     macd_slow: 26
     macd_signal: 9
     rsi_period: 14
-    rsi_long_max: 45   # Slightly relaxed so more long setups qualify
-    rsi_short_min: 55  # Slightly relaxed so more short setups qualify
-    weight: 0.35
-  # Tuned for 1-MINUTE candles — longer periods to filter noise
-  trend:
-    enabled: true
-    ema_fast: 20        # ~20 min fast EMA (was 5)
-    ema_slow: 50        # ~50 min slow EMA (was 13)
-    adx_threshold: 30   # Stricter trend filter (was 25)
-    weight: 0.25
+    rsi_long_max: 45
+    rsi_short_min: 55
+    weight: 0.30
+  # Mean Reversion — proven winner (80% WR, 5 trades)
   mean_reversion:
     enabled: true
-    bb_period: 50       # 50-min Bollinger (was 20)
-    bb_std: 2.5         # Wider bands = fewer false signals
-    rsi_oversold: 25    # More extreme = higher conviction (was 30)
-    rsi_overbought: 75  # (was 70)
-    weight: 0.30
-  momentum:
-    enabled: false  # 1/12 wins (8%) — momentum signals on 1-min data have no edge
-    rsi_threshold: 55
-    volume_multiplier: 2.0
-    weight: 0.20
-  vwap_momentum_alpha:
+    bb_period: 50
+    bb_std: 2.5
+    rsi_oversold: 25
+    rsi_overbought: 75
+    weight: 0.25
+  # Ichimoku Cloud — replaces VWAP Momentum Alpha
+  ichimoku:
     enabled: true
-    vwap_window: 20
-    band_std: 1.5
-    pullback_z: 0.6
-    slope_period: 5
-    volume_multiplier: 1.2
-    pullback_z_trend_adjust: -0.12
-    pullback_z_range_adjust: 0.12
-    pullback_z_high_vol_adjust: 0.10
-    pullback_z_low_vol_adjust: -0.05
-    slope_min_pct: 0.0005
+    tenkan_period: 9
+    kijun_period: 26
+    senkou_b_period: 52
+    atr_period: 14
+    weight: 0.15
+  # Order Flow — microstructure-based, uses order book data
+  order_flow:
+    enabled: true
+    book_score_threshold: 0.3
+    spread_tight_pct: 0.0010
+    hl_lookback: 5
+    max_book_age_seconds: 5
+    atr_period: 14
+    weight: 0.15
+  # Trend — untested, fundamentally sound
+  trend:
+    enabled: true
+    ema_fast: 20
+    ema_slow: 50
+    adx_threshold: 30
+    weight: 0.15
+  # Stochastic Divergence — replaces RSI Mean Reversion
+  stochastic_divergence:
+    enabled: true
+    k_period: 14
+    d_period: 3
+    smooth: 3
+    oversold: 20.0
+    overbought: 80.0
+    divergence_lookback: 20
+    atr_period: 14
     weight: 0.12
-  rsi_mean_reversion:
+  # Volatility Squeeze — replaces Breakout (TTM Squeeze concept)
+  volatility_squeeze:
     enabled: true
-    rsi_period: 14
-    rsi_oversold: 30
-    rsi_overbought: 70
-    trend_adjust: 5
-    range_adjust: 5
-    high_vol_adjust: 3
-    low_vol_adjust: 2
-    weight: 0.20
-  breakout:
-    enabled: false  # 0/10 wins — S/R breakouts on 1-min candles are pure noise
-    lookback_period: 60
-    volume_confirmation: 1.8
-    weight: 0.20
+    bb_period: 20
+    bb_std: 2.0
+    kc_ema_period: 20
+    kc_atr_period: 14
+    kc_multiplier: 1.5
+    momentum_period: 12
+    atr_period: 14
+    min_squeeze_bars: 3
+    weight: 0.12
+  # Supertrend — ATR-based adaptive trend with volume confirmation
+  supertrend:
+    enabled: true
+    st_period: 10
+    st_multiplier: 3.0
+    volume_period: 20
+    volume_threshold: 1.2
+    atr_period: 14
+    weight: 0.10
+  # Reversal — untested, fundamentally sound
   reversal:
     enabled: true
-    rsi_extreme_low: 15   # Very extreme only (was 20)
-    rsi_extreme_high: 85  # (was 80)
-    confirmation_candles: 5  # More confirmation bars (was 3)
-    weight: 0.15
+    rsi_extreme_low: 15
+    rsi_extreme_high: 85
+    confirmation_candles: 5
+    weight: 0.10
 
 ai:
   confluence_threshold: 2  # 2 strategies agreeing = tradable (3 was too strict, rejected most setups)
@@ -136,8 +167,8 @@ ai:
   obi_threshold: 0.15  # Order Book Imbalance threshold
   book_score_threshold: 0.2
   book_score_max_age_seconds: 5
-  multi_timeframe_min_agreement: 2
-  primary_timeframe: 1
+  multi_timeframe_min_agreement: 2    # Need 2 of 3 timeframes to agree
+  primary_timeframe: 5                # 5-min as primary — better signal quality than 1-min
   obi_counts_as_confluence: true  # OBI as confluence vote — adds 1 extra vote when book agrees (OBI+1 strat = 2 = tradable)
   obi_weight: 0.4
   allow_keltner_solo: false
@@ -145,47 +176,62 @@ ai:
   keltner_solo_min_confidence: 0.62
   solo_min_confidence: 0.67
   whale_threshold_usd: 50000
+  strategy_guardrails_enabled: true
+  strategy_guardrails_min_trades: 20
+  strategy_guardrails_window_trades: 30
+  strategy_guardrails_min_win_rate: 0.35
+  strategy_guardrails_min_profit_factor: 0.85
+  strategy_guardrails_disable_minutes: 120
+  session:
+    enabled: true
+    min_trades_per_hour: 5
+    max_boost: 1.15
+    max_penalty: 0.70
   regime:
     adx_trend_threshold: 25
     atr_pct_high: 0.02
     atr_pct_low: 0.008
     trend_weight_multipliers:
       trend: 1.3
-      momentum: 1.2
-      vwap_momentum_alpha: 1.2
-      breakout: 1.1
+      ichimoku: 1.2
+      supertrend: 1.2
+      order_flow: 1.1
+      volatility_squeeze: 1.1
       mean_reversion: 0.8
-      rsi_mean_reversion: 0.8
+      stochastic_divergence: 0.8
       reversal: 0.7
       keltner: 0.9
     range_weight_multipliers:
       mean_reversion: 1.3
-      rsi_mean_reversion: 1.3
+      stochastic_divergence: 1.3
       keltner: 1.2
       reversal: 1.1
+      order_flow: 1.1
       trend: 0.8
-      momentum: 0.8
-      vwap_momentum_alpha: 0.8
-      breakout: 0.8
+      ichimoku: 0.8
+      supertrend: 0.8
+      volatility_squeeze: 0.9
     high_vol_weight_multipliers:
-      breakout: 1.2
-      momentum: 1.1
-      vwap_momentum_alpha: 1.1
+      volatility_squeeze: 1.3
+      supertrend: 1.1
+      order_flow: 1.1
       mean_reversion: 0.9
-      rsi_mean_reversion: 0.9
+      stochastic_divergence: 0.9
       reversal: 0.9
     low_vol_weight_multipliers:
       mean_reversion: 1.2
-      rsi_mean_reversion: 1.2
+      stochastic_divergence: 1.2
       keltner: 1.1
-      breakout: 0.9
-      momentum: 0.9
-      vwap_momentum_alpha: 0.9
+      volatility_squeeze: 0.8
+      supertrend: 0.9
+      ichimoku: 0.9
 
 risk:
   max_risk_per_trade: 0.01   # 1% of bankroll — doubled from 0.5% for better compounding
   max_daily_loss: 0.05      # 5% max daily drawdown
+  max_daily_trades: 0       # 0 = disabled, set e.g. 40 to hard-cap daily churn
   max_position_usd: 350.0   # Increased from 200 — was too small to compound
+  max_total_exposure_pct: 0.50  # Sum of open positions as % of bankroll
   initial_bankroll: 5000.0
   atr_multiplier_sl: 2.0
   atr_multiplier_tp: 3.0
@@ -196,6 +242,37 @@ risk:
   max_kelly_size: 0.10            # Never more than 10% of bankroll
   risk_of_ruin_threshold: 0.01    # 1% acceptable risk of ruin
   global_cooldown_seconds_on_loss: 180  # 3 min cooldown after loss (was 10 min — freezing bot too long)
+  smart_exit:
+    enabled: false   # Off by default — enable after testing
+    tiers:
+      - pct: 0.50    # Close 50% of remaining position
+        tp_mult: 1.0  # At 1x original TP distance from entry
+      - pct: 0.60    # Close 60% of remaining (= 30% of original)
+        tp_mult: 1.5  # At 1.5x TP distance
+      - pct: 1.0     # Close 100% of remaining (= 20% of original)
+        tp_mult: 0    # 0 = no fixed TP, trailing stop only
+
+webhooks:
+  enabled: false
+  secret: ""
+  allowed_sources: []
+  max_timestamp_skew_seconds: 300
+
+stocks:
+  enabled: false
+  symbols: ["AAPL", "MSFT", "NVDA", "TSLA"]
+  scan_interval_seconds: 900
+  lookback_bars: 120
+  min_hold_days: 1
+  max_hold_days: 7
+  max_open_positions: 4
+  max_position_usd: 500.0
+  db_path: "data/stocks.db"
+  polygon_api_key: ""   # or set POLYGON_API_KEY env
+  polygon_base_url: "https://api.polygon.io"
+  alpaca_api_key: ""    # or set ALPACA_API_KEY env
+  alpaca_api_secret: "" # or set ALPACA_API_SECRET env
+  alpaca_base_url: "https://paper-api.alpaca.markets"
 
 control:
   web:
@@ -262,6 +339,40 @@ ml:
     - "trend_strength"
     - "spread_pct"
 
+tuner:
+  enabled: true
+  interval_hours: 168        # Weekly
+  min_trades_per_strategy: 15
+  weight_bounds: [0.05, 0.50]
+  auto_disable_sharpe: -0.3
+  auto_disable_min_trades: 30
+
+elasticsearch:
+  enabled: true  # Analytics/enrichment mirror only; canonical trade ledger remains SQLite.
+  hosts:
+    - "https://my-elasticsearch-project-b2c677.es.us-central1.gcp.elastic.cloud:443"
+  api_key: ""   # Set via ES_API_KEY env var or paste here
+  cloud_id: ""  # Optional: Elastic Cloud ID (alternative to hosts)
+  index_prefix: "novapulse"
+  bulk_size: 500
+  flush_interval_seconds: 10
+  buffer_maxlen: 10000
+  retention_days:
+    candles: 90
+    orderbook: 30
+    sentiment: 180
+    onchain: 180
+    market: 180
+    trades: 365
+  poll_intervals:
+    fear_greed: 3600       # 1 hour
+    coingecko: 600         # 10 min
+    cryptopanic: 600       # 10 min
+    onchain: 3600          # 1 hour
+  # API keys (or set via env: COINGECKO_API_KEY, CRYPTOPANIC_API_KEY)
+  coingecko_api_key: ""
+  cryptopanic_api_key: ""
+
 monitoring:
   health_check_interval: 30
   auto_restart: true
@@ -272,6 +383,11 @@ monitoring:
   stale_data_pause_after_checks: 3
   auto_pause_on_ws_disconnect: true
   ws_disconnect_pause_after_seconds: 300
+  auto_pause_on_consecutive_losses: true
+  consecutive_losses_pause_threshold: 4
+  auto_pause_on_drawdown: true
+  drawdown_pause_pct: 8.0
+  emergency_close_on_auto_pause: false
 
 stress_test:
   duration_hours: 72

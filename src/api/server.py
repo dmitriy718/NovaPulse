@@ -15,16 +15,18 @@ from __future__ import annotations
 import asyncio
 import csv
 import hashlib
+import hmac
 import html
 import io
 import json
 import os
 import time
 import secrets
+import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from fastapi import (
     Body,
@@ -183,21 +185,48 @@ class DashboardServer:
         if api_key and (api_key == self._admin_key or (self._read_key and api_key == self._read_key)):
             return requested_tenant_id or default_tenant_id
 
-        db = primary.db if (primary and getattr(primary, "db", None)) else None
-        if require_api_key and not db:
+        primary_db = primary.db if (primary and getattr(primary, "db", None)) else None
+        if require_api_key and not primary_db and not self._get_engines():
             # Fail closed if we can't validate keys yet.
             raise HTTPException(status_code=503, detail="Tenant DB unavailable")
 
         mapped_tenant_id = None
-        if api_key and db:
-            mapped_tenant_id = await db.get_tenant_id_by_api_key(api_key)
+        mapped_db = None
+        if api_key:
+            for eng in self._get_engines():
+                db = getattr(eng, "db", None)
+                if not db:
+                    continue
+                try:
+                    candidate = await db.get_tenant_id_by_api_key(api_key)
+                except Exception:
+                    candidate = None
+                if candidate:
+                    mapped_tenant_id = candidate
+                    mapped_db = db
+                    break
 
         async def _ensure_active(tenant_id: str) -> str:
-            if not db:
+            dbs: List[Any] = []
+            if mapped_db:
+                dbs.append(mapped_db)
+            if primary_db and primary_db not in dbs:
+                dbs.append(primary_db)
+            for eng in self._get_engines():
+                db = getattr(eng, "db", None)
+                if db and db not in dbs:
+                    dbs.append(db)
+            if not dbs:
                 return tenant_id
-            tenant = await db.get_tenant(tenant_id)
-            if tenant and tenant.get("status") not in ("active", "trialing"):
-                raise HTTPException(status_code=403, detail="Tenant inactive")
+            for db in dbs:
+                try:
+                    tenant = await db.get_tenant(tenant_id)
+                except Exception:
+                    tenant = None
+                if tenant:
+                    if tenant.get("status") not in ("active", "trialing"):
+                        raise HTTPException(status_code=403, detail="Tenant inactive")
+                    return tenant_id
             return tenant_id
 
         if mapped_tenant_id:
@@ -338,20 +367,451 @@ class DashboardServer:
             "trade_count": trade_count,
         }
 
+    @staticmethod
+    def _normalize_chart_timeframe(value: str) -> str:
+        raw = (value or "").strip().lower()
+        aliases = {
+            "1m": "1m",
+            "5m": "5m",
+            "15m": "15m",
+            "30m": "30m",
+            "1h": "1h",
+            "1hr": "1h",
+            "1hour": "1h",
+            "60m": "1h",
+            "1d": "1d",
+            "1day": "1d",
+            "24h": "1d",
+        }
+        return aliases.get(raw, "5m")
+
+    @staticmethod
+    def _chart_tf_seconds(tf: str) -> int:
+        return {
+            "1m": 60,
+            "5m": 300,
+            "15m": 900,
+            "30m": 1800,
+            "1h": 3600,
+            "1d": 86400,
+        }.get(tf, 300)
+
+    @staticmethod
+    def _chart_tf_minutes(tf: str) -> int:
+        return {
+            "1m": 1,
+            "5m": 5,
+            "15m": 15,
+            "30m": 30,
+            "1h": 60,
+            "1d": 1440,
+        }.get(tf, 5)
+
+    @staticmethod
+    def _split_exchange_account(exchange: str = "", account_id: str = "") -> Tuple[str, str]:
+        ex = (exchange or "").strip().lower()
+        acct = (account_id or "").strip().lower()
+        if ":" in ex and not acct:
+            left, right = ex.split(":", 1)
+            ex = left.strip().lower()
+            acct = right.strip().lower()
+        return ex, acct
+
+    def _resolve_chart_engine(
+        self,
+        pair: str,
+        exchange: str = "",
+        account_id: str = "",
+    ) -> Optional[Any]:
+        engines = self._get_engines()
+        if not engines:
+            return None
+
+        p = (pair or "").strip()
+        ex, acct = self._split_exchange_account(exchange, account_id)
+
+        def _matches_scope(eng: Any) -> bool:
+            eng_ex = str(getattr(eng, "exchange_name", "")).strip().lower()
+            eng_acct = str(getattr(eng, "tenant_id", "default")).strip().lower()
+            if ex and eng_ex != ex:
+                return False
+            if acct and eng_acct != acct:
+                return False
+            return True
+
+        if ex or acct:
+            for eng in engines:
+                if _matches_scope(eng) and (not p or p in (getattr(eng, "pairs", []) or [])):
+                    return eng
+            for eng in engines:
+                if _matches_scope(eng):
+                    return eng
+
+        if p:
+            for eng in engines:
+                if p in (getattr(eng, "pairs", []) or []):
+                    return eng
+
+        return engines[0]
+
+    def _aggregate_cached_bars(
+        self,
+        *,
+        times: List[float],
+        opens: List[float],
+        highs: List[float],
+        lows: List[float],
+        closes: List[float],
+        volumes: List[float],
+        timeframe_seconds: int,
+        limit: int,
+    ) -> List[Dict[str, float]]:
+        if not times:
+            return []
+
+        step = max(60, int(timeframe_seconds))
+        out: List[Dict[str, float]] = []
+        cur_bucket: Optional[int] = None
+        cur: Optional[Dict[str, float]] = None
+
+        for idx, ts in enumerate(times):
+            try:
+                t = float(ts)
+                o = float(opens[idx])
+                h = float(highs[idx])
+                l = float(lows[idx])
+                c = float(closes[idx])
+                v = float(volumes[idx])
+            except (TypeError, ValueError, IndexError):
+                continue
+
+            if t <= 0:
+                continue
+            bucket = int(t // step) * step
+            if cur_bucket is None or bucket != cur_bucket:
+                if cur is not None:
+                    out.append(cur)
+                cur_bucket = bucket
+                cur = {
+                    "time": float(bucket),
+                    "open": o,
+                    "high": h,
+                    "low": l,
+                    "close": c,
+                    "volume": max(0.0, v),
+                }
+                continue
+
+            if cur is None:
+                continue
+            cur["high"] = max(cur["high"], h)
+            cur["low"] = min(cur["low"], l)
+            cur["close"] = c
+            cur["volume"] += max(0.0, v)
+
+        if cur is not None:
+            out.append(cur)
+        if len(out) > limit:
+            return out[-limit:]
+        return out
+
+    async def _get_crypto_chart_bars(
+        self,
+        engine: Any,
+        *,
+        pair: str,
+        timeframe: str,
+        limit: int,
+    ) -> Tuple[List[Dict[str, float]], str]:
+        # Prefer exchange REST candles for charting so higher timeframes
+        # have sufficient depth even when the in-memory 1m cache is short.
+        rest_bars = await self._get_crypto_chart_bars_rest(
+            engine,
+            pair=pair,
+            timeframe=timeframe,
+            limit=limit,
+        )
+        if rest_bars:
+            return rest_bars, "rest"
+
+        cache_bars = self._get_crypto_chart_bars_from_cache(
+            engine,
+            pair=pair,
+            timeframe=timeframe,
+            limit=limit,
+        )
+        return cache_bars, "cache"
+
+    async def _get_crypto_chart_bars_rest(
+        self,
+        engine: Any,
+        *,
+        pair: str,
+        timeframe: str,
+        limit: int,
+    ) -> List[Dict[str, float]]:
+        rest = getattr(engine, "rest_client", None)
+        if rest is None or not hasattr(rest, "get_ohlc"):
+            return []
+
+        interval_minutes = self._chart_tf_minutes(timeframe)
+        # Add a small buffer so indicators still look stable after filtering.
+        target_bars = max(int(limit) + 20, 80)
+        since_ts = int(time.time()) - (interval_minutes * 60 * target_bars)
+
+        try:
+            rows = await rest.get_ohlc(pair, interval=interval_minutes, since=since_ts)
+        except Exception:
+            return []
+
+        if not isinstance(rows, list) or not rows:
+            return []
+
+        bars_by_bucket: Dict[int, Dict[str, float]] = {}
+        for row in rows:
+            try:
+                if isinstance(row, dict):
+                    t = float(row.get("time", 0) or 0)
+                    o = float(row.get("open", 0) or 0)
+                    h = float(row.get("high", 0) or 0)
+                    l = float(row.get("low", 0) or 0)
+                    c = float(row.get("close", 0) or 0)
+                    v = float(row.get("volume", 0) or 0)
+                else:
+                    t = float(row[0])
+                    o = float(row[1])
+                    h = float(row[2])
+                    l = float(row[3])
+                    c = float(row[4])
+                    # Kraken/Coinbase normalized shape: [time, open, high, low, close, vwap, volume, count]
+                    v = float(row[6]) if len(row) > 6 else 0.0
+            except (TypeError, ValueError, IndexError):
+                continue
+
+            if t <= 0 or o <= 0 or h <= 0 or l <= 0 or c <= 0:
+                continue
+
+            bucket = int(t // (interval_minutes * 60)) * (interval_minutes * 60)
+            bars_by_bucket[bucket] = {
+                "time": float(bucket),
+                "open": o,
+                "high": h,
+                "low": l,
+                "close": c,
+                "volume": max(0.0, v),
+            }
+
+        if not bars_by_bucket:
+            return []
+
+        ordered = [bars_by_bucket[k] for k in sorted(bars_by_bucket.keys())]
+        return ordered[-int(limit):]
+
+    def _get_crypto_chart_bars_from_cache(
+        self,
+        engine: Any,
+        *,
+        pair: str,
+        timeframe: str,
+        limit: int,
+    ) -> List[Dict[str, float]]:
+        md = getattr(engine, "market_data", None)
+        if md is None:
+            return []
+
+        tf_sec = self._chart_tf_seconds(timeframe)
+        ratio = max(1, int(tf_sec // 60))
+        fetch_n = max(int(limit) * ratio * 2, int(limit) * ratio + 20, 300)
+
+        times = list(md.get_times(pair, fetch_n))
+        opens = list(md.get_opens(pair, fetch_n))
+        highs = list(md.get_highs(pair, fetch_n))
+        lows = list(md.get_lows(pair, fetch_n))
+        closes = list(md.get_closes(pair, fetch_n))
+        volumes = list(md.get_volumes(pair, fetch_n))
+        if not times:
+            return []
+
+        if timeframe == "1m":
+            raw = []
+            n = min(len(times), len(opens), len(highs), len(lows), len(closes), len(volumes))
+            start = max(0, n - int(limit))
+            for i in range(start, n):
+                try:
+                    raw.append(
+                        {
+                            "time": float(times[i]),
+                            "open": float(opens[i]),
+                            "high": float(highs[i]),
+                            "low": float(lows[i]),
+                            "close": float(closes[i]),
+                            "volume": float(volumes[i]),
+                        }
+                    )
+                except (TypeError, ValueError):
+                    continue
+            return raw
+
+        return self._aggregate_cached_bars(
+            times=times,
+            opens=opens,
+            highs=highs,
+            lows=lows,
+            closes=closes,
+            volumes=volumes,
+            timeframe_seconds=tf_sec,
+            limit=int(limit),
+        )
+
+    async def _get_stock_chart_bars(
+        self,
+        engine: Any,
+        *,
+        symbol: str,
+        timeframe: str,
+        limit: int,
+    ) -> List[Dict[str, float]]:
+        polygon = getattr(engine, "polygon", None)
+        if not polygon:
+            return []
+
+        tf_map: Dict[str, Tuple[int, str]] = {
+            "1m": (1, "minute"),
+            "5m": (5, "minute"),
+            "15m": (15, "minute"),
+            "30m": (30, "minute"),
+            "1h": (1, "hour"),
+            "1d": (1, "day"),
+        }
+        mult, span = tf_map.get(timeframe, (5, "minute"))
+        return await polygon.get_aggregate_bars(
+            symbol=symbol,
+            multiplier=mult,
+            timespan=span,
+            limit=int(limit),
+        )
+
+    @staticmethod
+    def _candles_to_dataframe(candles: List[Dict[str, Any]]):
+        """Convert normalized OHLCV candle dicts to a pandas DataFrame."""
+        import pandas as pd
+
+        rows = []
+        for c in candles:
+            try:
+                rows.append(
+                    {
+                        "time": float(c.get("time", 0) or 0),
+                        "open": float(c.get("open", 0) or 0),
+                        "high": float(c.get("high", 0) or 0),
+                        "low": float(c.get("low", 0) or 0),
+                        "close": float(c.get("close", 0) or 0),
+                        "volume": float(c.get("volume", 0) or 0),
+                    }
+                )
+            except Exception:
+                continue
+        if not rows:
+            return pd.DataFrame(columns=["time", "open", "high", "low", "close", "volume"])
+        df = pd.DataFrame(rows)
+        df = df.sort_values("time").drop_duplicates(subset=["time"], keep="last")
+        return df.reset_index(drop=True)
+
+    @staticmethod
+    def _verify_signal_signature(
+        payload: bytes,
+        signature_header: str,
+        *,
+        secret: str,
+        timestamp: str = "",
+        max_skew_seconds: int = 300,
+    ) -> bool:
+        """
+        Verify HMAC SHA256 signature for signal webhooks.
+
+        Signature format accepted:
+        - plain hex digest: sha256(payload)
+        - `t=<ts>,v1=<hex>` style (Stripe-like)
+        """
+        if not secret:
+            return False
+        provided = (signature_header or "").strip()
+        if not provided:
+            return False
+
+        ts = (timestamp or "").strip()
+        if provided.startswith("t="):
+            parts = {}
+            for token in provided.split(","):
+                if "=" in token:
+                    k, v = token.split("=", 1)
+                    parts[k.strip()] = v.strip()
+            ts = parts.get("t", ts)
+            provided = parts.get("v1", "")
+
+        if not provided:
+            return False
+
+        if ts:
+            try:
+                now = int(time.time())
+                tsv = int(float(ts))
+                if abs(now - tsv) > max(1, int(max_skew_seconds)):
+                    return False
+                signed_payload = f"{ts}.{payload.decode('utf-8')}".encode("utf-8")
+            except Exception:
+                return False
+        else:
+            signed_payload = payload
+
+        expected = hmac.new(
+            secret.encode("utf-8"),
+            signed_payload,
+            hashlib.sha256,
+        ).hexdigest()
+        return hmac.compare_digest(expected, provided)
+
     def _setup_middleware(self) -> None:
         """Configure CORS and security middleware."""
+        def _norm_origin(origin: str) -> str:
+            return (origin or "").strip().rstrip("/")
+
         # Restrict CORS by default; allow explicit overrides via env.
         origins_env = os.getenv("DASHBOARD_CORS_ORIGINS", "").strip()
+        public_origin = _norm_origin(
+            os.getenv("DASHBOARD_PUBLIC_ORIGIN", "https://nova.horizonsvc.com")
+        )
         if origins_env:
-            allow_origins = [o.strip() for o in origins_env.split(",") if o.strip()]
+            allow_origins = [_norm_origin(o) for o in origins_env.split(",") if _norm_origin(o)]
         else:
-            allow_origins = ["http://localhost:8080", "http://127.0.0.1:8080"]
+            # Include both container port and host-mapped port so the
+            # browser Origin header matches regardless of Docker mapping.
+            container_port = os.getenv("DASHBOARD_PORT", "8080")
+            allow_origins = [
+                f"http://localhost:{container_port}",
+                f"http://127.0.0.1:{container_port}",
+            ]
+            host_port_env = (os.getenv("HOST_PORT", "") or "").strip()
+            if host_port_env:
+                # HOST_PORT may include bind address, e.g. "127.0.0.1:8090"
+                hp = host_port_env.rsplit(":", 1)[-1] if ":" in host_port_env else host_port_env
+                if hp != container_port:
+                    allow_origins.extend([
+                        f"http://localhost:{hp}",
+                        f"http://127.0.0.1:{hp}",
+                    ])
+
+        if public_origin and public_origin not in allow_origins:
+            allow_origins.append(public_origin)
+
+        # Store for reuse in CSRF origin check.
+        self._allowed_origins: set[str] = set(allow_origins)
 
         self.app.add_middleware(
             CORSMiddleware,
             allow_origins=allow_origins,
             allow_credentials=True,
-            allow_methods=["GET", "POST"],
+            allow_methods=["GET", "POST", "PATCH"],
             allow_headers=["*"],
         )
 
@@ -439,7 +899,14 @@ class DashboardServer:
             return env in ("prod", "production")
 
         def _require_auth_for_reads() -> bool:
-            env = (os.getenv("DASHBOARD_REQUIRE_AUTH_FOR_READS", "") or "").strip().lower()
+            # Backward compatibility:
+            # - DASHBOARD_REQUIRE_API_KEY_FOR_READS (current)
+            # - DASHBOARD_REQUIRE_AUTH_FOR_READS (legacy)
+            env = (
+                os.getenv("DASHBOARD_REQUIRE_API_KEY_FOR_READS", "")
+                or os.getenv("DASHBOARD_REQUIRE_AUTH_FOR_READS", "")
+                or ""
+            ).strip().lower()
             if env in ("1", "true", "yes", "y", "on"):
                 return True
             if env in ("0", "false", "no", "n", "off"):
@@ -542,13 +1009,8 @@ class DashboardServer:
 
             # Minimal origin defense-in-depth for browsers.
             origin = (request.headers.get("origin", "") or "").strip()
-            if origin:
-                allowed = {"http://127.0.0.1:8080", "http://localhost:8080"}
-                cors_env = (os.getenv("DASHBOARD_CORS_ORIGINS", "") or "").strip()
-                if cors_env:
-                    allowed = {o.strip() for o in cors_env.split(",") if o.strip()}
-                if origin not in allowed:
-                    raise HTTPException(status_code=403, detail="Origin not allowed")
+            if origin and origin not in self._allowed_origins:
+                raise HTTPException(status_code=403, detail="Origin not allowed")
 
         async def _require_read_access(
             request: Request,
@@ -572,9 +1034,14 @@ class DashboardServer:
                 return {"auth": "key", "role": "read", "tenant_id": _default_tenant_id()}
 
             # Tenant keys (read-only)
-            primary = self._get_primary_engine()
-            if primary and getattr(primary, "db", None):
-                tenant_id = await primary.db.get_tenant_id_by_api_key(api_key)
+            for eng in self._get_engines():
+                db = getattr(eng, "db", None)
+                if not db:
+                    continue
+                try:
+                    tenant_id = await db.get_tenant_id_by_api_key(api_key)
+                except Exception:
+                    tenant_id = None
                 if tenant_id:
                     return {"auth": "tenant_key", "role": "read", "tenant_id": tenant_id}
 
@@ -605,10 +1072,17 @@ class DashboardServer:
             if not allow_tenant:
                 raise HTTPException(status_code=403, detail="Unauthorized")
 
-            if api_key and primary and getattr(primary, "db", None):
-                tenant_id = await primary.db.get_tenant_id_by_api_key(api_key)
-                if tenant_id:
-                    return {"auth": "tenant_key", "role": "operator", "tenant_id": tenant_id}
+            if api_key:
+                for eng in self._get_engines():
+                    db = getattr(eng, "db", None)
+                    if not db:
+                        continue
+                    try:
+                        tenant_id = await db.get_tenant_id_by_api_key(api_key)
+                    except Exception:
+                        tenant_id = None
+                    if tenant_id:
+                        return {"auth": "tenant_key", "role": "operator", "tenant_id": tenant_id}
 
             raise HTTPException(status_code=403, detail="Unauthorized")
 
@@ -732,6 +1206,7 @@ class DashboardServer:
             return {
                 "status": "running" if running else "stopped",
                 "mode": mode,
+                "canary_mode": any(bool(getattr(e, "canary_mode", False)) for e in engines),
                 "uptime_seconds": time.time() - start_time if start_time else 0.0,
                 "scan_count": scan_count,
                 "version": __version__,
@@ -745,6 +1220,14 @@ class DashboardServer:
                     for e in engines
                 ),
                 "paused": paused,
+                "auto_pause_reason": next(
+                    (
+                        getattr(e, "_auto_pause_reason", "")
+                        for e in engines
+                        if getattr(e, "_auto_pause_reason", "")
+                    ),
+                    "",
+                ),
                 "exchanges": [
                     {
                         "name": getattr(e, "exchange_name", "unknown"),
@@ -757,6 +1240,52 @@ class DashboardServer:
                     for e in engines
                 ],
                 "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+
+        @self.app.get("/api/v1/ops/heartbeat")
+        async def ops_heartbeat(
+            request: Request,
+            x_api_key: str = Header(default="", alias="X-API-Key"),
+        ):
+            """
+            Operator heartbeat endpoint for external watchdogs/VPS probes.
+            Includes per-engine stale pair counts and connectivity status.
+            """
+            await _require_read_access(request, x_api_key=x_api_key)
+            engines = self._get_engines()
+            if not engines:
+                return {"status": "initializing", "engines": []}
+
+            rows = []
+            for eng in engines:
+                stale_pairs = []
+                md = getattr(eng, "market_data", None)
+                for pair in getattr(eng, "pairs", []) or []:
+                    if md and md.is_stale(pair, max_age_seconds=600):
+                        stale_pairs.append(pair)
+                rows.append(
+                    {
+                        "exchange": str(getattr(eng, "exchange_name", "unknown")),
+                        "account_id": str(getattr(eng, "tenant_id", "default")),
+                        "mode": str(getattr(eng, "mode", "")),
+                        "running": bool(getattr(eng, "_running", False)),
+                        "paused": bool(getattr(eng, "_trading_paused", False)),
+                        "ws_connected": bool(
+                            getattr(eng, "ws_client", None)
+                            and getattr(eng.ws_client, "is_connected", False)
+                        ),
+                        "pairs_total": len(getattr(eng, "pairs", []) or []),
+                        "stale_pairs": stale_pairs,
+                        "stale_pairs_count": len(stale_pairs),
+                        "scan_interval_seconds": int(getattr(eng, "scan_interval", 0) or 0),
+                    }
+                )
+
+            overall_ok = all(r["running"] for r in rows) and all(r["stale_pairs_count"] == 0 for r in rows)
+            return {
+                "status": "ok" if overall_ok else "degraded",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "engines": rows,
             }
 
         def _default_tenant_id() -> str:
@@ -1048,22 +1577,78 @@ class DashboardServer:
             engines = self._get_engines()
             if not engines:
                 return {}
-            if len(engines) == 1:
-                return engines[0].market_data.get_status()
             scanner_data: Dict[str, Any] = {}
-            seen = set()
             for eng in engines:
+                exchange = str(getattr(eng, "exchange_name", "unknown")).lower()
+                asset_class = "stock" if exchange == "stocks" else "crypto"
+                account = str(getattr(eng, "tenant_id", "default"))
                 for pair in getattr(eng, "pairs", []) or []:
-                    label = pair
-                    if label in seen or len(engines) > 1:
-                        label = f"{pair} ({getattr(eng, 'exchange_name', 'unknown')})"
-                    seen.add(label)
+                    label = f"{pair} ({exchange}:{account})" if len(engines) > 1 else pair
                     scanner_data[label] = {
-                        "price": eng.market_data.get_latest_price(pair),
-                        "bars": eng.market_data.get_bar_count(pair),
-                        "stale": eng.market_data.is_stale(pair),
+                        "pair": pair,
+                        "exchange": exchange,
+                        "account_id": account,
+                        "asset_class": asset_class,
+                        "price": eng.market_data.get_latest_price(pair) if getattr(eng, "market_data", None) else 0.0,
+                        "bars": eng.market_data.get_bar_count(pair) if getattr(eng, "market_data", None) else 0,
+                        "stale": eng.market_data.is_stale(pair) if getattr(eng, "market_data", None) else True,
                     }
             return scanner_data
+
+        @self.app.get("/api/v1/chart")
+        async def get_chart_data(
+            request: Request,
+            pair: str = Query(..., min_length=1),
+            timeframe: str = Query(default="5m"),
+            exchange: str = Query(default=""),
+            account_id: str = Query(default=""),
+            limit: int = Query(default=320, ge=60, le=1500),
+            x_api_key: str = Header(default="", alias="X-API-Key"),
+        ):
+            """Get OHLCV candles for the dashboard chart viewer."""
+            await _require_read_access(request, x_api_key=x_api_key)
+
+            p = (pair or "").strip().upper()
+            ex, acct = self._split_exchange_account(exchange, account_id)
+            tf = self._normalize_chart_timeframe(timeframe)
+
+            eng = self._resolve_chart_engine(p, ex, acct)
+            if not eng:
+                return {
+                    "pair": p,
+                    "exchange": ex or "unknown",
+                    "account_id": acct or "default",
+                    "timeframe": tf,
+                    "candles": [],
+                }
+
+            ex_name = str(getattr(eng, "exchange_name", "unknown")).lower()
+            eng_account = str(getattr(eng, "tenant_id", "default"))
+            source = "cache"
+            if ex_name == "stocks":
+                candles = await self._get_stock_chart_bars(
+                    eng,
+                    symbol=p,
+                    timeframe=tf,
+                    limit=limit,
+                )
+                source = "polygon"
+            else:
+                candles, source = await self._get_crypto_chart_bars(
+                    eng,
+                    pair=p,
+                    timeframe=tf,
+                    limit=limit,
+                )
+
+            return {
+                "pair": p,
+                "exchange": ex_name,
+                "account_id": eng_account,
+                "timeframe": tf,
+                "source": source,
+                "candles": candles,
+            }
 
         @self.app.get("/api/v1/execution")
         async def get_execution(
@@ -1087,6 +1672,717 @@ class DashboardServer:
                         agg[k] = v
             return agg
 
+        @self.app.get("/api/v1/integrations/exchanges")
+        async def get_exchange_integrations(
+            request: Request,
+            x_api_key: str = Header(default="", alias="X-API-Key"),
+        ):
+            """List exchange integration status and connectivity health."""
+            await _require_read_access(request, x_api_key=x_api_key)
+            engines = self._get_engines()
+            rows: List[Dict[str, Any]] = []
+            for eng in engines:
+                ws = getattr(eng, "ws_client", None)
+                rest = getattr(eng, "rest_client", None)
+                rows.append(
+                    {
+                        "exchange": str(getattr(eng, "exchange_name", "unknown")).lower(),
+                        "mode": str(getattr(eng, "mode", "")),
+                        "tenant_id": str(getattr(eng, "tenant_id", "")),
+                        "pairs": list(getattr(eng, "pairs", []) or []),
+                        "ws_connected": bool(getattr(ws, "is_connected", False)) if ws else False,
+                        "rest_client_ready": bool(rest is not None),
+                        "market_data_ready": bool(getattr(eng, "market_data", None) is not None),
+                        "executor_ready": bool(getattr(eng, "executor", None) is not None),
+                    }
+                )
+            return {"integrations": rows, "count": len(rows)}
+
+        _MARKETPLACE_TEMPLATES: Dict[str, Dict[str, Any]] = {
+            "keltner_focus": {
+                "id": "keltner_focus",
+                "name": "Keltner Focus",
+                "description": "Bias toward Keltner + mean reversion for disciplined entries.",
+                "strategies": {
+                    "keltner": {"enabled": True, "weight": 0.42},
+                    "mean_reversion": {"enabled": True, "weight": 0.25},
+                    "trend": {"enabled": True, "weight": 0.10},
+                    "ichimoku": {"enabled": True, "weight": 0.08},
+                    "order_flow": {"enabled": True, "weight": 0.08},
+                    "stochastic_divergence": {"enabled": True, "weight": 0.07},
+                    "volatility_squeeze": {"enabled": False, "weight": 0.0},
+                    "supertrend": {"enabled": False, "weight": 0.0},
+                    "reversal": {"enabled": False, "weight": 0.0},
+                },
+                "ai": {"confluence_threshold": 2, "min_confidence": 0.58, "min_risk_reward_ratio": 1.2},
+            },
+            "trend_breakout": {
+                "id": "trend_breakout",
+                "name": "Trend + Breakout",
+                "description": "Trend-following profile for momentum markets.",
+                "strategies": {
+                    "trend": {"enabled": True, "weight": 0.28},
+                    "ichimoku": {"enabled": True, "weight": 0.22},
+                    "supertrend": {"enabled": True, "weight": 0.20},
+                    "volatility_squeeze": {"enabled": True, "weight": 0.16},
+                    "order_flow": {"enabled": True, "weight": 0.14},
+                    "keltner": {"enabled": False, "weight": 0.0},
+                    "mean_reversion": {"enabled": False, "weight": 0.0},
+                    "stochastic_divergence": {"enabled": False, "weight": 0.0},
+                    "reversal": {"enabled": False, "weight": 0.0},
+                },
+                "ai": {"confluence_threshold": 3, "min_confidence": 0.62, "min_risk_reward_ratio": 1.4},
+            },
+            "balanced_all_weather": {
+                "id": "balanced_all_weather",
+                "name": "Balanced All-Weather",
+                "description": "Balanced profile across trend, mean-revert, and volatility regimes.",
+                "strategies": {
+                    "keltner": {"enabled": True, "weight": 0.18},
+                    "mean_reversion": {"enabled": True, "weight": 0.16},
+                    "trend": {"enabled": True, "weight": 0.14},
+                    "ichimoku": {"enabled": True, "weight": 0.12},
+                    "order_flow": {"enabled": True, "weight": 0.12},
+                    "stochastic_divergence": {"enabled": True, "weight": 0.10},
+                    "volatility_squeeze": {"enabled": True, "weight": 0.08},
+                    "supertrend": {"enabled": True, "weight": 0.06},
+                    "reversal": {"enabled": True, "weight": 0.04},
+                },
+                "ai": {"confluence_threshold": 2, "min_confidence": 0.60, "min_risk_reward_ratio": 1.25},
+            },
+        }
+
+        @self.app.get("/api/v1/marketplace/strategies")
+        async def list_marketplace_strategies(
+            request: Request,
+            x_api_key: str = Header(default="", alias="X-API-Key"),
+        ):
+            """List built-in strategy templates (marketplace-style packs)."""
+            await _require_read_access(request, x_api_key=x_api_key)
+            return {"templates": list(_MARKETPLACE_TEMPLATES.values())}
+
+        @self.app.post("/api/v1/marketplace/strategies/apply")
+        async def apply_marketplace_strategy(
+            request: Request,
+            body: dict = Body(...),
+            x_api_key: str = Header(default="", alias="X-API-Key"),
+            x_csrf_token: str = Header(default="", alias="X-CSRF-Token"),
+        ):
+            """Apply a strategy template to one or more running engines."""
+            await _require_control_access(request, x_api_key=x_api_key, x_csrf_token=x_csrf_token)
+
+            template_id = str(body.get("template_id", "")).strip()
+            if not template_id or template_id not in _MARKETPLACE_TEMPLATES:
+                raise HTTPException(status_code=400, detail="Unknown template_id")
+            template = _MARKETPLACE_TEMPLATES[template_id]
+
+            target_exchange = str(body.get("exchange", "")).strip().lower()
+            target_tenant = str(body.get("tenant_id", "")).strip()
+            apply_all = bool(body.get("apply_all", False))
+            persist = bool(body.get("persist", True))
+
+            engines = self._get_engines()
+            if not engines:
+                raise HTTPException(status_code=503, detail="Bot not running")
+
+            targeted = []
+            for eng in engines:
+                if target_exchange and str(getattr(eng, "exchange_name", "")).lower() != target_exchange:
+                    continue
+                if target_tenant and str(getattr(eng, "tenant_id", "")) != target_tenant:
+                    continue
+                targeted.append(eng)
+                if not apply_all:
+                    break
+
+            if not targeted:
+                raise HTTPException(status_code=404, detail="No matching engine for requested filters")
+
+            strategy_updates = template.get("strategies", {})
+            ai_updates = template.get("ai", {})
+            yaml_updates: Dict[str, Dict[str, Any]] = {
+                "strategies": strategy_updates,
+                "ai": ai_updates,
+            }
+
+            applied = []
+            for eng in targeted:
+                cfg = eng.config
+                for strat_name, vals in strategy_updates.items():
+                    strat_cfg = getattr(cfg.strategies, strat_name, None)
+                    if not strat_cfg:
+                        continue
+                    if "enabled" in vals:
+                        strat_cfg.enabled = bool(vals["enabled"])
+                    if "weight" in vals:
+                        strat_cfg.weight = float(vals["weight"])
+                if "confluence_threshold" in ai_updates:
+                    cfg.ai.confluence_threshold = int(ai_updates["confluence_threshold"])
+                if "min_confidence" in ai_updates:
+                    cfg.ai.min_confidence = float(ai_updates["min_confidence"])
+                if "min_risk_reward_ratio" in ai_updates:
+                    cfg.ai.min_risk_reward_ratio = float(ai_updates["min_risk_reward_ratio"])
+
+                if getattr(eng, "confluence", None):
+                    eng.confluence.configure_strategies(
+                        cfg.strategies.model_dump(),
+                        single_strategy_mode=getattr(cfg.trading, "single_strategy_mode", None),
+                    )
+                    eng.confluence.confluence_threshold = cfg.ai.confluence_threshold
+                    eng.confluence.min_confidence = cfg.ai.min_confidence
+
+                if getattr(eng, "db", None):
+                    await eng.db.log_thought(
+                        "strategy",
+                        f"Marketplace template applied: {template_id}",
+                        severity="info",
+                        metadata={
+                            "template_id": template_id,
+                            "template_name": template.get("name"),
+                        },
+                        tenant_id=getattr(eng, "tenant_id", "default"),
+                    )
+                applied.append(
+                    {
+                        "exchange": str(getattr(eng, "exchange_name", "unknown")),
+                        "tenant_id": str(getattr(eng, "tenant_id", "default")),
+                    }
+                )
+
+            if persist:
+                try:
+                    from src.core.config import save_to_yaml
+
+                    save_to_yaml(yaml_updates)
+                except Exception as e:
+                    logger.warning("Marketplace template persistence failed", error=repr(e))
+
+            return {
+                "ok": True,
+                "template_id": template_id,
+                "applied_to": applied,
+            }
+
+        @self.app.get("/api/v1/copy-trading/providers")
+        async def list_copy_trading_providers(
+            request: Request,
+            tenant_id: str = Depends(_resolve_tenant_id_read),
+            x_api_key: str = Header(default="", alias="X-API-Key"),
+        ):
+            """List copy-trading signal providers for the tenant."""
+            await _require_read_access(request, x_api_key=x_api_key)
+            primary = self._get_primary_engine()
+            if not primary or not getattr(primary, "db", None):
+                return {"providers": []}
+            rows = await primary.db.get_copy_trading_providers(tenant_id=tenant_id)
+            for row in rows:
+                if row.get("webhook_secret"):
+                    row["webhook_secret"] = "***"
+            return {"providers": rows}
+
+        @self.app.post("/api/v1/copy-trading/providers")
+        async def create_copy_trading_provider(
+            request: Request,
+            body: dict = Body(...),
+            x_api_key: str = Header(default="", alias="X-API-Key"),
+            x_csrf_token: str = Header(default="", alias="X-CSRF-Token"),
+        ):
+            """Create or replace a copy-trading provider definition."""
+            ctx = await _require_control_access(request, x_api_key=x_api_key, x_csrf_token=x_csrf_token)
+            primary = self._get_primary_engine()
+            if not primary or not getattr(primary, "db", None):
+                raise HTTPException(status_code=503, detail="Bot DB unavailable")
+
+            provider_id = str(body.get("provider_id") or f"provider_{uuid.uuid4().hex[:10]}").strip().lower()
+            name = str(body.get("name") or provider_id).strip()
+            source = str(body.get("source") or "").strip().lower()
+            enabled = bool(body.get("enabled", True))
+            webhook_secret = str(body.get("webhook_secret") or "").strip()
+            metadata = body.get("metadata") if isinstance(body.get("metadata"), dict) else {}
+            tenant_id = ctx.get("tenant_id") if ctx.get("role") != "admin" else str(body.get("tenant_id") or ctx.get("tenant_id") or "default")
+
+            await primary.db.upsert_copy_trading_provider(
+                provider_id=provider_id,
+                name=name,
+                tenant_id=tenant_id,
+                source=source,
+                enabled=enabled,
+                webhook_secret=webhook_secret,
+                metadata=metadata,
+            )
+            return {"ok": True, "provider_id": provider_id}
+
+        @self.app.patch("/api/v1/copy-trading/providers/{provider_id}")
+        async def update_copy_trading_provider(
+            request: Request,
+            provider_id: str,
+            body: dict = Body(...),
+            x_api_key: str = Header(default="", alias="X-API-Key"),
+            x_csrf_token: str = Header(default="", alias="X-CSRF-Token"),
+        ):
+            """Update an existing copy-trading provider definition."""
+            ctx = await _require_control_access(request, x_api_key=x_api_key, x_csrf_token=x_csrf_token)
+            primary = self._get_primary_engine()
+            if not primary or not getattr(primary, "db", None):
+                raise HTTPException(status_code=503, detail="Bot DB unavailable")
+
+            tenant_id = ctx.get("tenant_id") if ctx.get("role") != "admin" else str(body.get("tenant_id") or ctx.get("tenant_id") or "default")
+            current = await primary.db.get_copy_trading_provider(provider_id=provider_id, tenant_id=tenant_id)
+            if not current:
+                raise HTTPException(status_code=404, detail="Provider not found")
+
+            await primary.db.upsert_copy_trading_provider(
+                provider_id=provider_id,
+                name=str(body.get("name", current.get("name") or provider_id)).strip(),
+                tenant_id=tenant_id,
+                source=str(body.get("source", current.get("source") or "")).strip().lower(),
+                enabled=bool(body.get("enabled", current.get("enabled", True))),
+                webhook_secret=str(body.get("webhook_secret", current.get("webhook_secret", ""))).strip(),
+                metadata=body.get("metadata") if isinstance(body.get("metadata"), dict) else current.get("metadata", {}),
+            )
+            return {"ok": True, "provider_id": provider_id}
+
+        @self.app.get("/api/v1/backtest/runs")
+        async def list_backtest_runs(
+            request: Request,
+            limit: int = Query(default=25, ge=1, le=200),
+            tenant_id: str = Depends(_resolve_tenant_id_read),
+            x_api_key: str = Header(default="", alias="X-API-Key"),
+        ):
+            """List historical backtest/optimization runs."""
+            await _require_read_access(request, x_api_key=x_api_key)
+            engines = self._get_engines()
+            if not engines:
+                return {"runs": []}
+
+            runs: List[Dict[str, Any]] = []
+            if self._engines_share_db(engines):
+                primary = self._get_primary_engine()
+                if primary and getattr(primary, "db", None):
+                    runs = await primary.db.get_backtest_runs(limit=limit, tenant_id=tenant_id)
+                    for run in runs:
+                        run.setdefault("exchange", getattr(primary, "exchange_name", "unknown"))
+            else:
+                for eng in engines:
+                    if not getattr(eng, "db", None):
+                        continue
+                    rows = await eng.db.get_backtest_runs(limit=limit, tenant_id=tenant_id)
+                    for row in rows:
+                        row["exchange"] = row.get("exchange") or getattr(eng, "exchange_name", "unknown")
+                    runs.extend(rows)
+                runs.sort(key=lambda r: r.get("created_at", ""), reverse=True)
+                runs = runs[:limit]
+            return {"runs": runs}
+
+        @self.app.post("/api/v1/backtest/run")
+        async def run_backtest(
+            request: Request,
+            body: dict = Body(...),
+            x_api_key: str = Header(default="", alias="X-API-Key"),
+            x_csrf_token: str = Header(default="", alias="X-CSRF-Token"),
+        ):
+            """Run a backtest using recent historical candles and persist the result."""
+            await _require_control_access(request, x_api_key=x_api_key, x_csrf_token=x_csrf_token)
+
+            pair = str(body.get("pair", "")).strip().upper()
+            if not pair:
+                raise HTTPException(status_code=400, detail="pair is required")
+
+            tf = self._normalize_chart_timeframe(str(body.get("timeframe", "5m")))
+            exchange = str(body.get("exchange", "")).strip().lower()
+            account_id = str(body.get("account_id", "")).strip().lower()
+            bars = max(120, min(int(body.get("bars", 500) or 500), 5000))
+            mode = str(body.get("mode", "parity")).strip().lower()
+            if mode not in ("parity", "simple"):
+                raise HTTPException(status_code=400, detail="mode must be parity or simple")
+
+            eng = self._resolve_chart_engine(pair, exchange, account_id)
+            if not eng:
+                raise HTTPException(status_code=404, detail="No engine found for pair/exchange/account")
+
+            if str(getattr(eng, "exchange_name", "")).lower() == "stocks":
+                candles = await self._get_stock_chart_bars(
+                    eng,
+                    symbol=pair,
+                    timeframe=tf,
+                    limit=bars,
+                )
+                source = "polygon"
+            else:
+                candles, source = await self._get_crypto_chart_bars(
+                    eng,
+                    pair=pair,
+                    timeframe=tf,
+                    limit=bars,
+                )
+
+            if len(candles) < 120:
+                raise HTTPException(status_code=400, detail=f"insufficient candle history: {len(candles)}")
+
+            try:
+                initial_balance = float(body.get("initial_balance", eng.config.risk.initial_bankroll))
+            except Exception:
+                initial_balance = float(eng.config.risk.initial_bankroll)
+            try:
+                risk_per_trade = float(body.get("risk_per_trade", eng.config.risk.max_risk_per_trade))
+            except Exception:
+                risk_per_trade = float(eng.config.risk.max_risk_per_trade)
+            try:
+                max_position_pct = float(body.get("max_position_pct", 0.05))
+            except Exception:
+                max_position_pct = 0.05
+
+            from src.ml.backtester import Backtester
+
+            backtester = Backtester(
+                initial_balance=initial_balance,
+                risk_per_trade=risk_per_trade,
+                max_position_pct=max_position_pct,
+                slippage_pct=float(getattr(eng.config.exchange, "taker_fee", 0.0026)),
+                fee_pct=float(getattr(eng.config.exchange, "taker_fee", 0.0026)),
+            )
+            df = self._candles_to_dataframe(candles)
+            started_at = datetime.now(timezone.utc).isoformat()
+
+            if mode == "parity":
+                result = await backtester.run(
+                    pair=pair,
+                    ohlcv_data=df,
+                    mode="parity",
+                    config=eng.config,
+                    predictor=getattr(eng, "predictor", None),
+                )
+            else:
+                confluence_threshold = int(body.get("confluence_threshold", eng.config.ai.confluence_threshold) or eng.config.ai.confluence_threshold)
+                result = await backtester.run(
+                    pair=pair,
+                    ohlcv_data=df,
+                    mode="simple",
+                    confluence_threshold=max(1, confluence_threshold),
+                )
+
+            run_id = f"bt_{uuid.uuid4().hex[:12]}"
+            completed_at = datetime.now(timezone.utc).isoformat()
+            result_dict = result.to_dict()
+            payload = {
+                "run_id": run_id,
+                "run_type": "backtest",
+                "pair": pair,
+                "exchange": str(getattr(eng, "exchange_name", "unknown")),
+                "account_id": str(getattr(eng, "tenant_id", "default")),
+                "timeframe": tf,
+                "bars": len(candles),
+                "mode": mode,
+                "source": source,
+                "result": result_dict,
+            }
+
+            if getattr(eng, "db", None):
+                await eng.db.insert_backtest_run(
+                    run_id=run_id,
+                    pair=pair,
+                    run_type="backtest",
+                    status="completed",
+                    mode=mode,
+                    exchange=str(getattr(eng, "exchange_name", "unknown")),
+                    timeframe=tf,
+                    params={
+                        "bars": len(candles),
+                        "source": source,
+                        "initial_balance": initial_balance,
+                        "risk_per_trade": risk_per_trade,
+                        "max_position_pct": max_position_pct,
+                    },
+                    result=result_dict,
+                    tenant_id=getattr(eng, "tenant_id", "default"),
+                    started_at=started_at,
+                    completed_at=completed_at,
+                )
+
+            return payload
+
+        @self.app.post("/api/v1/backtest/optimize")
+        async def optimize_backtest(
+            request: Request,
+            body: dict = Body(...),
+            x_api_key: str = Header(default="", alias="X-API-Key"),
+            x_csrf_token: str = Header(default="", alias="X-CSRF-Token"),
+        ):
+            """
+            Run a compact parameter optimization sweep for confluence/confidence thresholds.
+            """
+            await _require_control_access(request, x_api_key=x_api_key, x_csrf_token=x_csrf_token)
+
+            pair = str(body.get("pair", "")).strip().upper()
+            if not pair:
+                raise HTTPException(status_code=400, detail="pair is required")
+            tf = self._normalize_chart_timeframe(str(body.get("timeframe", "5m")))
+            exchange = str(body.get("exchange", "")).strip().lower()
+            account_id = str(body.get("account_id", "")).strip().lower()
+            bars = max(120, min(int(body.get("bars", 500) or 500), 5000))
+            max_runs = max(1, min(int(body.get("max_runs", 12) or 12), 36))
+
+            eng = self._resolve_chart_engine(pair, exchange, account_id)
+            if not eng:
+                raise HTTPException(status_code=404, detail="No engine found for pair/exchange/account")
+
+            if str(getattr(eng, "exchange_name", "")).lower() == "stocks":
+                candles = await self._get_stock_chart_bars(
+                    eng,
+                    symbol=pair,
+                    timeframe=tf,
+                    limit=bars,
+                )
+                source = "polygon"
+            else:
+                candles, source = await self._get_crypto_chart_bars(
+                    eng,
+                    pair=pair,
+                    timeframe=tf,
+                    limit=bars,
+                )
+            if len(candles) < 120:
+                raise HTTPException(status_code=400, detail=f"insufficient candle history: {len(candles)}")
+
+            from src.core.config import load_config_with_overrides
+            from src.ml.backtester import Backtester
+
+            conf_values = body.get("min_confidence_values", [0.55, 0.60, 0.65])
+            confl_values = body.get("confluence_threshold_values", [2, 3, 4])
+            rr_values = body.get(
+                "min_risk_reward_values",
+                [max(1.0, float(getattr(eng.config.ai, "min_risk_reward_ratio", 1.2)))],
+            )
+            if not isinstance(conf_values, list) or not isinstance(confl_values, list) or not isinstance(rr_values, list):
+                raise HTTPException(status_code=400, detail="parameter value fields must be lists")
+
+            grid: List[Dict[str, Any]] = []
+            for c in conf_values:
+                for k in confl_values:
+                    for rr in rr_values:
+                        try:
+                            grid.append(
+                                {
+                                    "min_confidence": max(0.3, min(0.95, float(c))),
+                                    "confluence_threshold": max(1, min(8, int(k))),
+                                    "min_risk_reward_ratio": max(0.5, min(5.0, float(rr))),
+                                }
+                            )
+                        except Exception:
+                            continue
+            grid = grid[:max_runs]
+            if not grid:
+                raise HTTPException(status_code=400, detail="empty parameter grid")
+
+            df = self._candles_to_dataframe(candles)
+            backtester = Backtester(
+                initial_balance=float(eng.config.risk.initial_bankroll),
+                risk_per_trade=float(eng.config.risk.max_risk_per_trade),
+                max_position_pct=0.05,
+                slippage_pct=float(getattr(eng.config.exchange, "taker_fee", 0.0026)),
+                fee_pct=float(getattr(eng.config.exchange, "taker_fee", 0.0026)),
+            )
+
+            started_at = datetime.now(timezone.utc).isoformat()
+            leaderboard: List[Dict[str, Any]] = []
+            for params in grid:
+                overrides = {
+                    "ai": {
+                        "min_confidence": params["min_confidence"],
+                        "confluence_threshold": params["confluence_threshold"],
+                        "min_risk_reward_ratio": params["min_risk_reward_ratio"],
+                    }
+                }
+                cfg_variant = load_config_with_overrides(overrides=overrides)
+                cfg_variant.exchange = eng.config.exchange
+                cfg_variant.trading = eng.config.trading
+                cfg_variant.strategies = eng.config.strategies
+                cfg_variant.risk = eng.config.risk
+                cfg_variant.ml = eng.config.ml
+
+                result = await backtester.run(
+                    pair=pair,
+                    ohlcv_data=df,
+                    mode="parity",
+                    config=cfg_variant,
+                    predictor=getattr(eng, "predictor", None),
+                )
+                metrics = result.to_dict()
+                score = (
+                    float(metrics.get("total_return_pct", 0.0))
+                    + (float(metrics.get("win_rate", 0.0)) * 30.0)
+                    - (float(metrics.get("max_drawdown", 0.0)) * 80.0)
+                )
+                leaderboard.append(
+                    {
+                        "params": params,
+                        "score": round(score, 4),
+                        "metrics": metrics,
+                    }
+                )
+
+            leaderboard.sort(key=lambda r: r.get("score", 0.0), reverse=True)
+            best = leaderboard[0] if leaderboard else {}
+            run_id = f"opt_{uuid.uuid4().hex[:12]}"
+            completed_at = datetime.now(timezone.utc).isoformat()
+
+            if getattr(eng, "db", None):
+                await eng.db.insert_backtest_run(
+                    run_id=run_id,
+                    pair=pair,
+                    run_type="optimization",
+                    status="completed",
+                    mode="parity",
+                    exchange=str(getattr(eng, "exchange_name", "unknown")),
+                    timeframe=tf,
+                    params={
+                        "bars": len(candles),
+                        "source": source,
+                        "grid_size": len(grid),
+                    },
+                    result={
+                        "best": best,
+                        "top": leaderboard[:10],
+                    },
+                    tenant_id=getattr(eng, "tenant_id", "default"),
+                    started_at=started_at,
+                    completed_at=completed_at,
+                )
+
+            return {
+                "run_id": run_id,
+                "pair": pair,
+                "exchange": str(getattr(eng, "exchange_name", "unknown")),
+                "account_id": str(getattr(eng, "tenant_id", "default")),
+                "timeframe": tf,
+                "tested": len(leaderboard),
+                "best": best,
+                "top": leaderboard[:10],
+            }
+
+        @self.app.post("/api/v1/paper/reset")
+        async def reset_paper_session(
+            request: Request,
+            x_api_key: str = Header(default="", alias="X-API-Key"),
+            x_csrf_token: str = Header(default="", alias="X-CSRF-Token"),
+        ):
+            """Reset paper-trading runtime state for a clean simulation cycle."""
+            await _require_control_access(request, x_api_key=x_api_key, x_csrf_token=x_csrf_token)
+            engines = self._get_engines()
+            if not engines:
+                raise HTTPException(status_code=503, detail="Bot not running")
+
+            total_closed = 0
+            reset_ts = datetime.now(timezone.utc).isoformat()
+            for eng in engines:
+                if str(getattr(eng, "mode", "")).lower() != "paper":
+                    raise HTTPException(status_code=400, detail="paper reset is only allowed in paper mode")
+                executor = getattr(eng, "executor", None)
+                if executor:
+                    total_closed += await executor.close_all_positions("paper_reset", tenant_id=getattr(eng, "tenant_id", "default"))
+                rm = getattr(eng, "risk_manager", None)
+                if rm and hasattr(rm, "reset_runtime"):
+                    rm.reset_runtime(initial_bankroll=float(getattr(eng.config.risk, "initial_bankroll", rm.initial_bankroll)))
+                if getattr(eng, "db", None):
+                    await eng.db.set_state("stats_reset_ts", reset_ts)
+                    await eng.db.log_thought(
+                        "system",
+                        "Paper session reset via API",
+                        severity="warning",
+                        tenant_id=getattr(eng, "tenant_id", "default"),
+                    )
+            return {"ok": True, "closed_positions": total_closed, "reset_ts": reset_ts}
+
+        @self.app.post("/api/v1/signals/webhook")
+        async def signal_webhook(
+            request: Request,
+            x_signal_signature: str = Header(default="", alias="X-Signal-Signature"),
+            x_signal_timestamp: str = Header(default="", alias="X-Signal-Timestamp"),
+            x_signal_source: str = Header(default="", alias="X-Signal-Source"),
+        ):
+            """
+            Signed signal intake endpoint for TradingView/custom providers.
+
+            Auth:
+            - HMAC SHA256 signature over raw payload bytes.
+            - If timestamp is provided, signature must be over `timestamp.payload`.
+            """
+            primary = self._get_primary_engine()
+            cfg = getattr(getattr(primary, "config", None), "webhooks", None) if primary else None
+            if not cfg or not getattr(cfg, "enabled", False):
+                raise HTTPException(status_code=503, detail="Signal webhooks are disabled")
+
+            raw = await request.body()
+            try:
+                payload = json.loads(raw.decode("utf-8"))
+            except Exception:
+                raise HTTPException(status_code=400, detail="Invalid JSON payload")
+
+            if not isinstance(payload, dict):
+                raise HTTPException(status_code=400, detail="Signal payload must be a JSON object")
+
+            source = (x_signal_source or payload.get("source") or "webhook").strip().lower()
+            pair = str(payload.get("pair", "")).strip().upper()
+            exchange = str(payload.get("exchange", "")).strip().lower()
+            account_id = str(payload.get("account_id", "")).strip().lower()
+            eng = self._resolve_chart_engine(pair, exchange, account_id) if pair else None
+            if not eng:
+                eng = primary
+            if not eng:
+                raise HTTPException(status_code=503, detail="No engine available")
+            if not hasattr(eng, "execute_external_signal"):
+                raise HTTPException(status_code=400, detail="Engine does not support external signals")
+
+            provider_id = str(payload.get("provider_id") or "").strip().lower()
+            provider = None
+            if provider_id and getattr(eng, "db", None):
+                provider = await eng.db.get_copy_trading_provider(
+                    provider_id=provider_id,
+                    tenant_id=getattr(eng, "tenant_id", "default"),
+                )
+                if not provider or not provider.get("enabled", False):
+                    raise HTTPException(status_code=403, detail="Provider disabled or not found")
+                provider_source = str(provider.get("source") or "").strip().lower()
+                if provider_source and source and provider_source != source:
+                    raise HTTPException(status_code=403, detail="Source/provider mismatch")
+
+            secret = (
+                str((provider or {}).get("webhook_secret") or "").strip()
+                or str(getattr(cfg, "secret", "")).strip()
+            )
+            if not self._verify_signal_signature(
+                raw,
+                x_signal_signature,
+                secret=secret,
+                timestamp=x_signal_timestamp,
+                max_skew_seconds=int(getattr(cfg, "max_timestamp_skew_seconds", 300) or 300),
+            ):
+                raise HTTPException(status_code=401, detail="Invalid signal signature")
+
+            allowed_sources = [str(s).strip().lower() for s in (getattr(cfg, "allowed_sources", []) or []) if str(s).strip()]
+            if allowed_sources and source not in allowed_sources:
+                raise HTTPException(status_code=403, detail="Signal source not allowed")
+
+            payload_hash = hashlib.sha256(raw).hexdigest()
+            event_id = str(payload.get("event_id") or payload.get("id") or "").strip() or f"sig:{payload_hash}"
+            if getattr(eng, "db", None):
+                if await eng.db.has_processed_signal_webhook_event(event_id):
+                    return {"ok": True, "duplicate": True, "event_id": event_id}
+
+            result = await eng.execute_external_signal(payload, source=source)
+            if not result.get("ok"):
+                raise HTTPException(status_code=400, detail=result.get("error", "Signal rejected"))
+
+            if getattr(eng, "db", None):
+                await eng.db.mark_signal_webhook_event_processed(
+                    event_id,
+                    source=source,
+                    payload_hash=payload_hash,
+                    tenant_id=getattr(eng, "tenant_id", "default"),
+                )
+
+            return {"ok": True, "duplicate": False, "event_id": event_id, "result": result}
+
         # ---- Settings (all tunable parameters) ----
         def _read_all_settings(engine) -> dict:
             """Read all tunable settings from engine runtime state."""
@@ -1106,7 +2402,9 @@ class DashboardServer:
                 "risk": {
                     "max_risk_per_trade": cfg.risk.max_risk_per_trade,
                     "max_daily_loss": cfg.risk.max_daily_loss,
+                    "max_daily_trades": cfg.risk.max_daily_trades,
                     "max_position_usd": cfg.risk.max_position_usd,
+                    "max_total_exposure_pct": cfg.risk.max_total_exposure_pct,
                     "atr_multiplier_sl": cfg.risk.atr_multiplier_sl,
                     "atr_multiplier_tp": cfg.risk.atr_multiplier_tp,
                     "trailing_activation_pct": cfg.risk.trailing_activation_pct,
@@ -1121,6 +2419,18 @@ class DashboardServer:
                     "cooldown_seconds": cfg.trading.cooldown_seconds,
                     "max_spread_pct": cfg.trading.max_spread_pct,
                     "quiet_hours_utc": cfg.trading.quiet_hours_utc,
+                    "max_trades_per_hour": cfg.trading.max_trades_per_hour,
+                },
+                "monitoring": {
+                    "auto_pause_on_stale_data": cfg.monitoring.auto_pause_on_stale_data,
+                    "stale_data_pause_after_checks": cfg.monitoring.stale_data_pause_after_checks,
+                    "auto_pause_on_ws_disconnect": cfg.monitoring.auto_pause_on_ws_disconnect,
+                    "ws_disconnect_pause_after_seconds": cfg.monitoring.ws_disconnect_pause_after_seconds,
+                    "auto_pause_on_consecutive_losses": cfg.monitoring.auto_pause_on_consecutive_losses,
+                    "consecutive_losses_pause_threshold": cfg.monitoring.consecutive_losses_pause_threshold,
+                    "auto_pause_on_drawdown": cfg.monitoring.auto_pause_on_drawdown,
+                    "drawdown_pause_pct": cfg.monitoring.drawdown_pause_pct,
+                    "emergency_close_on_auto_pause": cfg.monitoring.emergency_close_on_auto_pause,
                 },
                 "ml": {
                     "retrain_interval_hours": cfg.ml.retrain_interval_hours,
@@ -1141,7 +2451,9 @@ class DashboardServer:
             "ai.solo_min_confidence": (float, 0.50, 0.90),
             "risk.max_risk_per_trade": (float, 0.001, 0.10),
             "risk.max_daily_loss": (float, 0.01, 0.20),
+            "risk.max_daily_trades": (int, 0, 2000),
             "risk.max_position_usd": (float, 10, 50000),
+            "risk.max_total_exposure_pct": (float, 0.05, 1.0),
             "risk.atr_multiplier_sl": (float, 0.5, 5.0),
             "risk.atr_multiplier_tp": (float, 0.5, 10.0),
             "risk.trailing_activation_pct": (float, 0.005, 0.10),
@@ -1154,6 +2466,16 @@ class DashboardServer:
             "trading.cooldown_seconds": (int, 0, 3600),
             "trading.max_spread_pct": (float, 0.0, 0.01),
             "trading.quiet_hours_utc": (list, None, None),
+            "trading.max_trades_per_hour": (int, 0, 120),
+            "monitoring.auto_pause_on_stale_data": (bool, None, None),
+            "monitoring.stale_data_pause_after_checks": (int, 1, 20),
+            "monitoring.auto_pause_on_ws_disconnect": (bool, None, None),
+            "monitoring.ws_disconnect_pause_after_seconds": (int, 10, 7200),
+            "monitoring.auto_pause_on_consecutive_losses": (bool, None, None),
+            "monitoring.consecutive_losses_pause_threshold": (int, 1, 20),
+            "monitoring.auto_pause_on_drawdown": (bool, None, None),
+            "monitoring.drawdown_pause_pct": (float, 0.1, 50.0),
+            "monitoring.emergency_close_on_auto_pause": (bool, None, None),
             "ml.retrain_interval_hours": (int, 1, 720),
             "ml.min_samples": (int, 100, 100000),
         }
@@ -1244,7 +2566,9 @@ class DashboardServer:
                 if rm:
                     rm.max_risk_per_trade = cfg.risk.max_risk_per_trade
                     rm.max_daily_loss = cfg.risk.max_daily_loss
+                    rm.max_daily_trades = cfg.risk.max_daily_trades
                     rm.max_position_usd = cfg.risk.max_position_usd
+                    rm.max_total_exposure_pct = cfg.risk.max_total_exposure_pct
                     rm.atr_multiplier_sl = cfg.risk.atr_multiplier_sl
                     rm.atr_multiplier_tp = cfg.risk.atr_multiplier_tp
                     rm.trailing_activation_pct = cfg.risk.trailing_activation_pct
@@ -1255,6 +2579,10 @@ class DashboardServer:
 
             if any(k.startswith("trading.") for k in changed):
                 primary.scan_interval = cfg.trading.scan_interval_seconds
+                if getattr(primary, "executor", None):
+                    primary.executor.max_trades_per_hour = max(
+                        0, int(cfg.trading.max_trades_per_hour or 0)
+                    )
 
             # Persist to config.yaml
             if yaml_updates:
@@ -1323,8 +2651,23 @@ class DashboardServer:
                 raise HTTPException(status_code=400, detail="Invalid signature")
             import json as _json
             event = _json.loads(payload)
+            payload_hash = hashlib.sha256(payload).hexdigest()
+            event_id = str(event.get("id") or "").strip() or f"sha256:{payload_hash}"
+            event_type = str(event.get("type") or "")
+
+            primary = self._get_primary_engine()
+            primary_db = primary.db if (primary and getattr(primary, "db", None)) else None
+            if primary_db and await primary_db.has_processed_stripe_webhook_event(event_id):
+                return {"received": True, "duplicate": True}
+
             await self._stripe_service.handle_webhook_event(event)
-            return {"received": True}
+            if primary_db:
+                await primary_db.mark_stripe_webhook_event_processed(
+                    event_id,
+                    event_type=event_type,
+                    payload_hash=payload_hash,
+                )
+            return {"received": True, "duplicate": False}
 
         @self.app.get("/api/v1/tenants/{tenant_id}")
         async def get_tenant(
@@ -1347,6 +2690,54 @@ class DashboardServer:
             if not tenant:
                 raise HTTPException(status_code=404, detail="Tenant not found")
             return tenant
+
+        @self.app.post("/api/v1/alerts/test")
+        async def send_test_alert(
+            request: Request,
+            body: dict = Body(default={}),
+            x_api_key: str = Header(default="", alias="X-API-Key"),
+            x_csrf_token: str = Header(default="", alias="X-CSRF-Token"),
+        ):
+            """Send a test alert through configured notification channels."""
+            await _require_control_access(request, x_api_key=x_api_key, x_csrf_token=x_csrf_token)
+            primary = self._get_primary_engine()
+            if not primary:
+                raise HTTPException(status_code=503, detail="Bot not running")
+
+            message = str(body.get("message") or "NovaPulse test alert").strip()
+            if len(message) > 500:
+                message = message[:500]
+
+            delivered = []
+            failed = []
+
+            targets = [
+                ("telegram", getattr(primary, "telegram_bot", None)),
+                ("discord", getattr(primary, "discord_bot", None)),
+                ("slack", getattr(primary, "slack_bot", None)),
+            ]
+            for name, bot in targets:
+                if not bot or not hasattr(bot, "send_message"):
+                    continue
+                try:
+                    ok = await bot.send_message(f"[NovaPulse] {message}")
+                    if ok is False:
+                        failed.append(name)
+                    else:
+                        delivered.append(name)
+                except Exception:
+                    failed.append(name)
+
+            if getattr(primary, "db", None):
+                await primary.db.log_thought(
+                    "system",
+                    f"Test alert sent | delivered={','.join(delivered) or 'none'}",
+                    severity="info",
+                    metadata={"delivered": delivered, "failed": failed},
+                    tenant_id=getattr(primary, "tenant_id", "default"),
+                )
+
+            return {"ok": True, "delivered": delivered, "failed": failed}
 
         # ---- Control Endpoints ----
 
@@ -1444,7 +2835,6 @@ class DashboardServer:
             )
             api_key = (
                 websocket.headers.get("x-api-key")
-                or websocket.query_params.get("api_key")
                 or ""
             )
             try:
@@ -1577,14 +2967,17 @@ class DashboardServer:
 
             # Scanner (with exchange labels if needed)
             scanner_data: Dict[str, Any] = {}
-            seen = set()
             for eng in engines:
+                exchange = str(getattr(eng, "exchange_name", "unknown")).lower()
+                account = str(getattr(eng, "tenant_id", "default"))
+                asset_class = "stock" if exchange == "stocks" else "crypto"
                 for pair in getattr(eng, "pairs", []) or []:
-                    label = pair
-                    if label in seen or len(engines) > 1:
-                        label = f"{pair} ({getattr(eng, 'exchange_name', 'unknown')})"
-                    seen.add(label)
+                    label = f"{pair} ({exchange}:{account})" if len(engines) > 1 else pair
                     scanner_data[label] = {
+                        "pair": pair,
+                        "exchange": exchange,
+                        "account_id": account,
+                        "asset_class": asset_class,
                         "price": eng.market_data.get_latest_price(pair),
                         "bars": eng.market_data.get_bar_count(pair),
                         "stale": eng.market_data.is_stale(pair),

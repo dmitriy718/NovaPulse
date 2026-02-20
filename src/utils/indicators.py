@@ -426,6 +426,58 @@ def _cluster_levels(levels: list, tolerance: float) -> list:
 # Keltner Channels
 # ------------------------------------------------------------------
 
+def realized_volatility(closes: np.ndarray, period: int = 20) -> np.ndarray:
+    """Rolling realized volatility (annualized std of log returns).
+
+    Returns an array the same length as *closes*.  The first *period*
+    entries are NaN.  Values are expressed as a decimal fraction (e.g.
+    0.50 = 50% annualized vol).
+    """
+    if len(closes) < period + 1:
+        return np.full(len(closes), np.nan)
+
+    safe = np.where(closes > 0, closes, 1.0)
+    log_ret = np.diff(np.log(safe))  # length = len(closes) - 1
+
+    result = np.full(len(closes), np.nan)
+    for i in range(period, len(log_ret) + 1):
+        window = log_ret[i - period:i]
+        result[i] = np.std(window) * np.sqrt(525600)  # annualise from 1-min bars (365.25 * 24 * 60)
+
+    return result
+
+
+def garman_klass_volatility(
+    opens: np.ndarray,
+    highs: np.ndarray,
+    lows: np.ndarray,
+    closes: np.ndarray,
+    period: int = 20,
+) -> np.ndarray:
+    """Garman-Klass volatility estimator (more efficient than close-close).
+
+    Returns rolling GK vol as a decimal fraction, same length as input.
+    """
+    n = min(len(opens), len(highs), len(lows), len(closes))
+    if n < 2:
+        return np.full(n, np.nan)
+
+    safe_opens = np.where(opens > 0, opens, 1.0)
+    safe_lows = np.where(lows > 0, lows, 1.0)
+
+    log_hl = np.log(highs[:n] / safe_lows[:n])
+    log_co = np.log(closes[:n] / safe_opens[:n])
+
+    gk_var = 0.5 * log_hl ** 2 - (2.0 * np.log(2.0) - 1.0) * log_co ** 2
+
+    result = np.full(n, np.nan)
+    if n >= period:
+        for i in range(period, n):
+            result[i] = np.sqrt(np.mean(gk_var[i - period:i]) * 525600)
+
+    return result
+
+
 def keltner_channels(
     highs: np.ndarray, lows: np.ndarray, closes: np.ndarray,
     ema_period: int = 20, atr_period: int = 14, multiplier: float = 1.5,
@@ -474,11 +526,11 @@ def macd(
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     MACD: (macd_line, signal_line, histogram).
-    
+
     - macd_line = EMA(fast) - EMA(slow)
     - signal_line = EMA(macd_line, signal_period)
     - histogram = macd_line - signal_line
-    
+
     Histogram > 0 = bullish momentum
     Histogram < 0 = bearish momentum
     Histogram crossing zero = momentum shift
@@ -491,3 +543,171 @@ def macd(
     histogram = macd_line - signal_line
 
     return macd_line, signal_line, histogram
+
+
+# ------------------------------------------------------------------
+# Stochastic Oscillator
+# ------------------------------------------------------------------
+
+def stochastic(
+    highs: np.ndarray,
+    lows: np.ndarray,
+    closes: np.ndarray,
+    k_period: int = 14,
+    d_period: int = 3,
+    smooth: int = 3,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Stochastic Oscillator: (%K, %D).
+
+    %K = SMA(raw_k, smooth) where raw_k = (close - lowest_low) / (highest_high - lowest_low) * 100
+    %D = SMA(%K, d_period)
+    """
+    n = len(closes)
+    if n < k_period:
+        return np.full(n, np.nan), np.full(n, np.nan)
+
+    raw_k = np.full(n, np.nan)
+    for i in range(k_period - 1, n):
+        hh = np.max(highs[i - k_period + 1:i + 1])
+        ll = np.min(lows[i - k_period + 1:i + 1])
+        rng = hh - ll
+        if rng > 0:
+            raw_k[i] = ((closes[i] - ll) / rng) * 100.0
+        else:
+            raw_k[i] = 50.0  # No range — neutral
+
+    # %K = smoothed raw_k
+    pct_k = sma(raw_k, smooth)
+    # %D = SMA of %K
+    pct_d = sma(pct_k, d_period)
+
+    return pct_k, pct_d
+
+
+# ------------------------------------------------------------------
+# Supertrend
+# ------------------------------------------------------------------
+
+def supertrend(
+    highs: np.ndarray,
+    lows: np.ndarray,
+    closes: np.ndarray,
+    period: int = 10,
+    multiplier: float = 3.0,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Supertrend indicator: (supertrend_line, direction).
+
+    direction: +1 = bullish (price above supertrend), -1 = bearish.
+    """
+    n = len(closes)
+    if n < period + 1:
+        return np.full(n, np.nan), np.full(n, 0.0)
+
+    atr_vals = atr(highs, lows, closes, period)
+
+    upper_band = np.full(n, np.nan)
+    lower_band = np.full(n, np.nan)
+    st_line = np.full(n, np.nan)
+    direction = np.full(n, 0.0)
+
+    hl2 = (highs + lows) / 2.0
+
+    for i in range(period, n):
+        a = atr_vals[i]
+        if a <= 0 or np.isnan(a):
+            upper_band[i] = upper_band[i - 1] if i > 0 else hl2[i]
+            lower_band[i] = lower_band[i - 1] if i > 0 else hl2[i]
+        else:
+            basic_upper = hl2[i] + multiplier * a
+            basic_lower = hl2[i] - multiplier * a
+
+            # Upper band: only moves down (tightens), never up
+            prev_upper = upper_band[i - 1]
+            if np.isnan(prev_upper):
+                upper_band[i] = basic_upper
+            else:
+                upper_band[i] = min(basic_upper, prev_upper) if closes[i - 1] <= prev_upper else basic_upper
+
+            # Lower band: only moves up (tightens), never down
+            prev_lower = lower_band[i - 1]
+            if np.isnan(prev_lower):
+                lower_band[i] = basic_lower
+            else:
+                lower_band[i] = max(basic_lower, prev_lower) if closes[i - 1] >= prev_lower else basic_lower
+
+    # Compute direction and supertrend line
+    for i in range(period, n):
+        if i == period:
+            # Initialize: bullish if close > upper_band
+            direction[i] = 1.0 if closes[i] > upper_band[i] else -1.0
+        else:
+            prev_dir = direction[i - 1]
+            if prev_dir > 0:
+                # Was bullish — stay bullish unless close drops below lower band
+                direction[i] = -1.0 if closes[i] < lower_band[i] else 1.0
+            else:
+                # Was bearish — stay bearish unless close rises above upper band
+                direction[i] = 1.0 if closes[i] > upper_band[i] else -1.0
+
+        st_line[i] = lower_band[i] if direction[i] > 0 else upper_band[i]
+
+    return st_line, direction
+
+
+# ------------------------------------------------------------------
+# Ichimoku Kinko Hyo
+# ------------------------------------------------------------------
+
+def ichimoku(
+    highs: np.ndarray,
+    lows: np.ndarray,
+    closes: np.ndarray,
+    tenkan: int = 9,
+    kijun: int = 26,
+    senkou_b: int = 52,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Ichimoku Cloud: (tenkan_sen, kijun_sen, senkou_span_a, senkou_span_b, chikou_span).
+
+    Note: Senkou spans are NOT shifted forward (no future displacement) — they
+    represent current cloud boundaries for use in real-time trading decisions.
+    Chikou span is the close shifted back by `kijun` periods.
+    """
+    n = len(closes)
+    tenkan_sen = np.full(n, np.nan)
+    kijun_sen = np.full(n, np.nan)
+
+    def _midpoint(arr: np.ndarray, start: int, end: int) -> float:
+        segment = arr[start:end]
+        return (np.max(segment) + np.min(segment)) / 2.0
+
+    for i in range(tenkan - 1, n):
+        tenkan_sen[i] = _midpoint(highs, i - tenkan + 1, i + 1) / 2.0 + _midpoint(lows, i - tenkan + 1, i + 1) / 2.0
+        # Simpler: (highest_high + lowest_low) / 2
+        hh = np.max(highs[i - tenkan + 1:i + 1])
+        ll = np.min(lows[i - tenkan + 1:i + 1])
+        tenkan_sen[i] = (hh + ll) / 2.0
+
+    for i in range(kijun - 1, n):
+        hh = np.max(highs[i - kijun + 1:i + 1])
+        ll = np.min(lows[i - kijun + 1:i + 1])
+        kijun_sen[i] = (hh + ll) / 2.0
+
+    # Senkou Span A = (Tenkan + Kijun) / 2
+    senkou_a = np.full(n, np.nan)
+    for i in range(n):
+        if not np.isnan(tenkan_sen[i]) and not np.isnan(kijun_sen[i]):
+            senkou_a[i] = (tenkan_sen[i] + kijun_sen[i]) / 2.0
+
+    # Senkou Span B = midpoint of highest high and lowest low over senkou_b periods
+    senkou_b_arr = np.full(n, np.nan)
+    for i in range(senkou_b - 1, n):
+        hh = np.max(highs[i - senkou_b + 1:i + 1])
+        ll = np.min(lows[i - senkou_b + 1:i + 1])
+        senkou_b_arr[i] = (hh + ll) / 2.0
+
+    # Chikou Span = close shifted back by kijun periods
+    chikou = np.full(n, np.nan)
+    if n > kijun:
+        chikou[:n - kijun] = closes[kijun:]
+
+    return tenkan_sen, kijun_sen, senkou_a, senkou_b_arr, chikou

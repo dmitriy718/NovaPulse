@@ -231,3 +231,34 @@ class DiscordBot:
                 await self._bot.close()
             except Exception:
                 pass
+
+    async def send_message(self, text: str) -> bool:
+        """Send an alert message to the first allowed channel/guild text channel."""
+        if not self._bot or not self._bot.is_ready():
+            return False
+        try:
+            channel = None
+            if self.allowed_channel_ids:
+                for cid in self.allowed_channel_ids:
+                    try:
+                        channel = self._bot.get_channel(int(cid))
+                    except Exception:
+                        channel = None
+                    if channel:
+                        break
+            if channel is None and self.allowed_guild_id:
+                try:
+                    guild = self._bot.get_guild(int(self.allowed_guild_id))
+                except Exception:
+                    guild = None
+                if guild:
+                    text_channels = getattr(guild, "text_channels", []) or []
+                    if text_channels:
+                        channel = text_channels[0]
+            if channel is None:
+                return False
+            await channel.send(text)
+            return True
+        except Exception as e:
+            logger.warning("Discord send_message failed", error=str(e))
+            return False
