@@ -138,7 +138,12 @@ seen_paths = set()
 for spec in accounts:
     ex = str(spec.get("exchange") or cfg.exchange.name or "kraken").strip().lower()
     account_id = str(spec.get("account_id") or "default").strip().lower()
-    resolved = resolve_db_path(base, ex, multi=multi, account_id=account_id)
+    resolved = resolve_db_path(
+        base,
+        ex,
+        multi=multi,
+        account_id=(account_id if multi else ""),
+    )
     p = Path(resolved)
     if not p.is_absolute():
         p = (Path.cwd() / p).resolve()
@@ -264,7 +269,12 @@ def resolve_runtime_db_paths():
         for spec in accounts:
             ex = str(spec.get("exchange") or cfg.exchange.name or "kraken").strip().lower()
             account_id = str(spec.get("account_id") or "default").strip().lower()
-            resolved = resolve_db_path(base, ex, multi=multi, account_id=account_id)
+            resolved = resolve_db_path(
+                base,
+                ex,
+                multi=multi,
+                account_id=(account_id if multi else ""),
+            )
             p = Path(resolved)
             if not p.is_absolute():
                 p = (Path("/app") / p).resolve()
