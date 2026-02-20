@@ -2541,6 +2541,60 @@ class DashboardServer:
                 },
             }
 
+        def _coerce_bool_setting(value: Any, dotpath: str) -> bool:
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, (int, float)):
+                if value in (0, 1):
+                    return bool(value)
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid boolean value for {dotpath}",
+                )
+            if isinstance(value, str):
+                lowered = value.strip().lower()
+                if lowered in ("1", "true", "yes", "y", "on"):
+                    return True
+                if lowered in ("0", "false", "no", "n", "off"):
+                    return False
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid boolean value for {dotpath}",
+            )
+
+        def _apply_live_subsystem_updates(engine: Any, changed_paths: Set[str]) -> None:
+            cfg = engine.config
+            if any(k.startswith("ai.") for k in changed_paths):
+                confluence = getattr(engine, "confluence", None)
+                if confluence:
+                    confluence.obi_counts_as_confluence = cfg.ai.obi_counts_as_confluence
+                    confluence.obi_weight = cfg.ai.obi_weight
+                    confluence.confluence_threshold = cfg.ai.confluence_threshold
+                    confluence.min_confidence = cfg.ai.min_confidence
+
+            if any(k.startswith("risk.") for k in changed_paths):
+                rm = getattr(engine, "risk_manager", None)
+                if rm:
+                    rm.max_risk_per_trade = cfg.risk.max_risk_per_trade
+                    rm.max_daily_loss = cfg.risk.max_daily_loss
+                    rm.max_daily_trades = cfg.risk.max_daily_trades
+                    rm.max_position_usd = cfg.risk.max_position_usd
+                    rm.max_total_exposure_pct = cfg.risk.max_total_exposure_pct
+                    rm.atr_multiplier_sl = cfg.risk.atr_multiplier_sl
+                    rm.atr_multiplier_tp = cfg.risk.atr_multiplier_tp
+                    rm.trailing_activation_pct = cfg.risk.trailing_activation_pct
+                    rm.trailing_step_pct = cfg.risk.trailing_step_pct
+                    rm.breakeven_activation_pct = cfg.risk.breakeven_activation_pct
+                    rm.kelly_fraction = cfg.risk.kelly_fraction
+                    rm.global_cooldown_seconds_on_loss = cfg.risk.global_cooldown_seconds_on_loss
+
+            if any(k.startswith("trading.") for k in changed_paths):
+                engine.scan_interval = cfg.trading.scan_interval_seconds
+                if getattr(engine, "executor", None):
+                    engine.executor.max_trades_per_hour = max(
+                        0, int(cfg.trading.max_trades_per_hour or 0)
+                    )
+
         # Validation rules: (type, min, max) — None means no bound
         _SETTINGS_VALIDATORS: dict = {
             "ai.confluence_threshold": (int, 2, 8),
@@ -2604,13 +2658,14 @@ class DashboardServer:
         ):
             """Update settings at runtime and persist to config.yaml."""
             await _require_control_access(request, x_api_key=x_api_key, x_csrf_token=x_csrf_token)
-            primary = self._get_primary_engine()
-            if not primary:
+            engines = self._get_engines()
+            if not engines:
                 raise HTTPException(status_code=503, detail="Bot not running")
+            primary = engines[0]
 
-            cfg = primary.config
             yaml_updates: dict = {}
-            changed: list = []
+            changed: Set[str] = set()
+            normalized_updates: Dict[str, Dict[str, Any]] = {}
 
             for section_key, section_values in body.items():
                 if not isinstance(section_values, dict):
@@ -2626,7 +2681,7 @@ class DashboardServer:
                     # Type coercion + validation
                     try:
                         if vtype is bool:
-                            value = bool(value)
+                            value = _coerce_bool_setting(value, dotpath)
                         elif vtype is int:
                             value = int(value)
                         elif vtype is float:
@@ -2644,48 +2699,22 @@ class DashboardServer:
                     if vmax is not None and not isinstance(value, (bool, list)) and value > vmax:
                         raise HTTPException(status_code=400, detail=f"{dotpath} must be <= {vmax}")
 
-                    # Apply to runtime config model
-                    section_obj = getattr(cfg, section_key, None)
-                    if section_obj and hasattr(section_obj, key):
-                        setattr(section_obj, key, value)
-                        changed.append(dotpath)
-
-                    # Stage for YAML persistence
+                    normalized_updates.setdefault(section_key, {})[key] = value
                     if section_key not in yaml_updates:
                         yaml_updates[section_key] = {}
                     yaml_updates[section_key][key] = value
 
-            # Apply to live engine subsystems
-            if any(k.startswith("ai.") for k in changed):
-                confluence = getattr(primary, "confluence", None)
-                if confluence:
-                    confluence.obi_counts_as_confluence = cfg.ai.obi_counts_as_confluence
-                    confluence.obi_weight = cfg.ai.obi_weight
-                    confluence.confluence_threshold = cfg.ai.confluence_threshold
-                    confluence.min_confidence = cfg.ai.min_confidence
-
-            if any(k.startswith("risk.") for k in changed):
-                rm = getattr(primary, "risk_manager", None)
-                if rm:
-                    rm.max_risk_per_trade = cfg.risk.max_risk_per_trade
-                    rm.max_daily_loss = cfg.risk.max_daily_loss
-                    rm.max_daily_trades = cfg.risk.max_daily_trades
-                    rm.max_position_usd = cfg.risk.max_position_usd
-                    rm.max_total_exposure_pct = cfg.risk.max_total_exposure_pct
-                    rm.atr_multiplier_sl = cfg.risk.atr_multiplier_sl
-                    rm.atr_multiplier_tp = cfg.risk.atr_multiplier_tp
-                    rm.trailing_activation_pct = cfg.risk.trailing_activation_pct
-                    rm.trailing_step_pct = cfg.risk.trailing_step_pct
-                    rm.breakeven_activation_pct = cfg.risk.breakeven_activation_pct
-                    rm.kelly_fraction = cfg.risk.kelly_fraction
-                    rm.global_cooldown_seconds_on_loss = cfg.risk.global_cooldown_seconds_on_loss
-
-            if any(k.startswith("trading.") for k in changed):
-                primary.scan_interval = cfg.trading.scan_interval_seconds
-                if getattr(primary, "executor", None):
-                    primary.executor.max_trades_per_hour = max(
-                        0, int(cfg.trading.max_trades_per_hour or 0)
-                    )
+            for eng in engines:
+                cfg = eng.config
+                for section_key, section_values in normalized_updates.items():
+                    section_obj = getattr(cfg, section_key, None)
+                    if not section_obj:
+                        continue
+                    for key, value in section_values.items():
+                        if hasattr(section_obj, key):
+                            setattr(section_obj, key, value)
+                            changed.add(f"{section_key}.{key}")
+                _apply_live_subsystem_updates(eng, changed)
 
             # Persist to config.yaml
             if yaml_updates:
@@ -2697,15 +2726,19 @@ class DashboardServer:
 
             # Audit log
             if changed:
-                try:
-                    await primary.db.log_thought(
-                        "system",
-                        f"Settings updated via dashboard: {', '.join(changed)}",
-                        severity="info",
-                        tenant_id=getattr(primary, "tenant_id", "default"),
-                    )
-                except Exception:
-                    pass
+                for eng in engines:
+                    db = getattr(eng, "db", None)
+                    if not db:
+                        continue
+                    try:
+                        await db.log_thought(
+                            "system",
+                            f"Settings updated via dashboard: {', '.join(sorted(changed))}",
+                            severity="info",
+                            tenant_id=getattr(eng, "tenant_id", "default"),
+                        )
+                    except Exception:
+                        continue
 
             return _read_all_settings(primary)
 

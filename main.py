@@ -189,7 +189,12 @@ async def run_bot():
         for spec in specs:
             ex = (spec.get("exchange") or default_exchange or "kraken").strip().lower()
             acc = (spec.get("account_id") or "default").strip().lower()
-            rel = resolve_db_path(base_db_path, ex, multi=multi_mode, account_id=acc)
+            rel = resolve_db_path(
+                base_db_path,
+                ex,
+                multi=multi_mode,
+                account_id=(acc if multi_mode else ""),
+            )
             abs_path = str(Path(rel).resolve())
             targets.append(
                 {

@@ -16,7 +16,7 @@ from typing import List
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.core.config import load_config_with_overrides
-from src.core.multi_engine import resolve_exchange_names
+from src.core.multi_engine import resolve_exchange_names, resolve_trading_accounts
 
 
 def _truthy(v: str) -> bool:
@@ -25,6 +25,17 @@ def _truthy(v: str) -> bool:
 
 def _env(name: str) -> str:
     return (os.getenv(name) or "").strip()
+
+
+def _env_for_account(account_id: str, name: str, default: str = "") -> str:
+    account = (account_id or "").strip().lower()
+    if account and account != "default":
+        prefix = "".join(ch if ch.isalnum() else "_" for ch in account.upper())
+        scoped_name = f"{prefix}_{name}"
+        scoped_val = (os.getenv(scoped_name) or "").strip()
+        if scoped_val:
+            return scoped_val
+    return (os.getenv(name) or default).strip()
 
 
 def run_preflight(require_live: bool = True, strict: bool = False) -> int:
@@ -42,22 +53,39 @@ def run_preflight(require_live: bool = True, strict: bool = False) -> int:
     if mode == "live" and _truthy(_env("START_PAUSED")):
         warnings.append("`START_PAUSED=true` is set; bot will require manual resume after startup.")
 
-    # Exchange credentials (supports multi-exchange via TRADING_EXCHANGES).
+    # Exchange credentials (supports multi-exchange and multi-account routing).
     exchange_names = resolve_exchange_names(cfg.exchange.name) or [(cfg.exchange.name or "").strip().lower()]
+    account_specs = resolve_trading_accounts(
+        cfg.exchange.name,
+        getattr(cfg.app, "trading_accounts", "").strip(),
+    )
+    if not account_specs:
+        account_specs = [{"account_id": "default", "exchange": (cfg.exchange.name or "kraken").strip().lower()}]
     if mode == "live":
-        for ex in exchange_names:
+        for spec in account_specs:
+            account_id = str(spec.get("account_id") or "default").strip().lower()
+            ex = str(spec.get("exchange") or cfg.exchange.name or "kraken").strip().lower()
+            scope_label = f"{account_id}:{ex}"
             if ex == "kraken":
-                if not _env("KRAKEN_API_KEY"):
-                    errors.append("Missing `KRAKEN_API_KEY` for Kraken live mode.")
-                if not _env("KRAKEN_API_SECRET"):
-                    errors.append("Missing `KRAKEN_API_SECRET` for Kraken live mode.")
+                if not _env_for_account(account_id, "KRAKEN_API_KEY"):
+                    errors.append(f"Missing `KRAKEN_API_KEY` for Kraken live mode ({scope_label}).")
+                if not _env_for_account(account_id, "KRAKEN_API_SECRET"):
+                    errors.append(f"Missing `KRAKEN_API_SECRET` for Kraken live mode ({scope_label}).")
             elif ex == "coinbase":
-                has_key_name = bool(_env("COINBASE_KEY_NAME") or (_env("COINBASE_ORG_ID") and _env("COINBASE_KEY_ID")))
-                has_key_file = bool(_env("COINBASE_PRIVATE_KEY_PATH"))
-                if not has_key_name or not has_key_file:
-                    errors.append("Coinbase live mode requires key identity + `COINBASE_PRIVATE_KEY_PATH`.")
+                key_name = _env_for_account(account_id, "COINBASE_KEY_NAME")
+                org_id = _env_for_account(account_id, "COINBASE_ORG_ID")
+                key_id = _env_for_account(account_id, "COINBASE_KEY_ID")
+                private_key_inline = _env_for_account(account_id, "COINBASE_PRIVATE_KEY")
+                private_key_path = _env_for_account(account_id, "COINBASE_PRIVATE_KEY_PATH")
+                has_key_name = bool(key_name or (org_id and key_id))
+                has_private_key = bool(private_key_inline or private_key_path)
+                if not has_key_name or not has_private_key:
+                    errors.append(
+                        "Coinbase live mode requires key identity + private key material "
+                        f"(`COINBASE_PRIVATE_KEY` or `COINBASE_PRIVATE_KEY_PATH`) for {scope_label}."
+                    )
             else:
-                errors.append(f"Unsupported exchange `{ex}` in trading exchange list.")
+                errors.append(f"Unsupported exchange `{ex}` in trading account list ({scope_label}).")
 
     # Dashboard/auth hardening for unattended remote control
     if mode == "live":
@@ -154,7 +182,7 @@ def run_preflight(require_live: bool = True, strict: bool = False) -> int:
 
     print("NovaPulse Live Preflight")
     print(
-        f"mode={cfg.app.mode} exchanges={','.join(exchange_names)} "
+        f"mode={cfg.app.mode} exchanges={','.join(exchange_names)} accounts={len(account_specs)} "
         f"canary={cfg.trading.canary_mode} stocks={cfg.stocks.enabled}"
     )
     if errors:
