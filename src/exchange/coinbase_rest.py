@@ -234,12 +234,18 @@ class CoinbaseRESTClient:
         since: Optional[int] = None,
     ) -> List[List[Any]]:
         product_id = self._pair_to_product_id(pair)
+        interval = max(1, int(interval or 1))
+        # Coinbase candles endpoint rejects oversized windows; cap request span.
+        max_candles = max(1, min(int(limit or 350), 350))
         granularity = self._interval_to_granularity(interval)
         end_ts = int(time.time())
         if since is not None:
             start_ts = int(since)
         else:
-            start_ts = end_ts - int(interval * 60 * max(1, limit))
+            start_ts = end_ts - int(interval * 60 * max_candles)
+        max_window_seconds = int(interval * 60 * max_candles)
+        if (end_ts - start_ts) > max_window_seconds:
+            start_ts = end_ts - max_window_seconds
         path = f"/api/v3/brokerage/products/{product_id}/candles"
         params = {
             "start": str(start_ts),
