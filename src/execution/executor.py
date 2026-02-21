@@ -28,7 +28,7 @@ from src.core.database import DatabaseManager
 from src.core.logger import get_logger
 from src.ml.continuous_learner import ContinuousLearner
 from src.exchange.market_data import MarketDataCache
-from src.execution.risk_manager import RiskManager, StopLossState
+from src.execution.risk_manager import RiskManager
 from src.strategies.base import SignalDirection
 from src.utils.indicators import order_book_imbalance
 
@@ -66,7 +66,7 @@ class TradeExecutor:
         limit_chase_delay_seconds: float = 2.0,
         limit_fallback_to_market: bool = True,
         es_client: Optional[Any] = None,
-        strategy_result_cb: Optional[Callable[[str, float], None]] = None,
+        strategy_result_cb: Optional[Callable[[str, float, str, str], None]] = None,
         max_trades_per_hour: int = 0,
     ):
         self.rest_client = rest_client
@@ -108,6 +108,11 @@ class TradeExecutor:
             "total_slippage": 0.0,
             "total_fees": 0.0,
         }
+        # Small TTL cache to avoid hitting SQLite for every candidate signal
+        # when max_trades_per_hour is enabled.
+        self._recent_trades_cache_value: int = 0
+        self._recent_trades_cache_at: float = 0.0
+        self._recent_trades_cache_ttl_seconds: float = 5.0
 
         # Smart Exit config — loaded lazily from config on first use
         self._smart_exit_enabled: Optional[bool] = None
@@ -254,9 +259,7 @@ class TradeExecutor:
         # Trade-rate throttle: cap new entries in a rolling 1-hour window.
         if self.max_trades_per_hour > 0:
             cutoff = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
-            recent_trades = await self.db.count_trades_since(
-                cutoff, tenant_id=self.tenant_id
-            )
+            recent_trades = await self._get_recent_trades_count(cutoff)
             if recent_trades >= self.max_trades_per_hour:
                 await self.db.log_thought(
                     "risk",
@@ -594,6 +597,16 @@ class TradeExecutor:
 
         return trade_id
 
+    async def _get_recent_trades_count(self, cutoff: str) -> int:
+        """Fetch recent trade count with a short in-memory cache."""
+        now = time.time()
+        if (now - self._recent_trades_cache_at) <= self._recent_trades_cache_ttl_seconds:
+            return int(self._recent_trades_cache_value)
+        value = int(await self.db.count_trades_since(cutoff, tenant_id=self.tenant_id))
+        self._recent_trades_cache_value = value
+        self._recent_trades_cache_at = now
+        return value
+
     async def manage_open_positions(self) -> None:
         """
         Update all open positions: check stops, trailing logic.
@@ -699,16 +712,19 @@ class TradeExecutor:
         if state.current_sl > 0:
             # Prepare metadata update with stop loss state
             meta = {}
+            had_stop_loss_state = False
             if trade.get("metadata"):
                 try:
                     meta = json.loads(trade["metadata"]) if isinstance(trade["metadata"], str) else trade["metadata"]
+                    had_stop_loss_state = isinstance(meta.get("stop_loss_state"), dict)
                 except Exception:
                     pass
             
             meta["stop_loss_state"] = state.to_dict()
             
             # Only update if SL changed or we just need to persist state
-            if state.current_sl != trade.get("stop_loss", 0) or "stop_loss_state" not in meta:
+            prior_sl = float(trade.get("stop_loss", 0) or 0)
+            if abs(float(state.current_sl) - prior_sl) > 1e-10 or not had_stop_loss_state:
                 await self.db.update_trade(trade_id, {
                     "stop_loss": state.current_sl,
                     "trailing_stop": state.current_sl if state.trailing_activated else None,

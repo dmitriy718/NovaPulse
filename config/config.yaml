@@ -38,32 +38,32 @@ trading:
     - "DOT/USD"
     - "AVAX/USD"
     - "LINK/USD"
-  scan_interval_seconds: 30   # More frequent scans = more chances to catch setups
+  scan_interval_seconds: 20   # Faster scan cadence to increase entry opportunities
   position_check_interval_seconds: 2
   hft_scan_interval_seconds: 1
   candle_poll_seconds: 60     # REST candle poll interval (used for Coinbase)
   warmup_bars: 900     # 15 hours of 1-min data — ensures 60 fifteen-min candles for MTF
   warmup_timeframe: "1m"
   timeframes: [1, 5, 15]   # Multi-timeframe: run strategies on all 3, require 2/3 agreement
-  max_concurrent_positions: 5
-  cooldown_seconds: 120
-  max_spread_pct: 0.0015
+  max_concurrent_positions: 8
+  cooldown_seconds: 30
+  max_spread_pct: 0.0030
   use_closed_candles_only: true
   strategy_cooldowns_seconds:
-    keltner: 300
-    mean_reversion: 300
-    ichimoku: 300
-    order_flow: 300
-    trend: 300
-    stochastic_divergence: 300
-    volatility_squeeze: 300
-    supertrend: 300
-    reversal: 300
+    keltner: 120
+    mean_reversion: 120
+    ichimoku: 120
+    order_flow: 120
+    trend: 120
+    stochastic_divergence: 120
+    volatility_squeeze: 120
+    supertrend: 120
+    reversal: 120
   event_price_move_pct: 0.003
   single_strategy_mode: null    # or "keltner", "trend", "mean_reversion", etc. for testing
-  quiet_hours_utc: [2, 3, 4, 5]  # Skip new entries during low-liquidity UTC hours (empty list = disabled)
-  max_trades_per_hour: 8
-  canary_mode: true
+  quiet_hours_utc: []  # Disabled to allow 24/7 crypto entries
+  max_trades_per_hour: 20
+  canary_mode: false
   canary_pairs: ["BTC/USD", "ETH/USD"]  # Optional explicit subset; empty = first N from trading.pairs
   canary_max_pairs: 2
   canary_max_position_usd: 100.0
@@ -160,7 +160,7 @@ strategies:
 
 ai:
   confluence_threshold: 2  # 2 strategies agreeing = tradable (3 was too strict, rejected most setups)
-  min_confidence: 0.60     # Lowered from 0.68 — AI blending + opposition penalty was killing valid trades
+  min_confidence: 0.55     # More permissive to restore trade flow in paper/live scan loops
   min_risk_reward_ratio: 1.2  # Lowered from 1.5 — crypto setups often have 1.2-1.3 R:R
   tflite_model_path: "models/trade_predictor.tflite"
   order_book_depth: 25
@@ -171,9 +171,9 @@ ai:
   primary_timeframe: 5                # 5-min as primary — better signal quality than 1-min
   obi_counts_as_confluence: true  # OBI as confluence vote — adds 1 extra vote when book agrees (OBI+1 strat = 2 = tradable)
   obi_weight: 0.4
-  allow_keltner_solo: false
+  allow_keltner_solo: true
   allow_any_solo: false
-  keltner_solo_min_confidence: 0.62
+  keltner_solo_min_confidence: 0.55
   solo_min_confidence: 0.67
   whale_threshold_usd: 50000
   strategy_guardrails_enabled: true
@@ -241,7 +241,7 @@ risk:
   kelly_fraction: 0.25            # Quarter-Kelly for safety
   max_kelly_size: 0.10            # Never more than 10% of bankroll
   risk_of_ruin_threshold: 0.01    # 1% acceptable risk of ruin
-  global_cooldown_seconds_on_loss: 180  # 3 min cooldown after loss (was 10 min — freezing bot too long)
+  global_cooldown_seconds_on_loss: 60  # Reduce post-loss freeze to keep trade cadence healthy
   smart_exit:
     enabled: false   # Off by default — enable after testing
     tiers:
@@ -261,6 +261,9 @@ webhooks:
 stocks:
   enabled: false
   symbols: ["AAPL", "MSFT", "NVDA", "TSLA"]
+  options_enabled: false
+  option_symbols: []   # Example: ["O:AAPL260116C00250000"]
+  option_contract_multiplier: 100
   scan_interval_seconds: 900
   lookback_bars: 120
   min_hold_days: 1
@@ -305,7 +308,9 @@ billing:
     enabled: false
     secret_key: ""       # sk_test_... or sk_live_... (or STRIPE_SECRET_KEY env)
     webhook_secret: ""   # whsec_... (or STRIPE_WEBHOOK_SECRET env)
-    price_id: ""         # Stripe Price ID for monthly plan (price_...)
+    price_id: ""         # Legacy/default Stripe Price ID (maps to pro when price_id_pro empty)
+    price_id_pro: ""     # Stripe Price ID for Pro monthly plan (e.g. 49.99)
+    price_id_premium: "" # Stripe Price ID for Premium monthly plan (e.g. 79.99)
     currency: usd
   tenant:
     default_tenant_id: default

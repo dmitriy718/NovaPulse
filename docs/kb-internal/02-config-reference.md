@@ -54,10 +54,10 @@ Billing:
 See `.env.example` for the full set.
 
 Important:
-- `DASHBOARD_SECRET_KEY`: admin key for control endpoints (required in live mode).
+- `DASHBOARD_ADMIN_KEY`: admin key for control endpoints (required in live mode).
 - `DB_PATH`: database path override.
 - `ACTIVE_EXCHANGE` or `TRADING_EXCHANGES`: single or multi-exchange mode.
+- Billing plans: `STRIPE_WEBHOOK_SECRET` plus paid plan ids (`STRIPE_PRICE_ID_PRO`, `STRIPE_PRICE_ID_PREMIUM`; `STRIPE_PRICE_ID` legacy fallback).
 
 Known constraint:
 - Python 3.13 is currently blocked; use Python 3.11 or 3.12.
-

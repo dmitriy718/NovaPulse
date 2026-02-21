@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+from urllib.parse import quote
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List
 
@@ -8,6 +10,7 @@ import httpx
 from src.core.logger import get_logger
 
 logger = get_logger("polygon_client")
+_OPTION_SYMBOL_RE = re.compile(r"^(?:O:)?[A-Z]{1,6}\d{6}[CP]\d{8}$")
 
 
 class PolygonClient:
@@ -87,8 +90,9 @@ class PolygonClient:
         now = datetime.now(timezone.utc).date()
         start = now - timedelta(days=days_back)
         end = now
+        ticker = self._polygon_ticker(symbol)
         url = (
-            f"{self.base_url}/v2/aggs/ticker/{symbol.upper()}/range/{mult}/{span}/"
+            f"{self.base_url}/v2/aggs/ticker/{ticker}/range/{mult}/{span}/"
             f"{start.isoformat()}/{end.isoformat()}"
         )
         params = {
@@ -126,3 +130,10 @@ class PolygonClient:
                 error=repr(e),
             )
             return []
+
+    @staticmethod
+    def _polygon_ticker(symbol: str) -> str:
+        raw = str(symbol or "").strip().upper()
+        if _OPTION_SYMBOL_RE.match(raw) and not raw.startswith("O:"):
+            raw = f"O:{raw}"
+        return quote(raw, safe="")

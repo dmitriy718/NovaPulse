@@ -19,8 +19,14 @@ import time
 import traceback
 from pathlib import Path
 import random
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 _INSTANCE_LOCK_FD: int | None = None
+try:
+    _US_EASTERN = ZoneInfo("America/New_York")
+except Exception:
+    _US_EASTERN = timezone.utc
 
 
 def _telegram_runtime_enabled(bot: object | None) -> bool:
@@ -125,6 +131,16 @@ def _acquire_instance_lock() -> bool:
 def _running_in_docker() -> bool:
     # Standard marker created by Docker; also allow explicit override.
     return Path("/.dockerenv").exists() or os.getenv("RUNNING_IN_DOCKER", "").strip() == "1"
+
+
+def _is_regular_equity_hours(now_utc: datetime | None = None) -> bool:
+    """True during weekday US equity regular session (09:30-16:00 ET)."""
+    now = now_utc or datetime.now(timezone.utc)
+    et = now.astimezone(_US_EASTERN)
+    if et.weekday() >= 5:
+        return False
+    minutes = et.hour * 60 + et.minute
+    return (9 * 60 + 30) <= minutes < (16 * 60)
 
 def preflight_checks() -> bool:
     """Run pre-flight system checks before startup."""
@@ -291,6 +307,54 @@ async def run_bot():
                     pass
                 await asyncio.sleep(delay)
 
+    async def _priority_schedule_loop(target_engines):
+        """
+        Priority routing:
+        - 09:30-16:00 ET weekdays: stocks/options active, crypto paused.
+        - Otherwise: crypto active, stocks/options paused.
+        """
+        has_stocks = any(str(getattr(e, "exchange_name", "")).lower() == "stocks" for e in target_engines)
+        has_crypto = any(str(getattr(e, "exchange_name", "")).lower() != "stocks" for e in target_engines)
+        if not (has_stocks and has_crypto):
+            while any(getattr(e, "_running", False) for e in target_engines):
+                for eng in target_engines:
+                    setattr(eng, "_priority_paused", False)
+                    setattr(eng, "_priority_pause_reason", "")
+                await asyncio.sleep(120)
+            return
+
+        while any(getattr(e, "_running", False) for e in target_engines):
+            try:
+                equities_open = _is_regular_equity_hours()
+                phase_label = "equities_day_session" if equities_open else "crypto_after_hours"
+                for eng in target_engines:
+                    exchange = str(getattr(eng, "exchange_name", "unknown")).lower()
+                    should_pause = equities_open if exchange != "stocks" else (not equities_open)
+                    currently_paused = bool(getattr(eng, "_priority_paused", False))
+                    if currently_paused == should_pause:
+                        continue
+
+                    eng._priority_paused = should_pause
+                    eng._priority_pause_reason = phase_label if should_pause else ""
+                    db = getattr(eng, "db", None)
+                    if db:
+                        await db.log_thought(
+                            "system",
+                            (
+                                f"Priority schedule {'PAUSED' if should_pause else 'RESUMED'} "
+                                f"{exchange} engine | phase={phase_label} "
+                                f"| window={'09:30-16:00 ET' if equities_open else 'after-hours'}"
+                            ),
+                            severity="info",
+                            tenant_id=getattr(eng, "tenant_id", "default"),
+                        )
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning("Priority schedule loop error", error=repr(e))
+                await asyncio.sleep(10)
+
     if not multi:
         spec = account_specs[0]
         account_id = (spec.get("account_id") or "default").strip().lower()
@@ -379,6 +443,16 @@ async def run_bot():
             asyncio.create_task(_run_with_restart(engine, "cleanup_loop", engine._cleanup_loop)),
             asyncio.create_task(_run_with_restart(engine, "auto_retrainer", engine.retrainer.run)),
         ]
+        priority_targets = [engine] + ([stock_engine] if stock_engine else [])
+        engine._tasks.append(
+            asyncio.create_task(
+                _run_with_restart(
+                    engine,
+                    "priority_schedule",
+                    lambda: _priority_schedule_loop(priority_targets),
+                )
+            )
+        )
         if getattr(engine, "auto_tuner", None):
             engine._tasks.append(
                 asyncio.create_task(_run_with_restart(engine, "auto_tuner", engine.auto_tuner.run))
@@ -603,6 +677,17 @@ async def run_bot():
         if getattr(eng, "slack_bot", None):
             eng._tasks.append(
                 asyncio.create_task(_run_with_restart(eng, f"{label}:slack_bot", eng.slack_bot.start))
+            )
+        if i == 0:
+            priority_targets = list(engines) + ([stock_engine] if stock_engine else [])
+            eng._tasks.append(
+                asyncio.create_task(
+                    _run_with_restart(
+                        eng,
+                        "priority_schedule",
+                        lambda: _priority_schedule_loop(priority_targets),
+                    )
+                )
             )
         all_tasks.extend(eng._tasks)
 

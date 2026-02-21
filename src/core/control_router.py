@@ -107,7 +107,10 @@ class ControlRouter:
             "status": "running" if self._engine._running else "stopped",
             "exchange": getattr(self._engine, "exchange_name", "unknown"),
             "mode": getattr(self._engine, "mode", "unknown"),
-            "paused": getattr(self._engine, "_trading_paused", False),
+            "paused": bool(
+                getattr(self._engine, "_trading_paused", False)
+                or getattr(self._engine, "_priority_paused", False)
+            ),
             "uptime_seconds": (
                 time.time() - self._engine._start_time
                 if getattr(self._engine, "_start_time", None)

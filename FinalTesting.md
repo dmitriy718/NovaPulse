@@ -197,3 +197,166 @@ Primary blockers to “heavy live traffic production ready”:
 
 - Docker and a structured docs set exist (`docs/kb-*`), including runbooks and security notes. That’s a strong foundation.
 - For real production deployments, add a “secure default” compose stack: reverse proxy auth, TLS, log rotation, and resource limits.
+
+---
+
+## END OF PRIOR RESULTS (up to 2026-02-14)
+## BEGIN NEW FINAL COMPREHENSIVE REVIEW (2026-02-21)
+
+### Scope And Method
+- Full local codebase pass focused on end-to-end lifecycle correctness, interconnectivity, performance hot paths, and error-handling resilience.
+- Verification stack executed locally on 2026-02-21.
+
+### Validation Matrix (New Run)
+- `./venv/bin/python -m pytest -q` -> **126 passed in 4.60s**.
+- `./venv/bin/python scripts/walk_forward_gate.py` -> **PASS** (OOS gate passed).
+- `./venv/bin/python -m ruff check src/api/server.py src/execution/executor.py src/stocks/swing_engine.py tests/test_executor_runtime_guards.py tests/test_ws_update_resilience.py` -> **All checks passed**.
+- `./venv/bin/python -m mypy src tests` -> **fails with 291 errors in 37 files** (typed-safety debt remains high).
+
+### Deep Lifecycle Review (What Was Verified)
+- Signal -> risk -> execution -> persistence path reviewed in `src/execution/executor.py:208`, `src/execution/executor.py:631`, `src/core/database.py` trade/close paths.
+- Dashboard realtime aggregation and engine interconnectivity reviewed in `src/api/server.py:3254` and related auth/tenant helpers.
+- Stocks scan/open/close/reconcile flow reviewed in `src/stocks/swing_engine.py:497` and related broker reconciliation paths.
+- Runtime error pathways were fault-injected (failing engine snapshots, partial component failures) to verify degradation behavior instead of hard failure.
+
+### Optimizations And Refactors Applied In This Pass
+1. **Trade-rate throttle DB query caching**
+- Added short TTL cache in executor to avoid repeated SQLite `count_trades_since` on every candidate signal.
+- Files: `src/execution/executor.py:262`, `src/execution/executor.py:600`.
+- Impact: lower DB contention/latency in high-signal scan cycles.
+
+2. **Stop-loss state persistence correctness fix**
+- Fixed metadata persistence condition so `stop_loss_state` is written even when stop price is unchanged.
+- Files: `src/execution/executor.py:715`, `src/execution/executor.py:727`.
+- Impact: improved restart fidelity for trailing/breakeven state.
+
+3. **WebSocket update path refactor for performance + resilience**
+- Added per-engine snapshot collector and concurrent collection via `asyncio.gather`.
+- Added fallback behavior when shared DB thought fetch fails.
+- Files: `src/api/server.py:3160`, `src/api/server.py:3254`, `src/api/server.py:3291`.
+- Synthetic benchmark (3 engines, 50ms IO per query class): update build remained ~201ms and continued returning `type=update` even with one engine failing.
+
+4. **Stocks scanner fetch parallelization**
+- Refactored daily-bar fetch from per-symbol serial calls to bounded-concurrency batch fetch.
+- Files: `src/stocks/swing_engine.py:497`, `src/stocks/swing_engine.py:536`.
+- Synthetic benchmark (6 symbols, 50ms each): ~50ms batched vs ~300ms serial-equivalent expectation.
+
+5. **Lint hygiene in touched server paths**
+- Removed unused imports and ambiguous variable names in chart aggregation path.
+- File: `src/api/server.py` (touched sections around aggregation/rest chart parsing).
+
+### New Regression Tests Added
+- `tests/test_executor_runtime_guards.py`
+  - Verifies stop-loss metadata persistence when SL is unchanged.
+  - Verifies recent-trade count cache behavior.
+- `tests/test_ws_update_resilience.py`
+  - Verifies websocket updates continue when one engine snapshot fails.
+  - Verifies snapshot collection is parallelized.
+
+### Findings (Current Remaining Risks)
+
+#### High
+1. **Static type safety gate is currently not enforceable**
+- Evidence: `mypy` reports 291 errors across core runtime files.
+- Impact: higher risk of latent regressions during ongoing rapid iteration.
+- Recommendation: staged typing hardening plan (start with `src/api/server.py`, `src/execution/*`, `src/stocks/*`, `src/core/config.py`) and move to CI warning-to-fail rollout.
+
+#### Medium
+1. **1Password vault topology mismatch vs expected operational model**
+- Service-account-visible vaults currently show only `dev` (not separate `dev trading`, `dashboard`, `billing`, `data` vaults).
+- Impact: weaker separation-of-duties and harder least-privilege permissioning.
+- Recommendation: split or alias vault structure by domain (trading/dashboard/billing/data) and assign scoped service-account access.
+
+2. **Billing critical inputs still appear incomplete for production webhooks**
+- Present in vault inventory: `STRIPE_SECRET_KEY`, `STRIPE_PUBLISHABLE_KEY`, `STRIPE_RESTRICTED_KEY`.
+- Not observed in current vault field inventory: `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_ID`.
+- Impact: subscription checkout and webhook verification flows may be partially configured.
+
+3. **Webhook signing secret coverage should be explicitly confirmed**
+- Signal webhook path exists (`SIGNAL_WEBHOOK_SECRET`) but corresponding secret was not visible in current vault inventory snapshot.
+- Impact: webhook endpoints risk disabled/weak auth if left empty.
+
+### 1Password Secret Inventory (Sanitized, names/fields only)
+- Vault visible to service account: `dev`.
+- Item `trading`: `ALPACA_ENDPOINT`, `ALPACA_KEY`, `ALPACA_SECRET_KEY`, `COINBASE_KEY_ID`, `COINBASE_KEY_NAME`, `COINBASE_ORG_ID`, `COINBASE_PRIVATE_KEY`, `KRAKEN_API_KEY`, `KRAKEN_API_SECRET`, `POLYGON_API_KEY`, `POLYGON_NAME`.
+- Item `dashboard`: `DASHBOARD_ADMIN_KEY`, `DASHBOARD_ADMIN_PASSWORD`, `DASHBOARD_ADMIN_PASSWORD_HASH`, `DASHBOARD_ADMIN_USERNAME`, `DASHBOARD_READ_KEY`, `DASHBOARD_SESSION_SECRET`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`.
+- Item `billing`: `STRIPE_PUBLISHABLE_KEY`, `STRIPE_RESTRICTED_KEY`, `STRIPE_SECRET_KEY`.
+- Item `data`: `CRYPTOPANIC_API_KEY`, `ES_API_KEY`.
+
+### HumanDeliverables (What You Still Need To Acquire/Finalize)
+1. `STRIPE_WEBHOOK_SECRET` and `STRIPE_PRICE_ID` for production billing flow completion.
+2. Explicit decision and implementation of 1Password vault split/access model (separate domain vaults vs single `dev` vault with strict item ACL).
+3. `SIGNAL_WEBHOOK_SECRET` value (if external signal ingestion is intended live).
+4. Optional but recommended data-quality key: `COINGECKO_API_KEY` for richer ES enrichment coverage.
+5. Final production ops decision on type-check policy (`mypy` debt burn-down timeline) before paid traffic scale-up.
+
+### Honest Readiness Assessment
+- **For controlled pilot traffic:** **Yes**, with guardrails. Core runtime and tests are stable locally, and this pass improved hot-path performance/resilience.
+- **For aggressive paid acquisition at scale:** **Not fully yet**. Main blockers are typed-safety debt and a few production-config/procurement gaps (billing webhook/price IDs, secret governance structure).
+- **Readiness score (pragmatic):** **7.5 / 10** for pilot, **5.5 / 10** for scale.
+
+---
+
+## CONTINUATION PASS (2026-02-21, release-prep follow-up)
+
+### What Was Completed In This Follow-Up
+1. **Signal webhook release guardrails tightened**
+- `scripts/live_preflight.py` now fails when `webhooks.enabled=true` and `SIGNAL_WEBHOOK_SECRET` is missing.
+- Added warning when signal webhooks are enabled without `allowed_sources`.
+- Added regression test coverage in `tests/test_live_preflight.py`.
+
+2. **Billing + enrichment env/config gaps closed**
+- Added `STRIPE_WEBHOOK_SECRET`, `COINGECKO_API_KEY`, and `CRYPTOPANIC_API_KEY` to `.env.example`.
+- Added Stripe env override mapping in `src/core/config.py`:
+  - `BILLING_STRIPE_ENABLED`
+  - `STRIPE_SECRET_KEY`
+  - `STRIPE_WEBHOOK_SECRET`
+  - `STRIPE_PRICE_ID`
+  - `STRIPE_CURRENCY`
+- Added regression test: `tests/test_billing_env_overrides.py`.
+
+3. **Stocks scanner resilience fix**
+- Fixed `asyncio.gather(..., return_exceptions=True)` handling in `src/stocks/swing_engine.py` to handle `BaseException` safely in parallel fetch path.
+
+4. **Runtime typing contract cleanup**
+- Updated `src/execution/executor.py` callback type annotation to match actual callback usage (`strategy`, `pnl`, `trend_regime`, `vol_regime`).
+
+5. **Docs synchronized for release**
+- Updated endpoint wiring + release checklist docs:
+  - `docs/BILLING.md`
+  - `docs/kb-internal/06-billing-tenancy.md`
+  - `docs/kb-internal/09-testing-ci.md`
+  - `docs/kb-internal/10-release-checklist.md`
+  - `docs/kb-merged/09-billing-tenancy-security.md`
+  - `docs/kb-merged/10-troubleshooting-operations-release.md`
+  - `README.md`
+  - `LiveRunbook.md`
+
+6. **Billing plan tiers upgraded (free/pro/premium)**
+- Added multi-plan Stripe price support:
+  - `STRIPE_PRICE_ID_PRO`
+  - `STRIPE_PRICE_ID_PREMIUM`
+  - `STRIPE_PRICE_ID` retained as legacy fallback to pro.
+- `POST /api/v1/billing/checkout` now accepts `plan` = `free|pro|premium`.
+- `free` plan path now provisions tenant as `trialing` without Stripe checkout.
+- Added regression coverage:
+  - `tests/test_stripe_service_plans.py`
+  - `tests/test_billing_checkout_plans.py`
+
+### Fresh Validation Results (2026-02-21)
+- `./venv/bin/python -m pytest -q` -> **136 passed**
+- `./venv/bin/python scripts/walk_forward_gate.py` -> **PASS**
+- `./venv/bin/python -m ruff check src/api/server.py src/execution/executor.py src/stocks/swing_engine.py scripts/live_preflight.py tests/test_live_preflight.py tests/test_executor_runtime_guards.py tests/test_ws_update_resilience.py tests/test_billing_env_overrides.py` -> **All checks passed**
+- `./venv/bin/python -m mypy src tests` -> **289 errors in 37 files** (informational quality signal; still not release-blocking)
+
+### Final Non-Stripe Remaining Human Inputs
+1. 1Password topology decision: **resolved** as `single vault + strict item ACLs` for launch.
+2. If signal webhooks will be used live, provide `SIGNAL_WEBHOOK_SECRET` value in runtime secrets.
+3. Optional quality uplift: provide `COINGECKO_API_KEY` for richer enrichment coverage.
+
+### Vault Decision Record (2026-02-21)
+- Launch decision: keep a single vault model for speed.
+- Mandatory control: enforce least-privilege item-level ACLs per service account.
+- Runtime account should be read-only and restricted to required items only (trading/dashboard/billing/data keys used by NovaPulse runtime).
+- `STRIPE_WEBHOOK_ENDPOINT` may be stored for operator reference, but runtime code currently consumes `STRIPE_SECRET_KEY`, `STRIPE_PRICE_ID`, and `STRIPE_WEBHOOK_SECRET`.
+- Post-launch hardening target: migrate to split domain vaults (`trading`, `dashboard`, `billing`, `data`) after release window.

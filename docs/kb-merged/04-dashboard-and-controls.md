@@ -72,7 +72,7 @@ Auth header:
 
 Valid keys:
 
-1. Admin key: `DASHBOARD_SECRET_KEY`
+1. Admin key: `DASHBOARD_ADMIN_KEY`
 1. Tenant API keys: keys mapped to a tenant id (tenant-pinned)
 
 Tenant-safe behavior:

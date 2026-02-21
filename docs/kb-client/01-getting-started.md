@@ -27,5 +27,4 @@
 - Live mode places real orders on the exchange.
 
 Live mode requirements:
-- You must set `DASHBOARD_SECRET_KEY` before starting in live mode.
-
+- You must set `DASHBOARD_ADMIN_KEY` before starting in live mode.

@@ -119,6 +119,17 @@ def _apply_env_overrides(config: Dict[str, Any]) -> None:
         "STOCKS_MAX_HOLD_DAYS": ("stocks", "max_hold_days", int),
         "STOCKS_MAX_OPEN_POSITIONS": ("stocks", "max_open_positions", int),
         "STOCKS_MAX_POSITION_USD": ("stocks", "max_position_usd", float),
+        "STOCKS_OPTIONS_ENABLED": (
+            "stocks",
+            "options_enabled",
+            lambda v: v.lower() in ("1", "true", "yes", "on"),
+        ),
+        "STOCKS_OPTION_SYMBOLS": (
+            "stocks",
+            "option_symbols",
+            lambda v: [s.strip().upper() for s in v.split(",") if s.strip()],
+        ),
+        "STOCKS_OPTION_CONTRACT_MULTIPLIER": ("stocks", "option_contract_multiplier", int),
         "STOCKS_STOP_LOSS_PCT": ("stocks", "stop_loss_pct", float),
         "STOCKS_TAKE_PROFIT_PCT": ("stocks", "take_profit_pct", float),
         "STOCKS_ESTIMATED_FEE_PCT_PER_SIDE": ("stocks", "estimated_fee_pct_per_side", float),
@@ -199,6 +210,16 @@ def _apply_env_overrides(config: Dict[str, Any]) -> None:
             "max_timestamp_skew_seconds",
             int,
         ),
+        "BILLING_STRIPE_ENABLED": (
+            ("billing", "stripe", "enabled"),
+            lambda v: v.lower() in ("1", "true", "yes", "on"),
+        ),
+        "STRIPE_SECRET_KEY": (("billing", "stripe", "secret_key"), str),
+        "STRIPE_WEBHOOK_SECRET": (("billing", "stripe", "webhook_secret"), str),
+        "STRIPE_PRICE_ID": (("billing", "stripe", "price_id"), str),
+        "STRIPE_PRICE_ID_PRO": (("billing", "stripe", "price_id_pro"), str),
+        "STRIPE_PRICE_ID_PREMIUM": (("billing", "stripe", "price_id_premium"), str),
+        "STRIPE_CURRENCY": (("billing", "stripe", "currency"), str),
     }
 
     for env_key, mapping in env_mappings.items():
@@ -602,6 +623,9 @@ class MonitoringConfig(BaseModel):
 class StocksConfig(BaseModel):
     enabled: bool = False
     symbols: List[str] = Field(default_factory=lambda: ["AAPL", "MSFT", "NVDA", "TSLA"])
+    options_enabled: bool = False
+    option_symbols: List[str] = Field(default_factory=list)
+    option_contract_multiplier: int = 100
     scan_interval_seconds: int = 900
     lookback_bars: int = 120
     min_hold_days: int = 1
@@ -654,6 +678,13 @@ class StocksConfig(BaseModel):
     def validate_take_profit_pct(cls, v):
         if v <= 0 or v >= 1.0:
             raise ValueError("stocks.take_profit_pct must be > 0 and < 1.0")
+        return v
+
+    @field_validator("option_contract_multiplier")
+    @classmethod
+    def validate_option_contract_multiplier(cls, v):
+        if v < 1 or v > 1000:
+            raise ValueError("stocks.option_contract_multiplier must be between 1 and 1000")
         return v
 
     @model_validator(mode="after")
@@ -733,7 +764,9 @@ class StripeConfig(BaseModel):
     enabled: bool = False
     secret_key: str = ""  # sk_live_... or sk_test_...
     webhook_secret: str = ""  # whsec_... for signature verification
-    price_id: str = ""  # Stripe Price ID for monthly subscription (price_...)
+    price_id: str = ""  # Legacy/default Stripe Price ID (maps to pro if price_id_pro is empty)
+    price_id_pro: str = ""  # Stripe Price ID for pro plan (e.g. 49.99)
+    price_id_premium: str = ""  # Stripe Price ID for premium plan (e.g. 79.99)
     currency: str = "usd"
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 import uuid
 from datetime import datetime, timezone
@@ -27,6 +28,7 @@ _ALPACA_TERMINAL_REJECT_STATUSES = {
 }
 
 _BROKER_RECONCILE_INTERVAL_LOOPS = 4
+_OPTION_SYMBOL_RE = re.compile(r"^(?:O:)?[A-Z]{1,6}\d{6}[CP]\d{8}$")
 
 
 class _StockMarketDataView:
@@ -208,7 +210,30 @@ class StockSwingEngine:
         self.mode = self.config.app.mode
         self.exchange_name = "stocks"
         self.tenant_id = self.config.billing.tenant.default_tenant_id
-        self.pairs = [s.upper() for s in (self.config.stocks.symbols or [])]
+        self.options_enabled = bool(getattr(self.config.stocks, "options_enabled", False))
+        self.option_contract_multiplier = max(
+            1,
+            int(getattr(self.config.stocks, "option_contract_multiplier", 100) or 100),
+        )
+        stock_symbols = [
+            self._normalize_symbol(s)
+            for s in (self.config.stocks.symbols or [])
+            if str(s or "").strip()
+        ]
+        option_symbols = [
+            self._normalize_symbol(s)
+            for s in (self.config.stocks.option_symbols or [])
+            if str(s or "").strip()
+        ] if self.options_enabled else []
+        self.option_symbol_set = {s for s in option_symbols if self._is_option_symbol(s)}
+        merged = stock_symbols + option_symbols
+        seen: set[str] = set()
+        self.pairs = []
+        for sym in merged:
+            if not sym or sym in seen:
+                continue
+            seen.add(sym)
+            self.pairs.append(sym)
         self.scan_interval = max(60, int(self.config.stocks.scan_interval_seconds))
         self.min_hold_seconds = max(86400, int(self.config.stocks.min_hold_days) * 86400)
         self.max_hold_seconds = max(self.min_hold_seconds, int(self.config.stocks.max_hold_days) * 86400)
@@ -227,6 +252,8 @@ class StockSwingEngine:
 
         self._running = False
         self._trading_paused = False
+        self._priority_paused = False
+        self._priority_pause_reason = ""
         self._start_time = 0.0
         self._scan_count = 0
         self._tasks: List[asyncio.Task] = []
@@ -261,10 +288,27 @@ class StockSwingEngine:
         await self._load_historical_stats()
         await self.db.log_thought(
             "system",
-            f"Stock swing engine initialized | symbols={','.join(self.pairs)}",
+            (
+                "Stock swing engine initialized "
+                f"| symbols={','.join(self.pairs)} "
+                f"| options_enabled={self.options_enabled} "
+                f"| option_symbols={len(self.option_symbol_set)}"
+            ),
             severity="info",
             tenant_id=self.tenant_id,
         )
+
+    @staticmethod
+    def _normalize_symbol(symbol: str) -> str:
+        s = str(symbol or "").strip().upper()
+        if s.startswith("O:"):
+            s = s[2:]
+        return s
+
+    @classmethod
+    def _is_option_symbol(cls, symbol: str) -> bool:
+        s = str(symbol or "").strip().upper()
+        return bool(_OPTION_SYMBOL_RE.match(s))
 
     async def start(self) -> None:
         if self._running:
@@ -305,7 +349,7 @@ class StockSwingEngine:
         out: Dict[str, Dict[str, Any]] = {}
         for row in rows:
             try:
-                symbol = str(row.get("symbol", "")).upper().strip()
+                symbol = self._normalize_symbol(str(row.get("symbol", "")).upper().strip())
                 qty_signed = float(row.get("qty", 0.0) or 0.0)
                 qty = abs(qty_signed)
                 if not symbol or qty <= 0:
@@ -372,7 +416,7 @@ class StockSwingEngine:
         """Ensure local DB has an open row for every live broker position."""
         broker_positions = await self._normalize_broker_positions()
         open_rows = await self.db.get_open_trades(tenant_id=self.tenant_id)
-        open_by_symbol = {str(row.get("pair", "")).upper(): row for row in open_rows}
+        open_by_symbol = {self._normalize_symbol(str(row.get("pair", ""))): row for row in open_rows}
 
         reconciled = 0
         mismatched = 0
@@ -430,7 +474,7 @@ class StockSwingEngine:
     async def _scan_loop(self) -> None:
         while self._running:
             try:
-                if self._trading_paused:
+                if self._trading_paused or self._priority_paused:
                     await asyncio.sleep(self.scan_interval)
                     continue
                 self._scan_count += 1
@@ -449,12 +493,11 @@ class StockSwingEngine:
                 open_by_symbol = {str(row.get("pair", "")).upper(): row for row in open_rows}
                 pending_symbols = set(self._pending_opens.keys())
                 open_count = len(open_rows) + len(pending_symbols)
+                lookback_limit = max(60, int(self.config.stocks.lookback_bars))
+                bars_by_symbol = await self._fetch_scan_bars(self.pairs, lookback_limit)
 
                 for symbol in self.pairs:
-                    bars = await self.polygon.get_daily_bars(
-                        symbol,
-                        limit=max(60, int(self.config.stocks.lookback_bars)),
-                    )
+                    bars = bars_by_symbol.get(symbol, [])
                     if not bars:
                         continue
                     closes = np.array([float(b["close"]) for b in bars], dtype=float)
@@ -489,6 +532,32 @@ class StockSwingEngine:
             except Exception as e:
                 logger.error("Stock scan loop error", error=repr(e))
                 await asyncio.sleep(min(self.scan_interval, 60))
+
+    async def _fetch_scan_bars(
+        self,
+        symbols: List[str],
+        limit: int,
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """Fetch daily bars for scan symbols with bounded concurrency."""
+        if not symbols:
+            return {}
+        parallelism = max(1, min(6, len(symbols)))
+        sem = asyncio.Semaphore(parallelism)
+
+        async def _one(symbol: str) -> tuple[str, List[Dict[str, Any]]]:
+            async with sem:
+                bars = await self.polygon.get_daily_bars(symbol, limit=limit)
+                return symbol, bars
+
+        out: Dict[str, List[Dict[str, Any]]] = {}
+        results = await asyncio.gather(*[_one(sym) for sym in symbols], return_exceptions=True)
+        for item in results:
+            if isinstance(item, BaseException):
+                logger.warning("Stock scan bars fetch failed", error=repr(item))
+                continue
+            symbol, bars = item
+            out[symbol] = bars
+        return out
 
     def _derive_protective_levels(self, entry_price: float) -> tuple[float, float]:
         if entry_price <= 0:
@@ -567,22 +636,44 @@ class StockSwingEngine:
         return "hold"
 
     async def _open_trade(self, symbol: str, market_price: float) -> bool:
-        symbol = str(symbol or "").upper().strip()
+        symbol = self._normalize_symbol(symbol)
         if not symbol:
             return False
         if market_price <= 0:
             return False
+        is_option = self._is_option_symbol(symbol)
         size_usd = float(self.config.stocks.max_position_usd)
-        qty = round(size_usd / market_price, 6)
+        if is_option:
+            contract_value = market_price * float(self.option_contract_multiplier)
+            qty = int(size_usd / contract_value) if contract_value > 0 else 0
+            if qty <= 0:
+                await self.db.log_thought(
+                    "execution",
+                    (
+                        f"Option BUY skipped {symbol}: max_position_usd={size_usd:.2f} "
+                        f"insufficient for one contract at ~{contract_value:.2f}"
+                    ),
+                    severity="warning",
+                    tenant_id=self.tenant_id,
+                )
+                return False
+        else:
+            qty = round(size_usd / market_price, 6)
         if qty <= 0:
             return False
 
         fill_price = market_price
         filled_qty = qty
         self._execution_stats["orders_placed"] += 1
+        asset_label = "Option" if is_option else "Stock"
 
         if self.mode == "live":
-            order = await self.alpaca.submit_market_order(symbol=symbol, qty=qty, side="buy")
+            order = await self.alpaca.submit_market_order(
+                symbol=symbol,
+                qty=qty,
+                side="buy",
+                asset_class="option" if is_option else "equity",
+            )
             if not order:
                 self._execution_stats["orders_rejected"] += 1
                 return False
@@ -606,7 +697,7 @@ class StockSwingEngine:
                     self._execution_stats["orders_pending"] = len(self._pending_opens)
                     await self.db.log_thought(
                         "execution",
-                        f"Stock BUY pending fill {symbol} qty={qty:.4f} order={order_id} status={status or 'unknown'}",
+                        f"{asset_label} BUY pending fill {symbol} qty={qty:.4f} order={order_id} status={status or 'unknown'}",
                         severity="warning",
                         tenant_id=self.tenant_id,
                     )
@@ -614,7 +705,7 @@ class StockSwingEngine:
                 self._execution_stats["orders_rejected"] += 1
                 await self.db.log_thought(
                     "execution",
-                    f"Stock BUY rejected (unfilled) {symbol} qty={qty:.4f} status={status or 'unknown'}",
+                    f"{asset_label} BUY rejected (unfilled) {symbol} qty={qty:.4f} status={status or 'unknown'}",
                     severity="warning",
                     tenant_id=self.tenant_id,
                 )
@@ -647,14 +738,19 @@ class StockSwingEngine:
 
         trade_id = f"S-{uuid.uuid4().hex[:12]}"
         stop_loss, take_profit = self._derive_protective_levels(fill_price)
+        is_option = self._is_option_symbol(symbol)
+        multiplier = float(self.option_contract_multiplier if is_option else 1.0)
+        asset_label = "Option" if is_option else "Stock"
         metadata: Dict[str, Any] = {
-            "asset_class": "stock",
+            "asset_class": "option" if is_option else "stock",
             "min_hold_seconds": self.min_hold_seconds,
             "max_hold_seconds": self.max_hold_seconds,
             "mode": self.mode,
-            "size_usd": round(fill_price * filled_qty, 2),
+            "size_usd": round(fill_price * filled_qty * multiplier, 2),
             "protective_levels_source": "stocks_config_pct",
         }
+        if is_option:
+            metadata["option_contract_multiplier"] = int(self.option_contract_multiplier)
         if stop_loss > 0:
             metadata["initial_stop_loss"] = stop_loss
         if take_profit > 0:
@@ -689,7 +785,7 @@ class StockSwingEngine:
         await self.db.log_thought(
             "execution",
             (
-                f"Stock BUY {symbol} qty={filled_qty:.4f} @ {fill_price:.2f} "
+                f"{asset_label} BUY {symbol} qty={filled_qty:.4f} @ {fill_price:.2f} "
                 f"SL={stop_loss:.4f} TP={take_profit:.4f}"
             ),
             severity="info",
@@ -703,7 +799,7 @@ class StockSwingEngine:
             return
 
         open_rows = await self.db.get_open_trades(tenant_id=self.tenant_id)
-        open_symbols = {str(row.get("pair", "")).upper() for row in open_rows}
+        open_symbols = {self._normalize_symbol(str(row.get("pair", ""))) for row in open_rows}
         broker_positions = await self._normalize_broker_positions()
 
         for symbol in list(self._pending_opens.keys()):
@@ -818,6 +914,10 @@ class StockSwingEngine:
         market_price: Optional[float] = None,
     ) -> bool:
         symbol = str(trade.get("pair", "")).upper()
+        symbol = self._normalize_symbol(symbol)
+        is_option = self._is_option_symbol(symbol)
+        multiplier = float(self.option_contract_multiplier if is_option else 1.0)
+        asset_label = "Option" if is_option else "Stock"
         qty = float(trade.get("quantity", 0.0) or 0.0)
         if qty <= 0:
             return False
@@ -840,9 +940,9 @@ class StockSwingEngine:
             except Exception:
                 pass
 
-        gross_pnl = (exit_price - entry) * qty
-        entry_notional = abs(entry * qty)
-        exit_notional = abs(exit_price * qty)
+        gross_pnl = (exit_price - entry) * qty * multiplier
+        entry_notional = abs(entry * qty * multiplier)
+        exit_notional = abs(exit_price * qty * multiplier)
         fee_pct = max(0.0, float(getattr(self.config.stocks, "estimated_fee_pct_per_side", 0.0005) or 0.0))
         slippage_pct = max(
             0.0,
@@ -866,7 +966,7 @@ class StockSwingEngine:
         await self.db.log_thought(
             "execution",
             (
-                f"Stock CLOSE {symbol} qty={qty:.4f} @ {exit_price:.2f} reason={reason} "
+                f"{asset_label} CLOSE {symbol} qty={qty:.4f} @ {exit_price:.2f} reason={reason} "
                 f"gross={gross_pnl:.2f} fees={fees:.2f} slippage={slippage:.2f} net={pnl:.2f}"
             ),
             severity="info",
@@ -927,6 +1027,6 @@ class StockSwingEngine:
                 "win_rate": round(float(self.risk_manager.win_rate), 4),
                 "total_pnl": round(total_pnl, 2),
                 "avg_pnl": round(float(self.risk_manager.avg_pnl), 4),
-                "note": "daily swing strategy (Polygon + Alpaca)",
+                "note": "daily swing strategy (stocks + options via Polygon + Alpaca)",
             }
         ]

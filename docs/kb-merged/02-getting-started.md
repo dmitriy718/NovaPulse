@@ -30,7 +30,7 @@
 1. Paper mode simulates orders/fills.
 1. Live mode places real orders and should require:
    - exchange credentials
-   - a control key set (`DASHBOARD_SECRET_KEY`)
+   - a control key set (`DASHBOARD_ADMIN_KEY`)
 
 ## Managed Access (Client)
 

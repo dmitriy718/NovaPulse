@@ -117,7 +117,7 @@ DB note:
 
 Admin control key:
 
-1. `DASHBOARD_SECRET_KEY`
+1. `DASHBOARD_ADMIN_KEY`
 
 UI behavior:
 
