@@ -558,8 +558,10 @@ async def run_bot():
             sig.signal(s, lambda *_: _request_shutdown_multi())
 
     all_tasks = []
-    for eng in engines:
+    for i, eng in enumerate(engines):
         label = f"{eng.exchange_name}:{eng.tenant_id}"
+        # Single leader for ES retention cleanup to avoid duplicate index scans.
+        eng._es_cleanup_leader = (i == 0)
         eng._tasks = [
             asyncio.create_task(_run_with_restart(eng, f"{label}:scan_loop", eng._main_scan_loop, critical=True)),
             asyncio.create_task(_run_with_restart(eng, f"{label}:position_loop", eng._position_management_loop, critical=True)),

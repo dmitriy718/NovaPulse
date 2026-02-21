@@ -212,6 +212,11 @@ class StockSwingEngine:
         self.scan_interval = max(60, int(self.config.stocks.scan_interval_seconds))
         self.min_hold_seconds = max(86400, int(self.config.stocks.min_hold_days) * 86400)
         self.max_hold_seconds = max(self.min_hold_seconds, int(self.config.stocks.max_hold_days) * 86400)
+        self.stop_loss_pct = max(0.001, float(self.config.stocks.stop_loss_pct))
+        self.take_profit_pct = max(
+            self.stop_loss_pct * 1.05,
+            float(self.config.stocks.take_profit_pct),
+        )
 
         self.db = DatabaseManager(self.config.stocks.db_path)
         self.market_data = _StockMarketDataView()
@@ -252,6 +257,7 @@ class StockSwingEngine:
         if self.mode == "live":
             await self.alpaca.initialize()
             await self._reconcile_broker_positions(source="startup")
+        await self._backfill_open_trade_protection(source="startup")
         await self._load_historical_stats()
         await self.db.log_thought(
             "system",
@@ -436,6 +442,10 @@ class StockSwingEngine:
                 ):
                     await self._reconcile_broker_positions(source="periodic")
                 open_rows = await self.db.get_open_trades(tenant_id=self.tenant_id)
+                await self._backfill_open_trade_protection(
+                    source="scan",
+                    open_rows=open_rows,
+                )
                 open_by_symbol = {str(row.get("pair", "")).upper(): row for row in open_rows}
                 pending_symbols = set(self._pending_opens.keys())
                 open_count = len(open_rows) + len(pending_symbols)
@@ -479,6 +489,62 @@ class StockSwingEngine:
             except Exception as e:
                 logger.error("Stock scan loop error", error=repr(e))
                 await asyncio.sleep(min(self.scan_interval, 60))
+
+    def _derive_protective_levels(self, entry_price: float) -> tuple[float, float]:
+        if entry_price <= 0:
+            return 0.0, 0.0
+        stop_loss = round(entry_price * (1.0 - self.stop_loss_pct), 6)
+        take_profit = round(entry_price * (1.0 + self.take_profit_pct), 6)
+        return max(stop_loss, 0.0), max(take_profit, 0.0)
+
+    async def _backfill_open_trade_protection(
+        self,
+        *,
+        source: str,
+        open_rows: Optional[List[Dict[str, Any]]] = None,
+    ) -> int:
+        rows = open_rows if open_rows is not None else await self.db.get_open_trades(tenant_id=self.tenant_id)
+        patched = 0
+        for trade in rows:
+            entry_price = float(trade.get("entry_price", 0.0) or 0.0)
+            if entry_price <= 0:
+                continue
+            current_sl = float(trade.get("stop_loss", 0.0) or 0.0)
+            current_tp = float(trade.get("take_profit", 0.0) or 0.0)
+            if current_sl > 0 and current_tp > 0:
+                continue
+
+            fallback_sl, fallback_tp = self._derive_protective_levels(entry_price)
+            updates: Dict[str, Any] = {}
+            if current_sl <= 0 and fallback_sl > 0:
+                updates["stop_loss"] = fallback_sl
+            if current_tp <= 0 and fallback_tp > 0:
+                updates["take_profit"] = fallback_tp
+            if not updates:
+                continue
+
+            trade_id = str(trade.get("trade_id", "")).strip()
+            if not trade_id:
+                continue
+            await self.db.update_trade(
+                trade_id,
+                updates,
+                tenant_id=self.tenant_id,
+            )
+            trade.update(updates)
+            patched += 1
+            await self.db.log_thought(
+                "risk",
+                (
+                    f"Stock protective levels backfilled ({source}) "
+                    f"{trade.get('pair', '?')} trade={trade_id} "
+                    f"sl={float(updates.get('stop_loss', current_sl)):.4f} "
+                    f"tp={float(updates.get('take_profit', current_tp)):.4f}"
+                ),
+                severity="warning",
+                tenant_id=self.tenant_id,
+            )
+        return patched
 
     def _analyze_signal(self, closes: np.ndarray) -> str:
         if len(closes) < 60:
@@ -580,13 +646,19 @@ class StockSwingEngine:
             return False
 
         trade_id = f"S-{uuid.uuid4().hex[:12]}"
+        stop_loss, take_profit = self._derive_protective_levels(fill_price)
         metadata: Dict[str, Any] = {
             "asset_class": "stock",
             "min_hold_seconds": self.min_hold_seconds,
             "max_hold_seconds": self.max_hold_seconds,
             "mode": self.mode,
             "size_usd": round(fill_price * filled_qty, 2),
+            "protective_levels_source": "stocks_config_pct",
         }
+        if stop_loss > 0:
+            metadata["initial_stop_loss"] = stop_loss
+        if take_profit > 0:
+            metadata["initial_take_profit"] = take_profit
         if order:
             oid = str(order.get("id", "")).strip()
             status = str(order.get("status", "")).strip().lower()
@@ -605,6 +677,8 @@ class StockSwingEngine:
                 "status": "open",
                 "strategy": "stock_swing",
                 "confidence": 0.65,
+                "stop_loss": stop_loss,
+                "take_profit": take_profit,
                 "entry_time": datetime.now(timezone.utc).isoformat(),
                 "metadata": metadata,
             },
@@ -614,7 +688,10 @@ class StockSwingEngine:
             self._execution_stats["orders_filled"] += 1
         await self.db.log_thought(
             "execution",
-            f"Stock BUY {symbol} qty={filled_qty:.4f} @ {fill_price:.2f}",
+            (
+                f"Stock BUY {symbol} qty={filled_qty:.4f} @ {fill_price:.2f} "
+                f"SL={stop_loss:.4f} TP={take_profit:.4f}"
+            ),
             severity="info",
             tenant_id=self.tenant_id,
         )
@@ -705,6 +782,23 @@ class StockSwingEngine:
         self._execution_stats["orders_pending"] = len(self._pending_opens)
 
     async def _maybe_close_trade(self, trade: Dict[str, Any], market_price: float, signal: str) -> bool:
+        stop_loss = float(trade.get("stop_loss", 0.0) or 0.0)
+        take_profit = float(trade.get("take_profit", 0.0) or 0.0)
+        if stop_loss > 0 and market_price <= stop_loss:
+            return await self._close_trade(
+                trade,
+                reason="stop_loss",
+                force=True,
+                market_price=stop_loss,
+            )
+        if take_profit > 0 and market_price >= take_profit:
+            return await self._close_trade(
+                trade,
+                reason="take_profit",
+                force=False,
+                market_price=take_profit,
+            )
+
         entry_time = self._parse_dt(trade.get("entry_time"))
         if not entry_time:
             return False

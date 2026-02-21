@@ -133,6 +133,8 @@ class BotEngine:
         self._stale_check_count = 0
         self._ws_disconnected_since: Optional[float] = None
         self._auto_pause_reason: str = ""
+        # In multi-engine mode, only one engine should run ES retention cleanup.
+        self._es_cleanup_leader: bool = True
         # Adaptive scan interval: tracks recent event frequency
         self._recent_event_count = 0
         self._event_window_start = 0.0
@@ -1456,14 +1458,23 @@ class BotEngine:
                     self.config.monitoring.metrics_retention_hours
                 )
                 # ES index retention cleanup
-                if self.es_client:
+                if self.es_client and self._es_cleanup_leader:
                     try:
                         deleted = await self.es_client.cleanup_old_indices()
                         if deleted:
-                            logger.info("ES index cleanup", deleted=deleted)
+                            logger.info(
+                                "ES index cleanup",
+                                deleted=deleted,
+                                exchange=self.exchange_name,
+                                account_id=self.account_id,
+                            )
                     except Exception:
                         pass
-                logger.info("Database cleanup completed")
+                logger.debug(
+                    "Database cleanup completed",
+                    exchange=self.exchange_name,
+                    account_id=self.account_id,
+                )
             except asyncio.CancelledError:
                 break
             except Exception as e:
