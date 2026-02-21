@@ -33,6 +33,9 @@ Set these values in `.env`:
 - `DASHBOARD_SESSION_SECRET=...`
 - `DASHBOARD_ADMIN_PASSWORD_HASH=...`
 - `DASHBOARD_REQUIRE_API_KEY_FOR_READS=true`
+- If signal intake is enabled: `SIGNAL_WEBHOOK_ENABLED=true`, `SIGNAL_WEBHOOK_SECRET=...`, `SIGNAL_WEBHOOK_ALLOWED_SOURCES=...`
+- If billing is enabled: `STRIPE_SECRET_KEY=...`, `STRIPE_WEBHOOK_SECRET=...`, and paid plan IDs (`STRIPE_PRICE_ID_PRO=...`, `STRIPE_PRICE_ID_PREMIUM=...`; `STRIPE_PRICE_ID` is legacy fallback)
+- Optional enrichment quality: `COINGECKO_API_KEY=...`
 
 Generate secrets:
 
@@ -69,6 +72,16 @@ Expected:
 - no `FAILURES` block
 
 If it fails, do not start live trading.
+
+If billing is enabled, confirm webhook endpoint wiring before launch:
+
+1. Stripe webhook destination is `https://<your-domain>/api/v1/billing/webhook`.
+2. Subscribed Stripe events:
+   - `checkout.session.completed`
+   - `customer.subscription.updated`
+   - `customer.subscription.deleted`
+   - `invoice.paid`
+   - `invoice.payment_failed`
 
 ## 4. Start Procedure
 

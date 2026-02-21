@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Literal, Optional
 
 import httpx
 
@@ -50,6 +50,7 @@ class AlpacaClient:
         qty: float,
         side: str,
         *,
+        asset_class: Literal["equity", "option"] = "equity",
         time_in_force: str = "day",
         wait_fill_seconds: float = 8.0,
     ) -> Optional[Dict[str, Any]]:
@@ -57,15 +58,19 @@ class AlpacaClient:
             return None
         if self._client is None:
             await self.initialize()
+        symbol_raw = str(symbol or "").strip().upper()
+        if asset_class == "option" and symbol_raw.startswith("O:"):
+            symbol_raw = symbol_raw[2:]
         payload = {
-            "symbol": symbol.upper(),
+            "symbol": symbol_raw,
             "qty": str(max(float(qty), 0.0)),
             "side": side,
             "type": "market",
             "time_in_force": time_in_force,
         }
+        orders_path = "/v2/options/orders" if asset_class == "option" else "/v2/orders"
         try:
-            resp = await self._client.post(f"{self.base_url}/v2/orders", json=payload)
+            resp = await self._client.post(f"{self.base_url}{orders_path}", json=payload)
             resp.raise_for_status()
             order = resp.json()
             if self._is_filled(order):
@@ -87,7 +92,8 @@ class AlpacaClient:
         except Exception as e:
             logger.warning(
                 "Alpaca submit order failed",
-                symbol=symbol,
+                symbol=symbol_raw,
+                asset_class=asset_class,
                 side=side,
                 qty=qty,
                 error=repr(e),

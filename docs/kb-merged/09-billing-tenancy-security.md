@@ -14,7 +14,7 @@ Tenant statuses:
 
 API tenant resolution rules:
 
-1. Admin key (`DASHBOARD_SECRET_KEY`) can target any tenant explicitly.
+1. Admin key (`DASHBOARD_ADMIN_KEY`) can target any tenant explicitly.
 1. Tenant API keys are pinned; they cannot claim a different tenant id.
 1. If no valid mapping exists, requests must not be allowed to select arbitrary tenants.
 
@@ -29,11 +29,20 @@ Implementation:
 Webhook endpoint:
 
 1. `POST /api/v1/billing/webhook`
+1. `POST /api/v1/billing/checkout` (admin/authenticated app call)
 
 Expected behavior:
 
 1. Verify webhook signature.
 1. Update tenant status based on subscription lifecycle events.
+1. Subscribe to Stripe events:
+1. `checkout.session.completed`
+1. `customer.subscription.updated`
+1. `customer.subscription.deleted`
+1. `invoice.paid`
+1. `invoice.payment_failed`
+1. Checkout plans support `free`, `pro`, `premium`:
+1. `free` marks tenant as `trialing` without Stripe checkout.
 
 ## Control Auth (Local Bot)
 
@@ -55,6 +64,7 @@ File:
 1. Never commit `.env`.
 1. Never paste exchange keys into tickets or chat logs.
 1. Rotate keys after any suspected exposure.
+1. Current release policy: single vault is allowed only with strict item-level ACLs and read-only runtime access.
 
 ## Managed Stack Basic Auth (Environment-Specific)
 

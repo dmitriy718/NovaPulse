@@ -18,7 +18,9 @@ billing:
     enabled: true
     secret_key: ""       # or STRIPE_SECRET_KEY in .env
     webhook_secret: ""   # or STRIPE_WEBHOOK_SECRET
-    price_id: ""         # Stripe Price ID for monthly plan (price_...)
+    price_id: ""         # legacy/default (maps to pro when price_id_pro is empty)
+    price_id_pro: ""     # Stripe Price ID for pro monthly plan (e.g. 49.99)
+    price_id_premium: "" # Stripe Price ID for premium monthly plan (e.g. 79.99)
     currency: usd
   tenant:
     default_tenant_id: default
@@ -35,12 +37,25 @@ billing:
    - `invoice.payment_failed`
    Copy the webhook signing secret (`whsec_...`).
 3. **Keys**: Use test keys (`sk_test_...`, `whsec_...`) for development; live keys for production.
+4. **Runtime env vars**: set `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, and at least one paid plan id (`STRIPE_PRICE_ID_PRO` and/or `STRIPE_PRICE_ID_PREMIUM`; `STRIPE_PRICE_ID` is legacy fallback).
+
+## Required Endpoint Wiring (Production)
+
+Your app must expose:
+
+1. `POST /api/v1/billing/checkout` (app -> Stripe Checkout session creation).
+2. `POST /api/v1/billing/webhook` (Stripe -> app subscription lifecycle updates).
+
+Operationally useful (admin-only):
+
+1. `GET /api/v1/tenants/{tenant_id}` (verify tenant status after checkout/webhooks).
 
 ## API
 
 - **POST /api/v1/billing/checkout** (requires X-API-Key)  
-  Body: `{ "tenant_id": "acme", "success_url": "https://...", "cancel_url": "https://...", "customer_email": "optional" }`  
-  Returns `{ "url": "https://checkout.stripe.com/...", "session_id": "..." }`. Redirect the user to `url` to pay.
+  Body: `{ "tenant_id": "acme", "plan": "free|pro|premium", "success_url": "https://...", "cancel_url": "https://...", "customer_email": "optional" }`  
+  - `plan=pro` or `plan=premium`: returns Stripe Checkout session `{ "url": "...", "session_id": "...", "plan": "..." }`.
+  - `plan=free`: no Stripe call; tenant is marked `trialing` and response contains `{ "free": true, ... }`.
 
 - **POST /api/v1/billing/webhook**  
   Called by Stripe. No auth; verified by `Stripe-Signature` header. Updates tenant status in DB.
@@ -59,9 +74,11 @@ Migrations run on DB init; existing rows get `tenant_id = 'default'`.
 ## Enabling a New Client
 
 1. Create a tenant (e.g. via admin or API): `upsert_tenant(tenant_id, name, ...)`.
-2. Call **POST /api/v1/billing/checkout** with that `tenant_id`, success_url, cancel_url.
-3. User completes Stripe Checkout. On `checkout.session.completed`, the webhook stores `stripe_customer_id` and `stripe_subscription_id` on the tenant and sets status `active`.
-4. Gate dashboard/API by tenant status (e.g. only allow access when `tenant.status == 'active'`).
+2. Call **POST /api/v1/billing/checkout** with `plan`:
+   - `free` -> tenant status set to `trialing`.
+   - `pro` or `premium` -> Stripe checkout URL returned.
+3. For paid plans, user completes Stripe Checkout. On `checkout.session.completed`, the webhook stores `stripe_customer_id` and `stripe_subscription_id` on the tenant and sets status `active`.
+4. Gate dashboard/API by tenant status (currently `active` and `trialing` are allowed for non-admin access).
 
 ## Future
 

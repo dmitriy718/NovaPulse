@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>NovaPulse - Command Center</title>
-    <link rel="stylesheet" href="/static/css/dashboard.css?v=20260219g">
+    <link rel="stylesheet" href="/static/css/dashboard.css?v=20260221a">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@300;400;500;600;700&family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
@@ -92,6 +92,16 @@
                         <span class="value" id="drawdown">0%</span>
                     </div>
                 </div>
+            </div>
+        </section>
+
+        <!-- Favorites -->
+        <section class="glass-card favorites-card">
+            <div class="card-header">
+                <h2>❤️ FAVORITES</h2>
+            </div>
+            <div class="favorites-list" id="favoritesList">
+                <div class="favorite-item empty">No favorites yet</div>
             </div>
         </section>
 
@@ -222,7 +232,10 @@
                     <h2 id="chartTitle">HEIKIN ASHI</h2>
                     <div class="chart-meta" id="chartMeta">Loading...</div>
                 </div>
-                <button class="chart-close-btn" type="button" onclick="closeChartModal()">&times;</button>
+                <div class="chart-header-actions">
+                    <button id="chartFavoriteBtn" class="chart-favorite-btn" type="button" title="Add to favorites">♡</button>
+                    <button class="chart-close-btn" type="button" onclick="closeChartModal()">&times;</button>
+                </div>
             </div>
             <div class="chart-tf-row" id="chartTfRow">
                 <button class="chart-tf-btn" type="button" data-tf="1m">1</button>
@@ -284,6 +297,6 @@
     <!-- Settings Toast -->
     <div id="settingsToast" class="settings-toast hidden"></div>
 
-    <script src="/static/js/dashboard.js?v=20260219g"></script>
+    <script src="/static/js/dashboard.js?v=20260221a"></script>
 </body>
 </html>

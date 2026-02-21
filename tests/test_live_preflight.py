@@ -39,3 +39,79 @@ def test_live_preflight_accepts_account_scoped_credentials(monkeypatch):
     monkeypatch.setenv("ELASTICSEARCH_ENABLED", "false")
     code = run_preflight(require_live=True, strict=False)
     assert code == 0
+
+
+def test_live_preflight_accepts_op_references_with_vault_inventory(monkeypatch):
+    cfg = BotConfig(
+        app={"mode": "live"},
+        exchange={"name": "kraken"},
+        risk={"max_risk_per_trade": 0.01},
+        trading={"max_trades_per_hour": 6},
+    )
+    monkeypatch.setattr("scripts.live_preflight.load_config_with_overrides", lambda: cfg)
+    monkeypatch.setattr(
+        "scripts.live_preflight._collect_1password_field_labels",
+        lambda: (
+            {
+                "KRAKEN_API_KEY",
+                "KRAKEN_API_SECRET",
+                "DASHBOARD_ADMIN_KEY",
+                "DASHBOARD_SESSION_SECRET",
+                "DASHBOARD_ADMIN_PASSWORD_HASH",
+                "ES_API_KEY",
+            },
+            [],
+        ),
+    )
+    monkeypatch.setenv("KRAKEN_API_KEY", "op://dev/trading/KRAKEN_API_KEY")
+    monkeypatch.setenv("KRAKEN_API_SECRET", "op://dev/trading/KRAKEN_API_SECRET")
+    monkeypatch.setenv("DASHBOARD_ADMIN_KEY", "op://dev/dashboard/DASHBOARD_ADMIN_KEY")
+    monkeypatch.setenv("DASHBOARD_SESSION_SECRET", "op://dev/dashboard/DASHBOARD_SESSION_SECRET")
+    monkeypatch.setenv("DASHBOARD_ADMIN_PASSWORD_HASH", "op://dev/dashboard/DASHBOARD_ADMIN_PASSWORD_HASH")
+    monkeypatch.setenv("ELASTICSEARCH_ENABLED", "false")
+
+    code = run_preflight(require_live=True, strict=False)
+    assert code == 0
+
+
+def test_live_preflight_requires_signal_secret_when_webhooks_enabled(monkeypatch):
+    cfg = BotConfig(
+        app={"mode": "live"},
+        exchange={"name": "kraken"},
+        risk={"max_risk_per_trade": 0.01},
+        trading={"max_trades_per_hour": 6},
+        webhooks={"enabled": True, "secret": "", "allowed_sources": ["tv"]},
+    )
+    monkeypatch.setattr("scripts.live_preflight.load_config_with_overrides", lambda: cfg)
+    monkeypatch.setenv("KRAKEN_API_KEY", "k-live")
+    monkeypatch.setenv("KRAKEN_API_SECRET", "s-live")
+    monkeypatch.setenv("DASHBOARD_ADMIN_KEY", "admin-k")
+    monkeypatch.setenv("DASHBOARD_SESSION_SECRET", "sess-k")
+    monkeypatch.setenv("DASHBOARD_ADMIN_PASSWORD_HASH", "$2b$12$abcdefghijklmnopqrstuv")
+    monkeypatch.setenv("ELASTICSEARCH_ENABLED", "false")
+
+    code = run_preflight(require_live=True, strict=False)
+    assert code == 1
+
+
+def test_live_preflight_requires_paid_price_id_when_billing_enabled(monkeypatch):
+    cfg = BotConfig(
+        app={"mode": "live"},
+        exchange={"name": "kraken"},
+        risk={"max_risk_per_trade": 0.01},
+        trading={"max_trades_per_hour": 6},
+        billing={"stripe": {"enabled": True, "secret_key": "sk_test", "webhook_secret": "whsec_test"}},
+    )
+    monkeypatch.setattr("scripts.live_preflight.load_config_with_overrides", lambda: cfg)
+    monkeypatch.setenv("KRAKEN_API_KEY", "k-live")
+    monkeypatch.setenv("KRAKEN_API_SECRET", "s-live")
+    monkeypatch.setenv("DASHBOARD_ADMIN_KEY", "admin-k")
+    monkeypatch.setenv("DASHBOARD_SESSION_SECRET", "sess-k")
+    monkeypatch.setenv("DASHBOARD_ADMIN_PASSWORD_HASH", "$2b$12$abcdefghijklmnopqrstuv")
+    monkeypatch.setenv("ELASTICSEARCH_ENABLED", "false")
+    monkeypatch.delenv("STRIPE_PRICE_ID", raising=False)
+    monkeypatch.delenv("STRIPE_PRICE_ID_PRO", raising=False)
+    monkeypatch.delenv("STRIPE_PRICE_ID_PREMIUM", raising=False)
+
+    code = run_preflight(require_live=True, strict=False)
+    assert code == 1

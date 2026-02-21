@@ -36,7 +36,7 @@ Control endpoints:
 
 Auth:
 - Provide `X-API-Key` header.
-  - Admin: `DASHBOARD_SECRET_KEY`
+  - Admin: `DASHBOARD_ADMIN_KEY`
   - Tenant keys: API keys mapped to a tenant (if configured)
 
 ## Stale data incident
@@ -67,4 +67,3 @@ If running tests or bot on unsupported Python versions can hang async DB connect
 Action:
 - Use Python 3.11 or 3.12 and recreate venv.
 - Confirm `pyproject.toml` runtime constraint and `main.py` startup guard.
-

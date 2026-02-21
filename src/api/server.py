@@ -20,17 +20,16 @@ import html
 import io
 import json
 import os
+import re
 import time
 import secrets
 import uuid
-from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from fastapi import (
     Body,
-    Cookie,
     Depends,
     FastAPI,
     Form,
@@ -43,13 +42,14 @@ from fastapi import (
     WebSocketDisconnect,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from src import __version__
 from src.core.logger import get_logger
 
 logger = get_logger("api_server")
+_OPTION_SYMBOL_RE = re.compile(r"^(?:O:)?[A-Z]{1,6}\d{6}[CP]\d{8}$")
 
 
 class DashboardServer:
@@ -272,6 +272,57 @@ class DashboardServer:
             if db and getattr(db, "db_path", None):
                 paths.append(db.db_path)
         return len(set(paths)) <= 1
+
+    @staticmethod
+    def _normalize_symbol(symbol: str) -> str:
+        s = str(symbol or "").strip().upper()
+        if s.startswith("O:"):
+            s = s[2:]
+        return s
+
+    @classmethod
+    def _is_option_symbol(cls, symbol: str) -> bool:
+        return bool(_OPTION_SYMBOL_RE.match(str(symbol or "").strip().upper()))
+
+    @staticmethod
+    def _is_engine_paused(engine: Any) -> bool:
+        return bool(
+            getattr(engine, "_trading_paused", False)
+            or getattr(engine, "_priority_paused", False)
+        )
+
+    @staticmethod
+    def _favorites_state_key(tenant_id: str) -> str:
+        tid = str(tenant_id or "default").strip() or "default"
+        return f"dashboard_favorites:{tid}"
+
+    @classmethod
+    def _normalize_favorites(cls, raw: Any) -> List[str]:
+        items = raw if isinstance(raw, list) else []
+        out: List[str] = []
+        seen: Set[str] = set()
+        for item in items:
+            sym = cls._normalize_symbol(str(item or ""))
+            if not sym or sym in seen:
+                continue
+            seen.add(sym)
+            out.append(sym)
+        return out
+
+    async def _read_favorites_state(self, tenant_id: str) -> List[str]:
+        primary = self._get_primary_engine()
+        if not primary or not getattr(primary, "db", None):
+            return []
+        raw = await primary.db.get_state(self._favorites_state_key(tenant_id), default=[])
+        return self._normalize_favorites(raw)
+
+    async def _write_favorites_state(self, tenant_id: str, favorites: List[str]) -> List[str]:
+        primary = self._get_primary_engine()
+        if not primary or not getattr(primary, "db", None):
+            return []
+        normalized = self._normalize_favorites(favorites)
+        await primary.db.set_state(self._favorites_state_key(tenant_id), normalized)
+        return normalized
 
     def _aggregate_performance_stats(self, stats_list: List[Dict[str, Any]]) -> Dict[str, Any]:
         agg = {
@@ -519,7 +570,7 @@ class DashboardServer:
                 t = float(ts)
                 o = float(opens[idx])
                 h = float(highs[idx])
-                l = float(lows[idx])
+                low = float(lows[idx])
                 c = float(closes[idx])
                 v = float(volumes[idx])
             except (TypeError, ValueError, IndexError):
@@ -536,7 +587,7 @@ class DashboardServer:
                     "time": float(bucket),
                     "open": o,
                     "high": h,
-                    "low": l,
+                    "low": low,
                     "close": c,
                     "volume": max(0.0, v),
                 }
@@ -545,7 +596,7 @@ class DashboardServer:
             if cur is None:
                 continue
             cur["high"] = max(cur["high"], h)
-            cur["low"] = min(cur["low"], l)
+            cur["low"] = min(cur["low"], low)
             cur["close"] = c
             cur["volume"] += max(0.0, v)
 
@@ -614,21 +665,21 @@ class DashboardServer:
                     t = float(row.get("time", 0) or 0)
                     o = float(row.get("open", 0) or 0)
                     h = float(row.get("high", 0) or 0)
-                    l = float(row.get("low", 0) or 0)
+                    low = float(row.get("low", 0) or 0)
                     c = float(row.get("close", 0) or 0)
                     v = float(row.get("volume", 0) or 0)
                 else:
                     t = float(row[0])
                     o = float(row[1])
                     h = float(row[2])
-                    l = float(row[3])
+                    low = float(row[3])
                     c = float(row[4])
                     # Kraken/Coinbase normalized shape: [time, open, high, low, close, vwap, volume, count]
                     v = float(row[6]) if len(row) > 6 else 0.0
             except (TypeError, ValueError, IndexError):
                 continue
 
-            if t <= 0 or o <= 0 or h <= 0 or l <= 0 or c <= 0:
+            if t <= 0 or o <= 0 or h <= 0 or low <= 0 or c <= 0:
                 continue
 
             bucket = int(t // (interval_minutes * 60)) * (interval_minutes * 60)
@@ -636,7 +687,7 @@ class DashboardServer:
                 "time": float(bucket),
                 "open": o,
                 "high": h,
-                "low": l,
+                "low": low,
                 "close": c,
                 "volume": max(0.0, v),
             }
@@ -1244,7 +1295,7 @@ class DashboardServer:
                 return {"status": "initializing"}
 
             running = any(getattr(e, "_running", False) for e in engines)
-            paused = all(getattr(e, "_trading_paused", False) for e in engines)
+            paused = all(self._is_engine_paused(e) for e in engines)
             scan_count = sum(getattr(e, "_scan_count", 0) for e in engines)
             pairs = []
             for e in engines:
@@ -1296,7 +1347,7 @@ class DashboardServer:
                     {
                         "name": getattr(e, "exchange_name", "unknown"),
                         "running": getattr(e, "_running", False),
-                        "paused": getattr(e, "_trading_paused", False),
+                        "paused": self._is_engine_paused(e),
                         "ws_connected": (
                             e.ws_client.is_connected if getattr(e, "ws_client", None) else False
                         ),
@@ -1340,7 +1391,7 @@ class DashboardServer:
                         "account_id": str(getattr(eng, "tenant_id", "default")),
                         "mode": str(getattr(eng, "mode", "")),
                         "running": bool(getattr(eng, "_running", False)),
-                        "paused": bool(getattr(eng, "_trading_paused", False)),
+                        "paused": bool(self._is_engine_paused(eng)),
                         "ws_connected": bool(
                             getattr(eng, "ws_client", None)
                             and getattr(eng.ws_client, "is_connected", False)
@@ -1651,12 +1702,15 @@ class DashboardServer:
             scanner_data: Dict[str, Any] = {}
             for eng in engines:
                 exchange = str(getattr(eng, "exchange_name", "unknown")).lower()
-                asset_class = "stock" if exchange == "stocks" else "crypto"
                 account = str(getattr(eng, "tenant_id", "default"))
                 for pair in getattr(eng, "pairs", []) or []:
+                    pair_norm = self._normalize_symbol(pair)
+                    asset_class = "stock" if exchange == "stocks" else "crypto"
+                    if exchange == "stocks" and self._is_option_symbol(pair_norm):
+                        asset_class = "option"
                     label = f"{pair} ({exchange}:{account})" if len(engines) > 1 else pair
                     scanner_data[label] = {
-                        "pair": pair,
+                        "pair": pair_norm,
                         "exchange": exchange,
                         "account_id": account,
                         "asset_class": asset_class,
@@ -1665,6 +1719,55 @@ class DashboardServer:
                         "stale": eng.market_data.is_stale(pair) if getattr(eng, "market_data", None) else True,
                     }
             return scanner_data
+
+        @self.app.get("/api/v1/favorites")
+        async def get_favorites(
+            request: Request,
+            x_api_key: str = Header(default="", alias="X-API-Key"),
+            tenant_id: str = Depends(_resolve_tenant_id_read),
+        ):
+            """Get dashboard favorites list."""
+            await _require_read_access(request, x_api_key=x_api_key)
+            return {"favorites": await self._read_favorites_state(tenant_id)}
+
+        @self.app.post("/api/v1/favorites")
+        async def add_favorite(
+            request: Request,
+            body: dict = Body(...),
+            x_api_key: str = Header(default="", alias="X-API-Key"),
+            x_csrf_token: str = Header(default="", alias="X-CSRF-Token"),
+            tenant_id: str = Depends(_resolve_tenant_id_read),
+        ):
+            """Add a symbol to dashboard favorites (auto-saved)."""
+            await _require_control_access(request, x_api_key=x_api_key, x_csrf_token=x_csrf_token)
+            symbol = self._normalize_symbol(body.get("symbol", ""))
+            if not symbol:
+                raise HTTPException(status_code=400, detail="symbol is required")
+            favorites = await self._read_favorites_state(tenant_id)
+            if symbol not in favorites:
+                favorites.append(symbol)
+            stored = await self._write_favorites_state(tenant_id, favorites)
+            self._ws_cache_time_by_tenant.pop(tenant_id, None)
+            self._ws_cache_by_tenant.pop(tenant_id, None)
+            return {"ok": True, "favorites": stored}
+
+        @self.app.delete("/api/v1/favorites/{symbol}")
+        async def delete_favorite(
+            symbol: str,
+            request: Request,
+            x_api_key: str = Header(default="", alias="X-API-Key"),
+            x_csrf_token: str = Header(default="", alias="X-CSRF-Token"),
+            tenant_id: str = Depends(_resolve_tenant_id_read),
+        ):
+            """Remove a symbol from dashboard favorites (auto-saved)."""
+            await _require_control_access(request, x_api_key=x_api_key, x_csrf_token=x_csrf_token)
+            norm = self._normalize_symbol(symbol)
+            favorites = await self._read_favorites_state(tenant_id)
+            favorites = [s for s in favorites if s != norm]
+            stored = await self._write_favorites_state(tenant_id, favorites)
+            self._ws_cache_time_by_tenant.pop(tenant_id, None)
+            self._ws_cache_by_tenant.pop(tenant_id, None)
+            return {"ok": True, "favorites": stored}
 
         @self.app.get("/api/v1/chart")
         async def get_chart_data(
@@ -2764,11 +2867,32 @@ class DashboardServer:
             x_api_key: str = Header(default="", alias="X-API-Key"),
             x_csrf_token: str = Header(default="", alias="X-CSRF-Token"),
         ):
-            """Create Stripe Checkout session for subscription. Body: tenant_id, success_url, cancel_url, customer_email (optional)."""
+            """Create Stripe Checkout session for subscription. Body: tenant_id, plan, success_url, cancel_url, customer_email (optional)."""
             await _require_control_access(request, x_api_key=x_api_key, x_csrf_token=x_csrf_token)
             if not self._stripe_service or not self._stripe_service.enabled:
                 raise HTTPException(status_code=503, detail="Billing not configured")
             tenant_id = body.get("tenant_id") or "default"
+            plan = str(body.get("plan") or "pro").strip().lower()
+            if plan not in ("free", "pro", "premium"):
+                raise HTTPException(status_code=400, detail="plan must be one of: free, pro, premium")
+
+            # Free tier does not require Stripe checkout.
+            if plan == "free":
+                if self._bot_engine and self._bot_engine.db:
+                    await self._bot_engine.db.upsert_tenant(
+                        tenant_id,
+                        name=tenant_id,
+                        status="trialing",
+                    )
+                return {
+                    "free": True,
+                    "plan": "free",
+                    "tenant_id": tenant_id,
+                    "status": "trialing",
+                    "session_id": None,
+                    "url": None,
+                }
+
             success_url = body.get("success_url", "")
             cancel_url = body.get("cancel_url", "")
             if not success_url or not cancel_url:
@@ -2778,12 +2902,15 @@ class DashboardServer:
             if self._bot_engine and self._bot_engine.db:
                 tenant = await self._bot_engine.db.get_tenant(tenant_id)
                 customer_id = tenant.get("stripe_customer_id") if tenant else None
+            if not self._stripe_service.has_plan(plan):
+                raise HTTPException(status_code=400, detail=f"Plan `{plan}` is not configured")
             result = self._stripe_service.create_checkout_session(
                 tenant_id=tenant_id,
                 success_url=success_url,
                 cancel_url=cancel_url,
                 customer_email=customer_email,
                 customer_id=customer_id,
+                plan=plan,
             )
             if not result:
                 raise HTTPException(status_code=500, detail="Failed to create checkout session")
@@ -3054,6 +3181,100 @@ class DashboardServer:
                 self._ws_connections.discard(websocket)
                 logger.info("WebSocket client disconnected", total=len(self._ws_connections))
 
+    async def _collect_ws_engine_snapshot(self, eng: Any, tenant_id: str) -> Dict[str, Any]:
+        """Collect one engine snapshot for websocket payloads."""
+        exchange = str(getattr(eng, "exchange_name", "unknown")).lower()
+        account = str(getattr(eng, "tenant_id", "default"))
+        out: Dict[str, Any] = {
+            "exchange": exchange,
+            "account": account,
+            "stats": {},
+            "positions": [],
+            "thoughts": [],
+            "scanner": {},
+            "risk": {},
+            "strategies": [],
+        }
+        db = getattr(eng, "db", None)
+        if not db:
+            return out
+
+        out["stats"] = await db.get_performance_stats(tenant_id=tenant_id)
+        rows = await db.get_open_trades(tenant_id=tenant_id)
+        rows = [p for p in rows if abs(p.get("quantity", 0) or 0) > 0.00000001]
+        fee_rate = getattr(getattr(eng, "config", None), "exchange", None)
+        fee_rate = float(getattr(fee_rate, "taker_fee", 0.0) or 0.0)
+        market_data = getattr(eng, "market_data", None)
+        for raw_pos in rows:
+            pos = dict(raw_pos)
+            if market_data:
+                cp = float(market_data.get_latest_price(pos["pair"]) or 0.0)
+            else:
+                cp = 0.0
+            if cp > 0:
+                entry = float(pos.get("entry_price", 0.0) or 0.0)
+                qty = float(pos.get("quantity", 0.0) or 0.0)
+                notional = entry * qty
+                if str(pos.get("side", "")).lower() == "buy":
+                    gross = (cp - entry) * qty
+                else:
+                    gross = (entry - cp) * qty
+                est_entry_fee = abs(entry * qty) * fee_rate
+                est_exit_fee = abs(cp * qty) * fee_rate
+                net = gross - est_entry_fee - est_exit_fee
+                pos["unrealized_pnl"] = round(net, 2)
+                pos["current_price"] = cp
+                pos["unrealized_pnl_pct"] = (net / notional) if notional > 0 else 0
+            pos["exchange"] = exchange
+            out["positions"].append(pos)
+
+        try:
+            thoughts = await db.get_thoughts(limit=50, tenant_id=tenant_id)
+            for row in thoughts:
+                row["exchange"] = exchange
+            out["thoughts"] = thoughts
+        except Exception:
+            out["thoughts"] = []
+
+        asset_class = "stock" if exchange == "stocks" else "crypto"
+        pairs = getattr(eng, "pairs", []) or []
+        for pair in pairs:
+            normalized = self._normalize_symbol(pair)
+            label = pair
+            out["scanner"][label] = {
+                "pair": normalized,
+                "exchange": exchange,
+                "account_id": account,
+                "asset_class": (
+                    "option"
+                    if exchange == "stocks" and self._is_option_symbol(normalized)
+                    else asset_class
+                ),
+                "price": (
+                    market_data.get_latest_price(pair)
+                    if market_data
+                    else 0.0
+                ),
+                "bars": (
+                    market_data.get_bar_count(pair)
+                    if market_data
+                    else 0
+                ),
+                "stale": (
+                    market_data.is_stale(pair)
+                    if market_data
+                    else True
+                ),
+            }
+
+        risk_manager = getattr(eng, "risk_manager", None)
+        if risk_manager:
+            out["risk"] = risk_manager.get_risk_report()
+        get_stats = getattr(eng, "get_algorithm_stats", None)
+        if callable(get_stats):
+            out["strategies"] = get_stats() or []
+        return out
+
     async def _build_ws_update(self, tenant_id: str = "default") -> Dict[str, Any]:
         """Build a WebSocket update payload."""
         engines = self._get_engines()
@@ -3063,96 +3284,65 @@ class DashboardServer:
         if not primary or not getattr(primary, "db", None) or not getattr(primary.db, "is_initialized", False):
             return {"type": "status", "data": {"status": "initializing"}}
 
-        # Build compact update
         try:
-            stats_list: List[Dict[str, Any]] = []
-            positions: List[Dict[str, Any]] = []
-
-            # Aggregate performance stats + positions per engine
-            for eng in engines:
-                if not getattr(eng, "db", None):
+            snapshots_raw = await asyncio.gather(
+                *[self._collect_ws_engine_snapshot(eng, tenant_id) for eng in engines],
+                return_exceptions=True,
+            )
+            snapshots: List[Dict[str, Any]] = []
+            for eng, snap in zip(engines, snapshots_raw):
+                if isinstance(snap, Exception):
+                    logger.warning(
+                        "WebSocket engine snapshot failed",
+                        exchange=getattr(eng, "exchange_name", "unknown"),
+                        error=repr(snap),
+                    )
                     continue
-                stats_list.append(await eng.db.get_performance_stats(tenant_id=tenant_id))
-                rows = await eng.db.get_open_trades(tenant_id=tenant_id)
-                rows = [p for p in rows if abs(p.get("quantity", 0) or 0) > 0.00000001]
-                fee_rate = getattr(getattr(eng, "config", None), "exchange", None)
-                fee_rate = getattr(fee_rate, "taker_fee", 0.0)
-                for pos in rows:
-                    cp = eng.market_data.get_latest_price(pos["pair"])
-                    if cp > 0:
-                        notional = pos["entry_price"] * pos["quantity"]
-                        if pos["side"] == "buy":
-                            gross = (cp - pos["entry_price"]) * pos["quantity"]
-                        else:
-                            gross = (pos["entry_price"] - cp) * pos["quantity"]
-                        est_entry_fee = abs(pos["entry_price"] * pos["quantity"]) * fee_rate
-                        est_exit_fee = abs(cp * pos["quantity"]) * fee_rate
-                        net = gross - est_entry_fee - est_exit_fee
-                        pos["unrealized_pnl"] = round(net, 2)
-                        pos["current_price"] = cp
-                        pos["unrealized_pnl_pct"] = (
-                            net / notional
-                        ) if notional > 0 else 0
-                    pos["exchange"] = getattr(eng, "exchange_name", "unknown")
-                positions.extend(rows)
+                snapshots.append(snap)
 
+            stats_list = [s.get("stats", {}) for s in snapshots if s.get("stats")]
+            positions: List[Dict[str, Any]] = []
+            for s in snapshots:
+                positions.extend(s.get("positions", []))
             positions.sort(key=lambda p: p.get("entry_time") or "", reverse=True)
-
             performance = self._aggregate_performance_stats(stats_list)
 
-            # Thoughts (shared DB -> primary only)
+            thoughts: List[Dict[str, Any]] = []
             if self._engines_share_db(engines):
-                thoughts = await primary.db.get_thoughts(limit=50, tenant_id=tenant_id)
-            else:
-                thoughts = []
-                for eng in engines:
-                    if not getattr(eng, "db", None):
-                        continue
-                    rows = await eng.db.get_thoughts(limit=50, tenant_id=tenant_id)
-                    for row in rows:
-                        row["exchange"] = getattr(eng, "exchange_name", "unknown")
-                    thoughts.extend(rows)
+                try:
+                    thoughts = await primary.db.get_thoughts(limit=50, tenant_id=tenant_id)
+                except Exception as e:
+                    logger.warning("Shared DB thoughts fetch failed", error=repr(e))
+            if not thoughts:
+                for s in snapshots:
+                    thoughts.extend(s.get("thoughts", []))
                 thoughts.sort(key=lambda t: t.get("timestamp") or "", reverse=True)
                 thoughts = thoughts[:50]
 
-            # Scanner (with exchange labels if needed)
             scanner_data: Dict[str, Any] = {}
-            for eng in engines:
-                exchange = str(getattr(eng, "exchange_name", "unknown")).lower()
-                account = str(getattr(eng, "tenant_id", "default"))
-                asset_class = "stock" if exchange == "stocks" else "crypto"
-                for pair in getattr(eng, "pairs", []) or []:
+            for s in snapshots:
+                exchange = str(s.get("exchange", "unknown"))
+                account = str(s.get("account", "default"))
+                for pair, entry in (s.get("scanner", {}) or {}).items():
                     label = f"{pair} ({exchange}:{account})" if len(engines) > 1 else pair
-                    scanner_data[label] = {
-                        "pair": pair,
-                        "exchange": exchange,
-                        "account_id": account,
-                        "asset_class": asset_class,
-                        "price": eng.market_data.get_latest_price(pair),
-                        "bars": eng.market_data.get_bar_count(pair),
-                        "stale": eng.market_data.is_stale(pair),
-                    }
+                    scanner_data[label] = entry
 
-            # Risk (aggregate)
-            risk = self._aggregate_risk_reports(
-                [eng.risk_manager.get_risk_report() for eng in engines if getattr(eng, "risk_manager", None)]
-            )
+            favorites = await self._read_favorites_state(tenant_id)
+            risk_reports = [s.get("risk", {}) for s in snapshots if s.get("risk")]
+            risk = self._aggregate_risk_reports(risk_reports)
 
-            # Strategy / algorithm stats
-            if len(engines) == 1:
-                strategies = engines[0].get_algorithm_stats()
+            if len(engines) == 1 and snapshots:
+                strategies = snapshots[0].get("strategies", [])
             else:
                 strategies = []
-                for eng in engines:
-                    stats_items = eng.get_algorithm_stats()
-                    for s in stats_items:
-                        s = dict(s)
-                        s["exchange"] = getattr(eng, "exchange_name", "unknown")
-                        strategies.append(s)
+                for s in snapshots:
+                    exchange = s.get("exchange", "unknown")
+                    for item in s.get("strategies", []):
+                        enriched = dict(item)
+                        enriched["exchange"] = exchange
+                        strategies.append(enriched)
 
-
-            # Calculate total unrealized P&L from open positions
-            total_unrealized = sum(p.get("unrealized_pnl", 0) for p in positions)
+            total_unrealized = sum(float(p.get("unrealized_pnl", 0) or 0) for p in positions)
             performance["unrealized_pnl"] = round(total_unrealized, 2)
             performance["total_equity"] = round(
                 (risk.get("bankroll", 0) or 0) + total_unrealized, 2
@@ -3166,11 +3356,12 @@ class DashboardServer:
                     "positions": positions,
                     "thoughts": thoughts,
                     "scanner": scanner_data,
+                    "favorites": favorites,
                     "risk": risk,
                     "strategies": strategies,
                     "status": {
                         "running": any(getattr(e, "_running", False) for e in engines),
-                        "paused": all(getattr(e, "_trading_paused", False) for e in engines),
+                        "paused": all(self._is_engine_paused(e) for e in engines),
                         "mode": (
                             list({getattr(e, "mode", None) for e in engines})[0]
                             if len({getattr(e, "mode", None) for e in engines}) == 1
@@ -3188,7 +3379,7 @@ class DashboardServer:
                             {
                                 "name": getattr(e, "exchange_name", "unknown"),
                                 "running": getattr(e, "_running", False),
-                                "paused": getattr(e, "_trading_paused", False),
+                                "paused": self._is_engine_paused(e),
                                 "ws_connected": (
                                     e.ws_client.is_connected if getattr(e, "ws_client", None) else False
                                 ),
@@ -3196,11 +3387,10 @@ class DashboardServer:
                             for e in engines
                         ],
                     }
-                }
+                },
             }
         except Exception as e:
             logger.error("WebSocket update build error", error=str(e))
-            # M30 FIX: Don't leak internal errors to clients
             return {"type": "error", "message": "Internal update error"}
 
     async def broadcast(self, data: Dict[str, Any]) -> None:

@@ -17,6 +17,8 @@ let serverReachable = false;   // gate: no fetches until true
 let reconnectTimer = null;
 const strategyElements = new Map();
 let algoTooltip = null;
+let favorites = [];
+const favoriteSet = new Set();
 let chartResizeTimer = null;
 let chartPollTimer = null;
 let chartRequestInFlight = false;
@@ -61,6 +63,7 @@ function doConnect(wsUrl) {
         serverReachable = true;
         updateStatus('ONLINE', false);
         loadSettings();
+        refreshFavorites();
     };
 
     ws.onmessage = (event) => {
@@ -109,14 +112,19 @@ function updateStatus(text, isError) {
 
 function renderUpdate(data) {
     if (!data) return;
+    if (Array.isArray(data.favorites)) {
+        applyFavorites(data.favorites);
+    }
     renderStatus(data.status);
     renderPerformance(data.performance, data.risk);
+    renderFavorites();
     renderPositions(data.positions);
     renderThoughts(data.thoughts);
     renderScanner(data.scanner);
     renderStockScanner(data.scanner);
     renderRisk(data.risk);
     if (data.strategies) renderStrategies(data.strategies);
+    updateFavoriteButtonsState();
 }
 
 // ---- Status / HUD ----
@@ -175,6 +183,114 @@ function renderPerformance(perf, risk) {
     if (risk) setText('drawdown', (risk.current_drawdown || 0).toFixed(1) + '%');
 }
 
+// ---- Favorites ----
+
+function normalizeSymbol(sym) {
+    let s = String(sym || '').trim().toUpperCase();
+    if (s.startsWith('O:')) s = s.slice(2);
+    return s;
+}
+
+function applyFavorites(list) {
+    const arr = Array.isArray(list) ? list : [];
+    const next = [];
+    const seen = new Set();
+    for (const item of arr) {
+        const sym = normalizeSymbol(item);
+        if (!sym || seen.has(sym)) continue;
+        seen.add(sym);
+        next.push(sym);
+    }
+    favorites = next;
+    favoriteSet.clear();
+    for (const sym of next) favoriteSet.add(sym);
+}
+
+function isFavorite(sym) {
+    return favoriteSet.has(normalizeSymbol(sym));
+}
+
+function favoriteButtonHtml(symbol) {
+    const sym = normalizeSymbol(symbol);
+    const active = isFavorite(sym);
+    return `<button class="fav-btn${active ? ' active' : ''}" type="button" data-symbol="${escHtml(sym)}" title="${active ? 'Remove from favorites' : 'Add to favorites'}">${active ? '♥' : '♡'}</button>`;
+}
+
+function renderFavorites() {
+    const list = document.getElementById('favoritesList');
+    if (!list) return;
+    if (!favorites.length) {
+        list.innerHTML = '<div class="favorite-item empty">No favorites yet</div>';
+        return;
+    }
+    list.innerHTML = favorites.map((sym) => (
+        `<div class="favorite-item">
+            <span class="favorite-symbol">${escHtml(sym)}</span>
+            ${favoriteButtonHtml(sym)}
+        </div>`
+    )).join('');
+}
+
+function updateFavoriteButtonsState() {
+    document.querySelectorAll('.fav-btn[data-symbol]').forEach((btn) => {
+        const sym = normalizeSymbol(btn.dataset.symbol || '');
+        const active = isFavorite(sym);
+        btn.classList.toggle('active', active);
+        btn.textContent = active ? '♥' : '♡';
+        btn.title = active ? 'Remove from favorites' : 'Add to favorites';
+    });
+    syncChartFavoriteButton();
+}
+
+async function refreshFavorites() {
+    if (!serverReachable) return;
+    try {
+        const r = await fetch('/api/v1/favorites');
+        if (!r.ok) return;
+        const data = await r.json();
+        applyFavorites(data.favorites || []);
+        renderFavorites();
+        updateFavoriteButtonsState();
+    } catch {}
+}
+
+async function toggleFavoriteSymbol(symbol) {
+    if (!serverReachable) return;
+    const sym = normalizeSymbol(symbol);
+    if (!sym) return;
+    const currentlyFav = isFavorite(sym);
+    const method = currentlyFav ? 'DELETE' : 'POST';
+    const url = currentlyFav
+        ? `/api/v1/favorites/${encodeURIComponent(sym)}`
+        : '/api/v1/favorites';
+    const init = {
+        method,
+        headers: { ...csrfHeaders() },
+    };
+    if (method === 'POST') {
+        init.headers['Content-Type'] = 'application/json';
+        init.body = JSON.stringify({ symbol: sym });
+    }
+    try {
+        const r = await fetch(url, init);
+        if (!r.ok) return;
+        const payload = await r.json();
+        applyFavorites(payload.favorites || []);
+        renderFavorites();
+        updateFavoriteButtonsState();
+    } catch {}
+}
+
+function setupFavorites() {
+    document.addEventListener('click', async (ev) => {
+        const btn = ev.target.closest('.fav-btn[data-symbol]');
+        if (!btn) return;
+        ev.preventDefault();
+        ev.stopPropagation();
+        await toggleFavoriteSymbol(btn.dataset.symbol || '');
+    });
+}
+
 // ---- Positions Table ----
 
 function renderPositions(positions) {
@@ -187,7 +303,8 @@ function renderPositions(positions) {
     }
     let html = '';
     for (const pos of cleaned) {
-        const pair = escHtml(String(pos?.pair || ''));
+        const pairRaw = normalizeSymbol(String(pos?.pair || ''));
+        const pair = escHtml(pairRaw);
         const sideRaw = String(pos?.side || '').trim().toLowerCase();
         const sideClass = sideRaw === 'buy' ? 'side-buy' : (sideRaw === 'sell' ? 'side-sell' : '');
         const sideLabel = sideRaw ? escHtml(sideRaw.toUpperCase()) : 'N/A';
@@ -199,7 +316,12 @@ function renderPositions(positions) {
         const sizeUsd = Math.abs((current || entry) * qty);
         const conf = resolveConfidence(pos);
         html += `<tr>
-            <td>${pair}</td>
+            <td>
+                <div class="symbol-with-fav">
+                    <span class="symbol-label">${pair}</span>
+                    ${favoriteButtonHtml(pairRaw)}
+                </div>
+            </td>
             <td class="${sideClass}">${sideLabel}</td>
             <td>
                 <div class="cell-stack">
@@ -291,6 +413,7 @@ function renderScanner(scanner) {
     let html = '';
     for (const [pair, data] of entries) {
         const parsed = parseScannerLabel(pair);
+        const symbol = normalizeSymbol(parsed.pair || pair);
         const exchange = String(data?.exchange || parsed.exchange || '').trim().toLowerCase();
         const accountId = String(data?.account_id || parsed.accountId || '').trim().toLowerCase();
         const price = Number(data?.price ?? data?.last_price ?? 0) || 0;
@@ -299,12 +422,19 @@ function renderScanner(scanner) {
         if (priceHistory[pair].length > 20) priceHistory[pair].shift();
         html += `<div class="scanner-item${data.stale ? ' stale' : ''}">
             <div class="scanner-top">
-                <span class="scanner-pair">${escHtml(pair)}</span>
-                <button class="scanner-chart-btn" type="button"
-                    data-pair="${escHtml(parsed.pair)}"
-                    data-exchange="${escHtml(exchange)}"
-                    data-account-id="${escHtml(accountId)}"
-                    title="Open chart">📈</button>
+                <span class="scanner-pair">
+                    <span class="symbol-with-fav">
+                        <span class="symbol-label">${escHtml(symbol)}</span>
+                        ${favoriteButtonHtml(symbol)}
+                    </span>
+                </span>
+                <span class="scanner-actions">
+                    <button class="scanner-chart-btn" type="button"
+                        data-pair="${escHtml(symbol)}"
+                        data-exchange="${escHtml(exchange)}"
+                        data-account-id="${escHtml(accountId)}"
+                        title="Open chart">📈</button>
+                </span>
             </div>
             <span class="scanner-price">${formatPrice(price)}</span>
             <div class="sparkline">${generateSparkline(priceHistory[pair])}</div>
@@ -470,12 +600,14 @@ function renderStockScanner(scanner) {
     const stocks = [];
     for (const [label, raw] of entries) {
         const parsed = parseScannerLabel(label);
-        const pair = parsed.pair.toUpperCase();
-        const isStock = parsed.exchange === 'stocks' || (!pair.includes('/'));
-        if (!isStock) continue;
+        const pair = normalizeSymbol(parsed.pair.toUpperCase());
+        const assetClass = String(raw?.asset_class || '').trim().toLowerCase();
+        const isEquityFamily = assetClass === 'stock' || assetClass === 'option' || parsed.exchange === 'stocks';
+        if (!isEquityFamily) continue;
         stocks.push({
             symbol: pair,
             exchange: parsed.exchange,
+            assetClass,
             price: Number(raw?.price ?? raw?.last_price ?? 0) || 0,
             stale: !!raw?.stale,
         });
@@ -490,7 +622,10 @@ function renderStockScanner(scanner) {
     let html = '';
     for (const s of stocks) {
         html += `<div class="stock-item${s.stale ? ' stale' : ''}">
-            <span class="stock-symbol">${escHtml(s.symbol)}</span>
+            <span class="stock-main">
+                <span class="stock-symbol">${escHtml(s.symbol)}</span>
+                ${favoriteButtonHtml(s.symbol)}
+            </span>
             <span class="stock-price">${formatPrice(s.price)}</span>
         </div>`;
     }
@@ -503,6 +638,7 @@ function setupChartModal() {
     const grid = document.getElementById('scannerGrid');
     const tfRow = document.getElementById('chartTfRow');
     const shareRow = document.getElementById('chartShareRow');
+    const chartFavoriteBtn = document.getElementById('chartFavoriteBtn');
     if (grid) {
         grid.addEventListener('click', (ev) => {
             const btn = ev.target.closest('.scanner-chart-btn');
@@ -536,6 +672,16 @@ function setupChartModal() {
             ev.preventDefault();
             ev.stopPropagation();
             await shareChart(btn.dataset.share || '');
+        });
+    }
+
+    if (chartFavoriteBtn) {
+        chartFavoriteBtn.addEventListener('click', async (ev) => {
+            ev.preventDefault();
+            ev.stopPropagation();
+            if (!chartState.open || !chartState.pair) return;
+            await toggleFavoriteSymbol(chartState.pair);
+            syncChartFavoriteButton();
         });
     }
 
@@ -575,6 +721,7 @@ function openChartModal(pair, exchange = '', accountId = '') {
         title.textContent = `HEIKIN ASHI · ${p}${scope ? ` (${scope})` : ''}`;
     }
     if (meta) meta.textContent = 'Loading...';
+    syncChartFavoriteButton();
     activateChartTimeframe(chartState.timeframe);
     setChartStatus('Loading chart...');
     if (overlay) overlay.classList.remove('hidden');
@@ -587,6 +734,17 @@ function closeChartModal() {
     stopChartLivePolling();
     const overlay = document.getElementById('chartOverlay');
     if (overlay) overlay.classList.add('hidden');
+    syncChartFavoriteButton();
+}
+
+function syncChartFavoriteButton() {
+    const btn = document.getElementById('chartFavoriteBtn');
+    if (!btn) return;
+    const sym = normalizeSymbol(chartState.pair || '');
+    const active = !!sym && isFavorite(sym);
+    btn.classList.toggle('active', active);
+    btn.textContent = active ? '♥' : '♡';
+    btn.title = active ? 'Remove from favorites' : 'Add to favorites';
 }
 
 function startChartLivePolling() {
@@ -1757,6 +1915,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (chartWatermarkUrl) chartWatermarkUrl.textContent = getPublicDashboardUrl();
     connectWebSocket();
     setupThoughtScroll();
+    setupFavorites();
     setupSettings();
     setupChartModal();
     initAlgoTooltip();

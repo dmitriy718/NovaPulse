@@ -114,6 +114,8 @@ class BotEngine:
         # State
         self._running = False
         self._trading_paused = False
+        self._priority_paused = False
+        self._priority_pause_reason = ""
         # If set, the bot will start in paused mode (persists across restarts via env).
         self._start_paused_requested = os.getenv("START_PAUSED", "").strip().lower() in (
             "1",
@@ -138,6 +140,9 @@ class BotEngine:
         # Adaptive scan interval: tracks recent event frequency
         self._recent_event_count = 0
         self._event_window_start = 0.0
+
+    def _is_effectively_paused(self) -> bool:
+        return bool(self._trading_paused or self._priority_paused)
 
     async def _auto_pause_trading(
         self,
@@ -265,7 +270,7 @@ class BotEngine:
         """
         if not self.executor:
             return {"ok": False, "error": "executor not available"}
-        if self._trading_paused:
+        if self._is_effectively_paused():
             return {"ok": False, "error": "trading paused"}
 
         pair_raw = str(payload.get("pair") or "").strip().upper().replace("-", "/")
@@ -861,6 +866,8 @@ class BotEngine:
                     secret_key=stripe_cfg.secret_key,
                     webhook_secret=stripe_cfg.webhook_secret,
                     price_id=stripe_cfg.price_id,
+                    price_id_pro=getattr(stripe_cfg, "price_id_pro", ""),
+                    price_id_premium=getattr(stripe_cfg, "price_id_premium", ""),
                     currency=stripe_cfg.currency,
                     db=self.db,
                 )
@@ -1108,7 +1115,7 @@ class BotEngine:
                 self._scan_count += 1
 
                 # Step 1: Skip signal processing if paused
-                if self._trading_paused:
+                if self._is_effectively_paused():
                     await asyncio.sleep(self.scan_interval)
                     continue
 

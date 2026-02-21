@@ -146,8 +146,10 @@ python scripts/vps_watchdog.py --url "http://127.0.0.1:8090/api/v1/ops/heartbeat
    `DASHBOARD_PUBLIC_ORIGIN=https://nova.horizonsvc.com` and
    `DASHBOARD_CORS_ORIGINS=https://nova.horizonsvc.com`.
 4. Restrict API keys at the exchange: no withdrawals, least privilege, IP allowlist if possible.
-5. Keep dashboard bound to localhost, expose only via VPN/reverse-proxy auth if needed.
-6. Enable live mode only after backtests + paper performance gates pass.
+5. If `SIGNAL_WEBHOOK_ENABLED=true`, set `SIGNAL_WEBHOOK_SECRET` and source allowlist (`SIGNAL_WEBHOOK_ALLOWED_SOURCES`).
+6. If billing is enabled, set `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, and paid plan IDs (`STRIPE_PRICE_ID_PRO` and/or `STRIPE_PRICE_ID_PREMIUM`; `STRIPE_PRICE_ID` remains legacy fallback), then expose `POST /api/v1/billing/webhook`.
+7. Keep dashboard bound to localhost, expose only via VPN/reverse-proxy auth if needed.
+8. Enable live mode only after backtests + paper performance gates pass.
 
 ## Architecture
 

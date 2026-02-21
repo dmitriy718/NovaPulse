@@ -7,7 +7,6 @@ strategy signal generation, risk management, and database operations.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import sys
@@ -24,7 +23,7 @@ from fastapi.testclient import TestClient
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.core.config import BotConfig, ConfigManager
+from src.core.config import BotConfig
 from src.core.database import DatabaseManager
 from src.exchange.coinbase_rest import CoinbaseRESTClient
 from src.exchange.coinbase_ws import CoinbaseWebSocketClient
@@ -905,10 +904,10 @@ class _FakeRestClientForChart:
             ts = start + (i * step)
             o = px + (i * 2.0)
             h = o + 8.0
-            l = o - 8.0
+            low = o - 8.0
             c = o + 1.5
             v = 50.0 + (i % 10)
-            bars.append([float(ts), o, h, l, c, 0.0, v, 1.0])
+            bars.append([float(ts), o, h, low, c, 0.0, v, 1.0])
         return bars
 
 
@@ -1146,8 +1145,12 @@ class TestTelegramCheckins:
         assert "Bot Check-in" in msg
         assert "Total Trades" in msg
 
-    def test_telegram_secrets_dir_fallback(self, tmp_path):
+    def test_telegram_secrets_dir_fallback(self, tmp_path, monkeypatch):
         from src.utils.telegram import TelegramBot
+
+        monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+        monkeypatch.delenv("TELEGRAM_CHAT_IDS", raising=False)
+        monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
 
         sec = tmp_path / ".secrets"
         sec.mkdir()

@@ -12,7 +12,7 @@ Goal: reduce turnaround time by collecting the right data up front.
 
 2. Config:
 - `config/config.yaml` diffs (or key fields: pairs, timeframes, confluence_threshold, min_confidence, max_spread_pct)
-- `.env` redacted (confirm `DASHBOARD_SECRET_KEY` is set in live mode)
+- `.env` redacted (confirm `DASHBOARD_ADMIN_KEY` is set in live mode)
 
 3. Symptoms:
 - What is wrong (no trades / too many trades / stale / fills failing / dashboard not updating)
@@ -46,4 +46,3 @@ Escalate to engineering when:
 - Cross-tenant data/control concerns appear.
 - Order placement fails repeatedly with valid balances/permissions.
 - WS reconnect loops exceed configured thresholds.
-

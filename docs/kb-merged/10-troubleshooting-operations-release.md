@@ -248,6 +248,8 @@ NDJSON and Parquet:
 
 1. Run tests: `pytest`
 1. CI (if enabled): `.github/workflows/tests.yml`
+1. Run walk-forward gate: `python scripts/walk_forward_gate.py`
+1. Run strict preflight before live: `python scripts/live_preflight.py --strict`
 
 ## Release Checklist (Dev/Support)
 
@@ -256,6 +258,10 @@ NDJSON and Parquet:
 1. Validate stale feed guard behavior.
 1. Validate paper mode end-to-end.
 1. Validate live mode requirements and secret presence.
+1. If billing is enabled, verify Stripe endpoint wiring:
+1. `POST /api/v1/billing/checkout` from app.
+1. `POST /api/v1/billing/webhook` from Stripe with required events.
+1. If signal webhooks are enabled, verify `SIGNAL_WEBHOOK_SECRET` and source allowlist are set.
 
 ## FAQ (Client + Support)
 

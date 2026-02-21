@@ -330,6 +330,7 @@ body {
     grid-template-columns: repeat(3, 1fr);
     grid-template-areas:
         "pnl pnl strategy"
+        "favorites favorites strategy"
         "positions positions risk"
         "thought thought scanner"
         "stock stock stock";
@@ -363,11 +364,12 @@ body {
 /* Staggered entrance */
 .pnl-card { animation-delay: 0.04s; }
 .strategy-card { animation-delay: 0.08s; }
-.positions-card { animation-delay: 0.12s; }
-.scanner-card { animation-delay: 0.16s; }
-.thought-card { animation-delay: 0.20s; }
-.risk-card { animation-delay: 0.24s; }
-.stock-scanner-card { animation-delay: 0.28s; }
+.favorites-card { animation-delay: 0.12s; }
+.positions-card { animation-delay: 0.16s; }
+.scanner-card { animation-delay: 0.20s; }
+.thought-card { animation-delay: 0.24s; }
+.risk-card { animation-delay: 0.28s; }
+.stock-scanner-card { animation-delay: 0.32s; }
 
 @keyframes cardReveal {
     from { opacity: 0; transform: translateY(10px); }
@@ -423,6 +425,7 @@ body {
             transparent 60%),
         var(--bg-card);
     border-color: var(--accent-border);
+    padding-bottom: 12px;
 }
 
 .pnl-main {
@@ -528,6 +531,52 @@ body {
 /* === STRATEGY MONITOR (NOVA|PLAYBOOK) === */
 .strategy-card {
     grid-area: strategy;
+}
+
+/* === FAVORITES === */
+.favorites-card {
+    grid-area: favorites;
+    min-height: 0;
+    padding-top: 8px;
+    padding-bottom: 8px;
+}
+
+.favorites-card .card-header {
+    margin-bottom: 6px;
+    padding-bottom: 6px;
+}
+
+.favorites-list {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+    gap: 8px;
+}
+
+.favorite-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    min-height: 34px;
+    padding: 6px 8px;
+    border-radius: var(--radius-sm);
+    border: 1px solid rgba(255, 255, 255, 0.05);
+    background: rgba(255, 255, 255, 0.02);
+}
+
+.favorite-item.empty {
+    grid-column: 1 / -1;
+    justify-content: center;
+    color: var(--text-3);
+    font-family: var(--font-body);
+    letter-spacing: 0.4px;
+}
+
+.favorite-symbol {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-1);
+    font-weight: 600;
 }
 
 .strategy-grid {
@@ -643,6 +692,48 @@ body {
     padding: 28px;
     font-family: var(--font-body);
     letter-spacing: 0.5px;
+}
+
+.symbol-with-fav {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.symbol-label {
+    color: var(--text-1);
+}
+
+.scanner-actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.fav-btn {
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    border-radius: 7px;
+    border: 1px solid rgba(212, 160, 18, 0.28);
+    background: rgba(212, 160, 18, 0.08);
+    color: var(--text-3);
+    font-size: 13px;
+    line-height: 1;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.fav-btn:hover {
+    color: var(--accent-bright);
+    border-color: rgba(212, 160, 18, 0.45);
+    background: rgba(212, 160, 18, 0.16);
+}
+
+.fav-btn.active {
+    color: #ff5d8f;
+    border-color: rgba(255, 93, 143, 0.55);
+    background: rgba(255, 93, 143, 0.16);
 }
 
 .side-buy { color: var(--green); font-weight: 600; }
@@ -836,6 +927,12 @@ body {
     border-bottom: 1px solid rgba(255, 255, 255, 0.05);
 }
 
+.chart-header-actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+}
+
 .chart-modal-header h2 {
     font-family: var(--font-display);
     font-size: 16px;
@@ -860,6 +957,24 @@ body {
     font-size: 20px;
     line-height: 1;
     cursor: pointer;
+}
+
+.chart-favorite-btn {
+    width: 30px;
+    height: 30px;
+    border-radius: 8px;
+    border: 1px solid rgba(255, 255, 255, 0.10);
+    background: rgba(255, 255, 255, 0.02);
+    color: var(--text-2);
+    font-size: 16px;
+    line-height: 1;
+    cursor: pointer;
+}
+
+.chart-favorite-btn.active {
+    color: #ff5d8f;
+    border-color: rgba(255, 93, 143, 0.55);
+    background: rgba(255, 93, 143, 0.16);
 }
 
 .chart-close-btn:hover {
@@ -1259,6 +1374,12 @@ body {
 .stock-item .stock-symbol {
     font-weight: 600;
     letter-spacing: 0.7px;
+}
+
+.stock-main {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
 }
 
 .stock-item .stock-price {
@@ -1713,6 +1834,7 @@ body {
         grid-template-columns: repeat(2, 1fr);
         grid-template-areas:
             "pnl pnl"
+            "favorites favorites"
             "strategy strategy"
             "positions positions"
             "thought thought"
@@ -1736,6 +1858,7 @@ body {
         grid-template-columns: 1fr;
         grid-template-areas:
             "pnl"
+            "favorites"
             "strategy"
             "positions"
             "thought"
@@ -1745,7 +1868,7 @@ body {
         padding: var(--gap) 12px 24px;
     }
 
-    .pnl-card, .strategy-card, .positions-card,
+    .pnl-card, .favorites-card, .strategy-card, .positions-card,
     .scanner-card, .thought-card, .risk-card, .stock-scanner-card {
         grid-column: 1 / -1;
         grid-row: auto;

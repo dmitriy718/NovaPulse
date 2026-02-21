@@ -27,20 +27,36 @@ class StripeService:
         secret_key: str = "",
         webhook_secret: str = "",
         price_id: str = "",
+        price_id_pro: str = "",
+        price_id_premium: str = "",
         currency: str = "usd",
         db=None,
     ):
         self.secret_key = secret_key or os.getenv("STRIPE_SECRET_KEY", "")
         self.webhook_secret = webhook_secret or os.getenv("STRIPE_WEBHOOK_SECRET", "")
-        self.price_id = price_id or os.getenv("STRIPE_PRICE_ID", "")
+        legacy_price = price_id or os.getenv("STRIPE_PRICE_ID", "")
+        self.price_id_pro = price_id_pro or os.getenv("STRIPE_PRICE_ID_PRO", "") or legacy_price
+        self.price_id_premium = price_id_premium or os.getenv("STRIPE_PRICE_ID_PREMIUM", "")
+        self.price_id = self.price_id_pro  # Backward-compatible alias.
         self.currency = currency
         self._db = db
-        self._enabled = bool(self.secret_key and self.price_id)
+        self._price_ids: Dict[str, str] = {
+            "pro": self.price_id_pro,
+            "premium": self.price_id_premium,
+        }
+        self._enabled = bool(self.secret_key and any(self._price_ids.values()))
         self._stripe = None  # cached module ref after one-time init
 
     @property
     def enabled(self) -> bool:
         return self._enabled
+
+    def has_plan(self, plan: str) -> bool:
+        """Return True when a plan is available for checkout."""
+        plan_name = (plan or "pro").strip().lower()
+        if plan_name == "free":
+            return True
+        return bool(self._price_ids.get(plan_name, ""))
 
     def set_db(self, db) -> None:
         """Inject database for tenant updates."""
@@ -82,6 +98,7 @@ class StripeService:
         cancel_url: str,
         customer_email: Optional[str] = None,
         customer_id: Optional[str] = None,
+        plan: str = "pro",
     ) -> Optional[Dict[str, Any]]:
         """
         Create a Stripe Checkout Session for subscription.
@@ -90,14 +107,22 @@ class StripeService:
         if not self._enabled:
             return None
         try:
+            plan_name = (plan or "pro").strip().lower()
+            price_id = self._price_ids.get(plan_name, "")
+            if not price_id:
+                logger.warning(
+                    "Stripe checkout rejected: plan not configured",
+                    plan=plan_name,
+                )
+                return None
             stripe = self._api()
             params = {
                 "mode": "subscription",
-                "line_items": [{"price": self.price_id, "quantity": 1}],
+                "line_items": [{"price": price_id, "quantity": 1}],
                 "success_url": success_url,
                 "cancel_url": cancel_url,
-                "metadata": {"tenant_id": tenant_id},
-                "subscription_data": {"metadata": {"tenant_id": tenant_id}},
+                "metadata": {"tenant_id": tenant_id, "plan": plan_name},
+                "subscription_data": {"metadata": {"tenant_id": tenant_id, "plan": plan_name}},
             }
             if customer_id:
                 params["customer"] = customer_id
@@ -107,6 +132,8 @@ class StripeService:
             return {
                 "url": session.url,
                 "session_id": session.id,
+                "plan": plan_name,
+                "price_id": price_id,
                 "customer_id": getattr(session, "customer", None) or (session.customer if hasattr(session, "customer") else None),
             }
         except Exception as e:
