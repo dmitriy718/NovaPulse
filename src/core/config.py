@@ -119,6 +119,8 @@ def _apply_env_overrides(config: Dict[str, Any]) -> None:
         "STOCKS_MAX_HOLD_DAYS": ("stocks", "max_hold_days", int),
         "STOCKS_MAX_OPEN_POSITIONS": ("stocks", "max_open_positions", int),
         "STOCKS_MAX_POSITION_USD": ("stocks", "max_position_usd", float),
+        "STOCKS_STOP_LOSS_PCT": ("stocks", "stop_loss_pct", float),
+        "STOCKS_TAKE_PROFIT_PCT": ("stocks", "take_profit_pct", float),
         "STOCKS_ESTIMATED_FEE_PCT_PER_SIDE": ("stocks", "estimated_fee_pct_per_side", float),
         "STOCKS_ESTIMATED_SLIPPAGE_PCT_PER_SIDE": ("stocks", "estimated_slippage_pct_per_side", float),
         "STOCKS_DB_PATH": ("stocks", "db_path"),
@@ -606,6 +608,9 @@ class StocksConfig(BaseModel):
     max_hold_days: int = 7
     max_open_positions: int = 4
     max_position_usd: float = 500.0
+    # Protective levels for stock positions (long-only).
+    stop_loss_pct: float = 0.02
+    take_profit_pct: float = 0.04
     # Friction model used for net PnL in stock closes (entry + exit side costs).
     estimated_fee_pct_per_side: float = 0.0005
     estimated_slippage_pct_per_side: float = 0.0002
@@ -637,10 +642,26 @@ class StocksConfig(BaseModel):
             raise ValueError("stock friction values must be >= 0")
         return v
 
+    @field_validator("stop_loss_pct")
+    @classmethod
+    def validate_stop_loss_pct(cls, v):
+        if v <= 0 or v >= 0.50:
+            raise ValueError("stocks.stop_loss_pct must be > 0 and < 0.50")
+        return v
+
+    @field_validator("take_profit_pct")
+    @classmethod
+    def validate_take_profit_pct(cls, v):
+        if v <= 0 or v >= 1.0:
+            raise ValueError("stocks.take_profit_pct must be > 0 and < 1.0")
+        return v
+
     @model_validator(mode="after")
     def validate_hold_window(self):
         if self.max_hold_days < self.min_hold_days:
             raise ValueError("stocks.max_hold_days must be >= stocks.min_hold_days")
+        if self.take_profit_pct <= self.stop_loss_pct:
+            raise ValueError("stocks.take_profit_pct must be greater than stocks.stop_loss_pct")
         return self
 
 

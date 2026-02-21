@@ -157,6 +157,10 @@ def setup_logging(
         "websockets",
         "asyncio",
         "uvicorn.access",
+        # Elasticsearch transport logs each request at INFO; keep warnings/errors only.
+        "elastic_transport",
+        "elastic_transport.transport",
+        "elasticsearch",
     ):
         logging.getLogger(noisy).setLevel(logging.WARNING)
 

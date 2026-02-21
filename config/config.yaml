@@ -267,6 +267,8 @@ stocks:
   max_hold_days: 7
   max_open_positions: 4
   max_position_usd: 500.0
+  stop_loss_pct: 0.02
+  take_profit_pct: 0.04
   estimated_fee_pct_per_side: 0.0005
   estimated_slippage_pct_per_side: 0.0002
   db_path: "data/stocks.db"
