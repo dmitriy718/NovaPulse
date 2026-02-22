@@ -26,9 +26,9 @@ from src.ai.order_book import OrderBookAnalyzer
 from src.ai.predictor import TFLitePredictor
 from src.api.server import DashboardServer
 from src.core.control_router import ControlRouter
-from src.core.config import ConfigManager, get_config
+from src.core.config import get_config
 from src.core.database import DatabaseManager
-from src.core.error_handler import ErrorSeverity, GracefulErrorHandler
+from src.core.error_handler import GracefulErrorHandler
 from src.core.logger import get_logger, setup_logging
 from src.exchange.kraken_rest import KrakenRESTClient
 from src.exchange.kraken_ws import KrakenWebSocketClient
@@ -402,30 +402,23 @@ class BotEngine:
             )
         return {"ok": True, "trade_id": trade_id}
 
-    async def initialize(self) -> None:
-        """Initialize all subsystems with graceful error handling.
+    def _env_for_account(self, name: str, default: str = "") -> str:
+        """Resolve an env var with optional per-account prefix.
 
-        CRITICAL subsystems (DB, REST client): failure aborts startup.
-        NON-CRITICAL subsystems (Telegram, Dashboard, ML, Billing): failure
-        is logged and skipped — the bot keeps trading.
+        Supports multi-account secret names like:
+        MAIN_KRAKEN_API_KEY, SWING_COINBASE_KEY_NAME, etc.
         """
-        from src import __version__
-        logger.info("Initializing AI Trading Bot", mode=self.mode, version=__version__)
+        account_id = self._resolved_account_id
+        if account_id and account_id != "default":
+            prefix = "".join(ch if ch.isalnum() else "_" for ch in account_id.upper())
+            scoped_key = f"{prefix}_{name}"
+            scoped = os.getenv(scoped_key)
+            if scoped is not None and scoped != "":
+                return scoped
+        return os.getenv(name, default)
 
-        account_id = str(getattr(self.config.app, "account_id", self.tenant_id) or self.tenant_id).strip().lower()
-
-        def _env_for_account(name: str, default: str = "") -> str:
-            # Supports multi-account secret names like:
-            # MAIN_KRAKEN_API_KEY, SWING_COINBASE_KEY_NAME, etc.
-            if account_id and account_id != "default":
-                prefix = "".join(ch if ch.isalnum() else "_" for ch in account_id.upper())
-                scoped_key = f"{prefix}_{name}"
-                scoped = os.getenv(scoped_key)
-                if scoped is not None and scoped != "":
-                    return scoped
-            return os.getenv(name, default)
-
-        # ---- CRITICAL: Database ----
+    async def _init_database(self) -> None:
+        """Initialize database and wire up error handler DB logging."""
         db_path = self.config.app.db_path
         self.db = DatabaseManager(db_path)
         await self.db.initialize()
@@ -456,38 +449,41 @@ class BotEngine:
             )
         )
 
-        # ---- CRITICAL: REST + WebSocket Clients ----
+    async def _init_exchange_clients(self) -> None:
+        """Initialize REST and WebSocket exchange clients."""
+        account_id = self._resolved_account_id
+
         if self.exchange_name == "coinbase":
             from src.exchange.coinbase_rest import CoinbaseAuthConfig, CoinbaseRESTClient
             from src.exchange.coinbase_ws import CoinbaseWebSocketClient
 
-            is_sandbox = _env_for_account("COINBASE_SANDBOX", "false").lower() in ("true", "1", "yes")
+            is_sandbox = self._env_for_account("COINBASE_SANDBOX", "false").lower() in ("true", "1", "yes")
             rest_url = self.config.exchange.rest_url
             ws_url = self.config.exchange.ws_url
             if "kraken" in rest_url:
                 rest_url = CoinbaseRESTClient.DEFAULT_SANDBOX_URL if is_sandbox else CoinbaseRESTClient.DEFAULT_REST_URL
             if "kraken" in ws_url:
                 ws_url = CoinbaseWebSocketClient.DEFAULT_WS_URL
-            market_data_url = _env_for_account("COINBASE_MARKET_DATA_URL", "").strip() or None
+            market_data_url = self._env_for_account("COINBASE_MARKET_DATA_URL", "").strip() or None
             if is_sandbox and not market_data_url:
                 logger.warning(
                     "Coinbase sandbox has limited market data endpoints",
                     hint="Set COINBASE_MARKET_DATA_URL to production if needed",
                 )
 
-            key_name = _env_for_account("COINBASE_KEY_NAME", "").strip()
+            key_name = self._env_for_account("COINBASE_KEY_NAME", "").strip()
             if not key_name:
-                org_id = _env_for_account("COINBASE_ORG_ID", "").strip()
-                key_id = _env_for_account("COINBASE_KEY_ID", "").strip()
+                org_id = self._env_for_account("COINBASE_ORG_ID", "").strip()
+                key_id = self._env_for_account("COINBASE_KEY_ID", "").strip()
                 if org_id and key_id:
                     key_name = f"organizations/{org_id}/apiKeys/{key_id}"
 
             private_key_pem = ""
-            inline_private_key = _env_for_account("COINBASE_PRIVATE_KEY", "").strip()
+            inline_private_key = self._env_for_account("COINBASE_PRIVATE_KEY", "").strip()
             if inline_private_key:
                 private_key_pem = inline_private_key
             else:
-                key_path = _env_for_account("COINBASE_PRIVATE_KEY_PATH", "").strip()
+                key_path = self._env_for_account("COINBASE_PRIVATE_KEY_PATH", "").strip()
                 if key_path and os.path.exists(key_path):
                     with open(key_path, "r") as f:
                         private_key_pem = f.read()
@@ -525,9 +521,9 @@ class BotEngine:
 
             self.ws_client = CoinbaseWebSocketClient(url=ws_url)
         else:
-            api_key = _env_for_account("KRAKEN_API_KEY", "")
-            api_secret = _env_for_account("KRAKEN_API_SECRET", "")
-            is_sandbox = _env_for_account("KRAKEN_SANDBOX", "false").lower() in ("true", "1", "yes")
+            api_key = self._env_for_account("KRAKEN_API_KEY", "")
+            api_secret = self._env_for_account("KRAKEN_API_SECRET", "")
+            is_sandbox = self._env_for_account("KRAKEN_SANDBOX", "false").lower() in ("true", "1", "yes")
 
             self.rest_client = KrakenRESTClient(
                 api_key=api_key,
@@ -549,7 +545,8 @@ class BotEngine:
                 url=self.config.exchange.ws_url,
             )
 
-        # Market Data Cache
+    async def _init_market_data(self) -> None:
+        """Initialize market data cache and session analyzer."""
         self.market_data = MarketDataCache(
             max_bars=self.config.trading.warmup_bars,
         )
@@ -570,7 +567,8 @@ class BotEngine:
         except Exception as e:
             await self.error_handler.handle(e, component="session_analyzer", context="init")
 
-        # ---- NON-CRITICAL: AI Components ----
+    async def _init_ai_components(self) -> None:
+        """Initialize ConfluenceDetector, TFLitePredictor, ContinuousLearner, and OrderBookAnalyzer."""
         try:
             self.confluence = ConfluenceDetector(
                 market_data=self.market_data,
@@ -644,7 +642,8 @@ class BotEngine:
         except Exception as e:
             await self.error_handler.handle(e, component="order_book_analyzer", context="init")
 
-        # Risk Manager
+    async def _init_risk_and_execution(self) -> None:
+        """Initialize RiskManager, TradeExecutor, and restore positions."""
         initial_bankroll = float(self.config.risk.initial_bankroll)
         max_risk_per_trade = float(self.config.risk.max_risk_per_trade)
         max_position_usd = float(self.config.risk.max_position_usd)
@@ -726,11 +725,30 @@ class BotEngine:
             es_client=self.es_client,
             strategy_result_cb=self.confluence.record_trade_result if self.confluence else None,
             max_trades_per_hour=getattr(self.config.trading, "max_trades_per_hour", 0),
+            quiet_hours_utc=tuple(self.config.trading.quiet_hours_utc) if self.config.trading.quiet_hours_utc else (),
+            smart_exit_enabled=bool(self.config.risk.smart_exit.enabled),
+            smart_exit_tiers=self.config.risk.smart_exit.tiers if self.config.risk.smart_exit.enabled else [],
         )
         if self.continuous_learner:
             self.executor.set_continuous_learner(self.continuous_learner)
 
-        # ---- NON-CRITICAL: ML Training Components ----
+        # Restore open positions state
+        await self.executor.reinitialize_positions()
+        try:
+            await asyncio.wait_for(
+                self.executor.reconcile_exchange_positions(),
+                timeout=15.0,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("Startup reconciliation timed out after 15s \u2014 will retry in background loop")
+
+        # Store resolved risk parameters for post-init logging
+        self._init_bankroll = initial_bankroll
+        self._init_max_risk_per_trade = max_risk_per_trade
+        self._init_max_position_usd = max_position_usd
+
+    async def _init_ml_components(self) -> None:
+        """Initialize ModelTrainer, AutoRetrainer, StrategyTuner, and AutoTuner."""
         try:
             self.ml_trainer = ModelTrainer(
                 db=self.db,
@@ -772,9 +790,8 @@ class BotEngine:
         except Exception as e:
             await self.error_handler.handle(e, component="strategy_tuner", context="init")
 
-        # Restore open positions state
-        await self.executor.reinitialize_positions()
-
+    async def _init_dashboard(self) -> None:
+        """Initialize dashboard server and billing integration."""
         # Control Router (always available)
         self.control_router = ControlRouter(self)
 
@@ -784,10 +801,32 @@ class BotEngine:
                 self.dashboard = DashboardServer()
                 self.dashboard.set_bot_engine(self)
                 self.dashboard.set_control_router(self.control_router)
+                from src.core.logger import attach_dashboard_alerts
+                attach_dashboard_alerts(self.dashboard)
             except Exception as e:
                 await self.error_handler.handle(e, component="dashboard", context="init")
 
-        # ---- NON-CRITICAL: Telegram ----
+        # ---- NON-CRITICAL: Billing (Stripe) ----
+        try:
+            billing = getattr(self.config, "billing", None)
+            if billing and getattr(billing.stripe, "enabled", False) and self.dashboard:
+                from src.billing.stripe_service import StripeService
+                stripe_cfg = billing.stripe
+                stripe_svc = StripeService(
+                    secret_key=stripe_cfg.secret_key,
+                    webhook_secret=stripe_cfg.webhook_secret,
+                    price_id=stripe_cfg.price_id,
+                    price_id_pro=getattr(stripe_cfg, "price_id_pro", ""),
+                    price_id_premium=getattr(stripe_cfg, "price_id_premium", ""),
+                    currency=stripe_cfg.currency,
+                    db=self.db,
+                )
+                self.dashboard.set_stripe_service(stripe_svc)
+        except Exception as e:
+            await self.error_handler.handle(e, component="billing", context="init")
+
+    async def _init_notifications(self) -> None:
+        """Initialize Telegram, Discord, and Slack notification bots."""
         notification_targets = []
         try:
             tcfg = getattr(self.config, "control", None)
@@ -856,26 +895,8 @@ class BotEngine:
 
             self.error_handler.set_notify_fn(_notify_all)
 
-        # ---- NON-CRITICAL: Billing (Stripe) ----
-        try:
-            billing = getattr(self.config, "billing", None)
-            if billing and getattr(billing.stripe, "enabled", False) and self.dashboard:
-                from src.billing.stripe_service import StripeService
-                stripe_cfg = billing.stripe
-                stripe_svc = StripeService(
-                    secret_key=stripe_cfg.secret_key,
-                    webhook_secret=stripe_cfg.webhook_secret,
-                    price_id=stripe_cfg.price_id,
-                    price_id_pro=getattr(stripe_cfg, "price_id_pro", ""),
-                    price_id_premium=getattr(stripe_cfg, "price_id_premium", ""),
-                    currency=stripe_cfg.currency,
-                    db=self.db,
-                )
-                self.dashboard.set_stripe_service(stripe_svc)
-        except Exception as e:
-            await self.error_handler.handle(e, component="billing", context="init")
-
-        # ---- NON-CRITICAL: Elasticsearch Data Pipeline ----
+    async def _init_observability(self) -> None:
+        """Initialize Elasticsearch data pipeline."""
         try:
             es_cfg = getattr(self.config, "elasticsearch", None)
             if es_cfg and getattr(es_cfg, "enabled", False):
@@ -931,6 +952,52 @@ class BotEngine:
         except Exception as e:
             await self.error_handler.handle(e, component="elasticsearch", context="init")
             self.es_client = None
+
+    async def initialize(self) -> None:
+        """Initialize all subsystems with graceful error handling.
+
+        CRITICAL subsystems (DB, REST client): failure aborts startup.
+        NON-CRITICAL subsystems (Telegram, Dashboard, ML, Billing): failure
+        is logged and skipped -- the bot keeps trading.
+        """
+        from src import __version__
+        logger.info("Initializing AI Trading Bot", mode=self.mode, version=__version__)
+
+        self._resolved_account_id = str(
+            getattr(self.config.app, "account_id", self.tenant_id) or self.tenant_id
+        ).strip().lower()
+
+        # ---- CRITICAL: Database ----
+        await self._init_database()
+
+        # ---- CRITICAL: REST + WebSocket Clients ----
+        await self._init_exchange_clients()
+
+        # ---- Market Data + Session Analyzer ----
+        await self._init_market_data()
+
+        # ---- NON-CRITICAL: AI Components ----
+        await self._init_ai_components()
+
+        # ---- Risk Management + Trade Execution ----
+        await self._init_risk_and_execution()
+
+        # ---- NON-CRITICAL: ML Training Components ----
+        await self._init_ml_components()
+
+        # ---- Dashboard + Billing ----
+        await self._init_dashboard()
+
+        # ---- NON-CRITICAL: Notifications (Telegram, Discord, Slack) ----
+        await self._init_notifications()
+
+        # ---- NON-CRITICAL: Elasticsearch Data Pipeline ----
+        await self._init_observability()
+
+        # ---- Post-init logging ----
+        initial_bankroll = self._init_bankroll
+        max_risk_per_trade = self._init_max_risk_per_trade
+        max_position_usd = self._init_max_position_usd
 
         await self.db.log_thought(
             "system",
@@ -1455,6 +1522,26 @@ class BotEngine:
                     error_type=type(e).__name__,
                     traceback=traceback.format_exc(),
                 )
+
+    async def _reconciliation_loop(self) -> None:
+        """Periodically reconcile DB positions against exchange open orders."""
+        interval = max(60, int(getattr(self.config.trading, "reconciliation_interval", 300)))
+        logger.info("Reconciliation loop started", interval=interval)
+        while self._running:
+            try:
+                await asyncio.sleep(interval)
+                if self.executor:
+                    await self.executor.reconcile_exchange_positions()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(
+                    "Reconciliation loop error",
+                    error=repr(e),
+                    error_type=type(e).__name__,
+                    traceback=traceback.format_exc(),
+                )
+                await asyncio.sleep(60)
 
     async def _cleanup_loop(self) -> None:
         """Periodic cleanup of old data."""

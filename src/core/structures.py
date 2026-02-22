@@ -62,10 +62,12 @@ class RingBuffer:
         """
         if self.size < self.capacity:
             return self._data[:self.size]
-        
+        # If position is at 0, data is contiguous — no copy needed
+        if self.position == 0:
+            return self._data
         # If full, we need to unroll
         return np.concatenate((
-            self._data[self.position:], 
+            self._data[self.position:],
             self._data[:self.position]
         ))
 

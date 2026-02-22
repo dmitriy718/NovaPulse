@@ -19,6 +19,10 @@ import yaml
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from src.core.logger import get_logger
+
+_config_logger = get_logger("config")
+
 
 # ---------------------------------------------------------------------------
 # Environment overrides (shared)
@@ -239,10 +243,11 @@ def _apply_env_overrides(config: Dict[str, Any]) -> None:
                         config[section] = {}
                     config[section][key] = converter(value)
             except (ValueError, TypeError) as e:
-                import logging
-                logging.getLogger("config").warning(
-                    "Env %s=%r failed to convert: %s. Using YAML value.",
-                    env_key, value, e,
+                _config_logger.warning(
+                    "Env override conversion failed, using YAML value",
+                    env_key=env_key,
+                    env_value=repr(value),
+                    error=str(e),
                 )
 
 
@@ -298,6 +303,22 @@ class TradingConfig(BaseModel):
     canary_min_confidence: float = 0.68
     canary_min_confluence: int = 3
     canary_scan_interval_seconds: int = 60
+
+    @field_validator("scan_interval_seconds", mode="before")
+    @classmethod
+    def validate_scan_interval_seconds(cls, v):
+        v = int(v)
+        if v < 1:
+            raise ValueError("scan_interval_seconds must be >= 1 (0 would create tight infinite loop)")
+        return v
+
+    @field_validator("warmup_bars", mode="before")
+    @classmethod
+    def validate_warmup_bars(cls, v):
+        v = int(v)
+        if v < 10:
+            raise ValueError("warmup_bars must be >= 10 (too few bars prevents meaningful indicators)")
+        return v
 
 
 class StrategyWeights(BaseModel):
@@ -536,6 +557,30 @@ class RiskConfig(BaseModel):
     def validate_max_total_exposure_pct(cls, v):
         if v <= 0 or v > 1.0:
             raise ValueError("max_total_exposure_pct must be between 0 and 1.0")
+        return v
+
+    @field_validator("initial_bankroll", mode="before")
+    @classmethod
+    def validate_initial_bankroll(cls, v):
+        v = float(v)
+        if v <= 0:
+            raise ValueError("initial_bankroll must be > 0 (prevents division-by-zero in risk manager)")
+        return v
+
+    @field_validator("kelly_fraction", mode="before")
+    @classmethod
+    def validate_kelly_fraction(cls, v):
+        v = float(v)
+        if v <= 0.0 or v > 1.0:
+            raise ValueError("kelly_fraction must be in range (0.0, 1.0]")
+        return v
+
+    @field_validator("trailing_step_pct", mode="before")
+    @classmethod
+    def validate_trailing_step_pct(cls, v):
+        v = float(v)
+        if v <= 0.0 or v >= 0.5:
+            raise ValueError("trailing_step_pct must be in range (0.0, 0.5)")
         return v
 
 

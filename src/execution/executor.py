@@ -27,6 +27,11 @@ from src.ai.confluence import ConfluenceSignal
 from src.core.database import DatabaseManager
 from src.core.logger import get_logger
 from src.ml.continuous_learner import ContinuousLearner
+from src.exchange.exceptions import (
+    PermanentExchangeError,
+    RateLimitError,
+    TransientExchangeError,
+)
 from src.exchange.market_data import MarketDataCache
 from src.execution.risk_manager import RiskManager
 from src.strategies.base import SignalDirection
@@ -68,6 +73,10 @@ class TradeExecutor:
         es_client: Optional[Any] = None,
         strategy_result_cb: Optional[Callable[[str, float, str, str], None]] = None,
         max_trades_per_hour: int = 0,
+        quiet_hours_utc: Optional[tuple] = None,
+        smart_exit_enabled: bool = False,
+        smart_exit_tiers: Optional[list] = None,
+        max_trade_duration_hours: int = 24,
     ):
         self.rest_client = rest_client
         self.market_data = market_data
@@ -84,6 +93,10 @@ class TradeExecutor:
         self.es_client = es_client
         self._strategy_result_cb = strategy_result_cb
         self.max_trades_per_hour = max(0, int(max_trades_per_hour or 0))
+        self.quiet_hours_utc = tuple(quiet_hours_utc) if quiet_hours_utc else ()
+        self.max_trade_duration_hours = max(1, int(max_trade_duration_hours))
+        self._smart_exit_constructor_flag = smart_exit_enabled
+        self._smart_exit_constructor_tiers = list(smart_exit_tiers) if smart_exit_tiers else []
 
         self.continuous_learner: Optional[ContinuousLearner] = None
 
@@ -127,6 +140,16 @@ class TradeExecutor:
         self.es_client = es_client
 
     @staticmethod
+    def _parse_meta(raw: Any) -> dict:
+        """Parse trade metadata from JSON string or dict, returning empty dict on failure."""
+        if not raw:
+            return {}
+        try:
+            return json.loads(raw) if isinstance(raw, str) else dict(raw)
+        except Exception:
+            return {}
+
+    @staticmethod
     def _shift_levels_to_fill(
         planned_entry: float,
         fill_price: float,
@@ -166,26 +189,20 @@ class TradeExecutor:
             trailing_high = 0.0
             trailing_low = float("inf")
             
-            if trade.get("metadata"):
-                try:
-                    meta = json.loads(trade["metadata"]) if isinstance(trade["metadata"], str) else trade["metadata"]
-                    size_usd = meta.get("size_usd", 0.0)
-
-                    # Restore stop loss state
-                    if "stop_loss_state" in meta:
-                        sl_state = meta["stop_loss_state"]
-                        trailing_high = sl_state.get("trailing_high", 0.0)
-                        trailing_low = sl_state.get("trailing_low", float("inf"))
-                except Exception as e:
-                    logger.warning(
-                        "Failed to parse trade metadata on restore",
-                        trade_id=trade_id, error=repr(e),
-                    )
+            meta = self._parse_meta(trade.get("metadata"))
+            if meta:
+                size_usd = meta.get("size_usd", 0.0)
+                # Restore stop loss state
+                if "stop_loss_state" in meta:
+                    sl_state = meta["stop_loss_state"]
+                    trailing_high = sl_state.get("trailing_high", 0.0)
+                    trailing_low = sl_state.get("trailing_low", float("inf"))
             
             if size_usd == 0.0:
                 size_usd = entry_price * trade["quantity"]
 
-            # Re-register with RiskManager
+            # Re-register with RiskManager (is_restart=True skips daily trade
+            # counter increment since these are existing positions being restored)
             self.risk_manager.register_position(
                 trade_id,
                 pair,
@@ -193,6 +210,7 @@ class TradeExecutor:
                 entry_price,
                 size_usd,
                 strategy=trade.get("strategy"),
+                is_restart=True,
             )
             # Restore stop loss state
             if sl > 0:
@@ -205,58 +223,225 @@ class TradeExecutor:
                 trade_id=trade_id, pair=pair, sl=sl
             )
 
+    async def reconcile_exchange_positions(self) -> None:
+        """Compare DB open trades against exchange open orders at startup.
+
+        Detects ghost positions (DB says open but exchange has no matching
+        order) and orphan orders (exchange has an open order not tracked in
+        the DB).  This is informational only — nothing is auto-closed or
+        cancelled.
+        """
+        if self.mode != "live":
+            logger.info("Skipping exchange position reconciliation (mode=%s)", self.mode)
+            return
+
+        if not self.rest_client:
+            logger.info("Skipping exchange position reconciliation (no rest_client)")
+            return
+
+        try:
+            # Fetch exchange open orders
+            exchange_response = await self.rest_client.get_open_orders()
+            exchange_orders: Dict[str, Any] = exchange_response.get("open", {})
+
+            # Fetch DB open trades
+            db_trades = await self.db.get_open_trades(tenant_id=self.tenant_id)
+
+            # Build set of order_txids tracked in DB trades
+            db_txids: set[str] = set()
+            trades_without_txid: list[str] = []
+
+            for trade in db_trades:
+                trade_id = trade["trade_id"]
+                txid = None
+                meta = self._parse_meta(trade.get("metadata"))
+                if meta:
+                    txid = meta.get("order_txid")
+
+                if txid:
+                    db_txids.add(txid)
+                else:
+                    trades_without_txid.append(trade_id)
+
+            # Ghost positions: DB trade references an order_txid that the
+            # exchange no longer shows as open.  Note — filled orders also
+            # disappear from open orders, so a ghost warning does NOT always
+            # mean something is wrong; it simply flags trades worth checking.
+            for txid in db_txids:
+                if txid not in exchange_orders:
+                    logger.info(
+                        "Potential ghost position: DB trade references order_txid "
+                        "not found in exchange open orders (may be filled)",
+                        order_txid=txid,
+                        tenant_id=self.tenant_id,
+                    )
+
+            # Orphan orders: exchange has an open order that no DB trade
+            # references.
+            exchange_txids = set(exchange_orders.keys())
+            orphan_txids = exchange_txids - db_txids
+            for txid in orphan_txids:
+                order_info = exchange_orders[txid]
+                logger.warning(
+                    "Potential orphan order: exchange has open order not "
+                    "tracked in DB",
+                    order_txid=txid,
+                    pair=order_info.get("descr", {}).get("pair", "unknown"),
+                    order_type=order_info.get("descr", {}).get("type", "unknown"),
+                    tenant_id=self.tenant_id,
+                )
+
+            if trades_without_txid:
+                logger.info(
+                    "DB trades without order_txid in metadata (cannot reconcile)",
+                    count=len(trades_without_txid),
+                    trade_ids=trades_without_txid[:10],
+                )
+
+            logger.info(
+                "Exchange position reconciliation complete",
+                db_open_trades=len(db_trades),
+                exchange_open_orders=len(exchange_orders),
+                ghost_candidates=len(db_txids - exchange_txids),
+                orphan_candidates=len(orphan_txids),
+            )
+
+        except Exception as e:
+            logger.error(
+                "Exchange position reconciliation failed (non-blocking)",
+                error=repr(e),
+            )
+
     async def execute_signal(
         self, signal: ConfluenceSignal
     ) -> Optional[str]:
         """
         Execute a confluence signal through the full pipeline.
-        
+
         Pipeline:
-        1. Validate signal quality
-        2. Check risk constraints
-        3. Calculate position size
-        4. Place order (Limit)
-        5. Record trade
-        
+        1. Validate signal quality and age
+        2. Check rate limits, duplicate positions, correlation limits
+        3. Calculate position size and place order
+        4. Record trade and register with risk manager
+        5. Capture entry telemetry (ML features, order book)
+
         Returns trade_id if executed, None if rejected.
-        
-        # ENHANCEMENT: Added multi-stage validation
-        # ENHANCEMENT: Transitioned to Limit Orders for better price control
         """
         # Stage 1: Signal validation
+        effective_confidence = self._validate_signal(signal)
+        if effective_confidence is None:
+            return None
+
+        # Stage 2: Pre-trade gates
+        side = "buy" if signal.direction == SignalDirection.LONG else "sell"
+        primary_strategy = self._primary_strategy(signal)
+
+        if not await self._check_gates(signal, side, primary_strategy):
+            return None
+
+        # Stage 3: Position sizing and order fill
+        fill = await self._size_and_fill(signal, side)
+        if fill is None:
+            return None
+        trade_id, fill_price, filled_units, partial_fill, entry_fee, size_result, adjusted_sl, adjusted_tp = fill
+
+        # Stage 4: Record trade
+        slippage = abs(fill_price - signal.entry_price) / signal.entry_price if signal.entry_price > 0 else 0.0
+        filled_size_usd = filled_units * fill_price
+
+        trade_record = await self._record_trade(
+            signal, trade_id, side, primary_strategy,
+            fill_price, filled_units, partial_fill, entry_fee,
+            size_result, adjusted_sl, adjusted_tp, slippage, filled_size_usd,
+        )
+
+        # Stage 5: Entry telemetry (best-effort, non-blocking)
+        await self._capture_entry_telemetry(signal, trade_id)
+
+        # Initialize stops and register with risk manager
+        self.risk_manager.initialize_stop_loss(trade_id, fill_price, adjusted_sl, side)
+        self.risk_manager.register_position(
+            trade_id, signal.pair, side,
+            fill_price, filled_size_usd, strategy=primary_strategy,
+        )
+        if self.mode == "live" and adjusted_sl > 0:
+            await self._place_exchange_stop(
+                trade_id, signal.pair, side, adjusted_sl, filled_units,
+            )
+
+        # Update execution stats
+        self._execution_stats["orders_placed"] += 1
+        self._execution_stats["orders_filled"] += 1
+        self._execution_stats["total_slippage"] += slippage
+        self._execution_stats["total_fees"] += trade_record["metadata"]["fees"]
+
+        await self.db.log_thought(
+            "trade",
+            f"{'📈' if side == 'buy' else '📉'} {side.upper()} {signal.pair} @ "
+            f"${fill_price:.2f} (Limit) | Size: ${filled_size_usd:.2f} | "
+            f"SL: ${adjusted_sl:.2f} | TP: ${adjusted_tp:.2f} | "
+            f"Confluence: {signal.confluence_count} | "
+            f"{'SURE FIRE' if signal.is_sure_fire else 'Standard'}",
+            severity="info",
+            metadata=trade_record["metadata"],
+            tenant_id=self.tenant_id,
+        )
+
+        logger.info(
+            "Trade executed",
+            trade_id=trade_id,
+            pair=signal.pair,
+            side=side,
+            price=fill_price,
+            size_usd=round(filled_size_usd, 2),
+            mode=self.mode,
+        )
+
+        return trade_id
+
+    # ------------------------------------------------------------------
+    # execute_signal sub-stages
+    # ------------------------------------------------------------------
+
+    def _validate_signal(self, signal: ConfluenceSignal) -> Optional[float]:
+        """Validate signal quality and apply age-based confidence decay.
+
+        Returns effective confidence if the signal passes all checks,
+        or None if the signal should be rejected.
+        """
         if signal.direction == SignalDirection.NEUTRAL:
             return None
 
-        # Signal age decay: reduce confidence for stale signals
         signal_age_seconds = 0.0
         try:
             sig_ts = datetime.fromisoformat(signal.timestamp.replace("Z", "+00:00"))
             signal_age_seconds = (datetime.now(timezone.utc) - sig_ts).total_seconds()
         except Exception:
             pass
+
         effective_confidence = signal.confidence
         if signal_age_seconds > 5:
-            # Decay: lose 2% confidence per second over 5s, max 30% penalty
             decay = min((signal_age_seconds - 5) * 0.02, 0.30)
             effective_confidence = max(signal.confidence - decay, 0.0)
         if signal_age_seconds > 60:
-            return None  # Signal too old, discard entirely
-
-        if effective_confidence < 0.50:
             return None
 
-        # Quiet hours filter: skip new entries during low-liquidity periods
-        try:
-            from src.core.config import get_config
-            quiet_hours = get_config().trading.quiet_hours_utc
-        except Exception:
-            quiet_hours = []
-        if quiet_hours:
-            current_utc_hour = datetime.now(timezone.utc).hour
-            if current_utc_hour in quiet_hours:
-                return None
+        return effective_confidence if effective_confidence >= 0.50 else None
 
-        # Trade-rate throttle: cap new entries in a rolling 1-hour window.
+    async def _check_gates(
+        self, signal: ConfluenceSignal, side: str, primary_strategy: str,
+    ) -> bool:
+        """Check all pre-trade gates: quiet hours, rate throttle,
+        duplicate pair, correlation limits, and strategy cooldown.
+
+        Returns True if all gates pass, False if the trade is blocked.
+        """
+        # Quiet hours filter
+        if self.quiet_hours_utc:
+            if datetime.now(timezone.utc).hour in self.quiet_hours_utc:
+                return False
+
+        # Trade-rate throttle
         if self.max_trades_per_hour > 0:
             cutoff = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
             recent_trades = await self._get_recent_trades_count(cutoff)
@@ -269,30 +454,26 @@ class TradeExecutor:
                     metadata={"pair": signal.pair, "cutoff": cutoff},
                     tenant_id=self.tenant_id,
                 )
-                return None
+                return False
 
-        # Block duplicate pair — only one position per pair at a time
-        open_trades = await self.db.get_open_trades(
-            pair=signal.pair, tenant_id=self.tenant_id
-        )
-        if open_trades:
-            return None  # Already have a position on this pair
+        # Fetch open trades once for duplicate and correlation checks
+        all_open = await self.db.get_open_trades(tenant_id=self.tenant_id)
 
-        # Correlation guard: limit concentrated exposure to correlated pairs
+        # Block duplicate pair
+        if any(t["pair"] == signal.pair for t in all_open):
+            return False
+
+        # Correlation guard
         group = self._correlation_groups.get(signal.pair)
         if group:
-            all_open = await self.db.get_open_trades(tenant_id=self.tenant_id)
             group_count = sum(
                 1 for t in all_open
                 if self._correlation_groups.get(t.get("pair")) == group
             )
             if group_count >= self._max_per_correlation_group:
-                return None
+                return False
 
-        # Stage 2: Risk check and position sizing
-        side = "buy" if signal.direction == SignalDirection.LONG else "sell"
-        primary_strategy = self._primary_strategy(signal)
-
+        # Strategy cooldown
         if self.risk_manager.is_strategy_on_cooldown(signal.pair, primary_strategy, side):
             await self.db.log_thought(
                 "risk",
@@ -301,9 +482,19 @@ class TradeExecutor:
                 metadata={"pair": signal.pair, "strategy": primary_strategy},
                 tenant_id=self.tenant_id,
             )
-            return None
+            return False
 
-        # Estimate win rate from historical data
+        return True
+
+    async def _size_and_fill(
+        self, signal: ConfluenceSignal, side: str,
+    ) -> Optional[tuple]:
+        """Calculate position size, determine limit price, and place order.
+
+        Returns (trade_id, fill_price, filled_units, partial_fill,
+                 entry_fee, size_result, adjusted_sl, adjusted_tp) on success,
+        or None if sizing is rejected or the fill fails.
+        """
         stats = await self.db.get_performance_stats(tenant_id=self.tenant_id)
         total_trades = stats.get("total_trades", 0)
 
@@ -341,43 +532,30 @@ class TradeExecutor:
             )
             return None
 
-        # Determine Limit Price
-        # We want to fill immediately but not slip.
-        # Buy at Ask, Sell at Bid.
+        # Determine limit price: buy at ask, sell at bid
         ticker = self.market_data.get_ticker(signal.pair)
-        limit_price = signal.entry_price # Default
-        
+        limit_price = signal.entry_price
         if ticker:
             try:
                 if side == "buy":
-                    # ticker['a'][0] is best ask price
                     limit_price = float(ticker['a'][0])
                 else:
-                    # ticker['b'][0] is best bid price
                     limit_price = float(ticker['b'][0])
             except (KeyError, IndexError, ValueError):
                 pass
 
-        # Stage 3: Place order
+        # Place order
         trade_id = f"T-{uuid.uuid4().hex[:12]}"
-
         partial_fill = False
         filled_units = size_result.size_units
         entry_fee = 0.0
+
         if self.mode == "paper":
-            fill_price = await self._paper_fill(
-                signal.pair, side, limit_price
-            )
+            fill_price = await self._paper_fill(signal.pair, side, limit_price)
         else:
-            # Use Limit Order
             fill_price, filled_units, partial_fill, entry_fee = await self._live_fill(
-                signal.pair,
-                side,
-                "limit",
-                size_result.size_units,
-                trade_id,
-                price=limit_price,
-                post_only=self.post_only,
+                signal.pair, side, "limit", size_result.size_units,
+                trade_id, price=limit_price, post_only=self.post_only,
             )
 
         if fill_price is None or not filled_units or filled_units <= 0:
@@ -389,22 +567,40 @@ class TradeExecutor:
             )
             return None
 
-        adjusted_stop_loss, adjusted_take_profit = self._shift_levels_to_fill(
+        adjusted_sl, adjusted_tp = self._shift_levels_to_fill(
             planned_entry=signal.entry_price,
             fill_price=fill_price,
             stop_loss=signal.stop_loss,
             take_profit=signal.take_profit,
         )
 
-        # Stage 4: Record trade
-        slippage = abs(fill_price - signal.entry_price) / signal.entry_price if signal.entry_price > 0 else 0.0
-        filled_size_usd = filled_units * fill_price
-        # Prefer actual fee if provided; fallback to heuristic
+        return (trade_id, fill_price, filled_units, partial_fill,
+                entry_fee, size_result, adjusted_sl, adjusted_tp)
+
+    async def _record_trade(
+        self,
+        signal: ConfluenceSignal,
+        trade_id: str,
+        side: str,
+        primary_strategy: str,
+        fill_price: float,
+        filled_units: float,
+        partial_fill: bool,
+        entry_fee: float,
+        size_result: Any,
+        adjusted_sl: float,
+        adjusted_tp: float,
+        slippage: float,
+        filled_size_usd: float,
+    ) -> dict:
+        """Build trade record, insert into DB, and emit trade event.
+
+        Returns the trade_record dict (for downstream metadata access).
+        """
         if entry_fee and entry_fee > 0:
             fees = entry_fee
             entry_fee_rate = entry_fee / filled_size_usd if filled_size_usd > 0 else 0.0
         else:
-            # Maker fee if post-only; otherwise assume taker
             entry_fee_rate = self.maker_fee if (self.post_only and self.mode == "live") else self.taker_fee
             fees = filled_size_usd * entry_fee_rate
 
@@ -417,8 +613,8 @@ class TradeExecutor:
             "status": "open",
             "strategy": primary_strategy,
             "confidence": signal.confidence,
-            "stop_loss": adjusted_stop_loss,
-            "take_profit": adjusted_take_profit,
+            "stop_loss": adjusted_sl,
+            "take_profit": adjusted_tp,
             "entry_time": datetime.now(timezone.utc).isoformat(),
             "metadata": {
                 "confluence_count": signal.confluence_count,
@@ -446,7 +642,7 @@ class TradeExecutor:
                 "vol_regime": getattr(signal, "volatility_regime", "") or "",
                 "vol_level": round(getattr(signal, "vol_level", 0.5), 4),
                 "vol_expanding": getattr(signal, "vol_expanding", False),
-            }
+            },
         }
 
         await self.db.insert_trade(trade_record, tenant_id=self.tenant_id)
@@ -463,21 +659,24 @@ class TradeExecutor:
                 "entry_price": fill_price,
                 "quantity": filled_units,
                 "size_usd": filled_size_usd,
-                "stop_loss": adjusted_stop_loss,
-                "take_profit": adjusted_take_profit,
+                "stop_loss": adjusted_sl,
+                "take_profit": adjusted_tp,
                 "confidence": signal.confidence,
             },
         )
+        return trade_record
 
-        # Record ML features at entry so they can be labeled on close and used for training.
+    async def _capture_entry_telemetry(
+        self, signal: ConfluenceSignal, trade_id: str,
+    ) -> None:
+        """Record ML features and order book snapshot at entry (best-effort)."""
+        # ML features
         try:
             features = getattr(signal, "prediction_features", None)
             if isinstance(features, dict) and features:
                 safe_features: Dict[str, float] = {}
                 bad = 0
                 for k, v in features.items():
-                    # Some upstream signals can include None/NaN/inf (e.g. missing spread/book data).
-                    # ML data collection must be best-effort and never block trading.
                     if v is None:
                         bad += 1
                         continue
@@ -507,7 +706,6 @@ class TradeExecutor:
                         bad_values=bad,
                     )
         except Exception as e:
-            # Training data should never block trading/execution.
             logger.warning(
                 "Failed to record ML features (non-fatal)",
                 trade_id=trade_id,
@@ -516,7 +714,7 @@ class TradeExecutor:
                 error_type=type(e).__name__,
             )
 
-        # Store an order book snapshot at entry time (best-effort).
+        # Order book snapshot
         try:
             book = self.market_data.get_order_book(signal.pair) if self.market_data else {}
             bids = (book.get("bids", []) or [])[:10]
@@ -556,47 +754,6 @@ class TradeExecutor:
         except Exception as e:
             logger.debug("Order book snapshot failed (non-fatal)", trade_id=trade_id, error=repr(e))
 
-        # Initialize stop loss tracking
-        self.risk_manager.initialize_stop_loss(
-            trade_id, fill_price, adjusted_stop_loss, side
-        )
-
-        # Register position with risk manager
-        self.risk_manager.register_position(
-            trade_id, signal.pair, side,
-            fill_price, filled_size_usd, strategy=primary_strategy
-        )
-
-        self._execution_stats["orders_placed"] += 1
-        self._execution_stats["orders_filled"] += 1
-        self._execution_stats["total_slippage"] += slippage
-        self._execution_stats["total_fees"] += fees
-
-        # Log the execution thought
-        await self.db.log_thought(
-            "trade",
-            f"{'📈' if side == 'buy' else '📉'} {side.upper()} {signal.pair} @ "
-            f"${fill_price:.2f} (Limit) | Size: ${filled_size_usd:.2f} | "
-            f"SL: ${adjusted_stop_loss:.2f} | TP: ${adjusted_take_profit:.2f} | "
-            f"Confluence: {signal.confluence_count} | "
-            f"{'SURE FIRE' if signal.is_sure_fire else 'Standard'}",
-            severity="info",
-            metadata=trade_record["metadata"],
-            tenant_id=self.tenant_id,
-        )
-
-        logger.info(
-            "Trade executed",
-            trade_id=trade_id,
-            pair=signal.pair,
-            side=side,
-            price=fill_price,
-            size_usd=round(filled_size_usd, 2),
-            mode=self.mode,
-        )
-
-        return trade_id
-
     async def _get_recent_trades_count(self, cutoff: str) -> int:
         """Fetch recent trade count with a short in-memory cache."""
         now = time.time()
@@ -618,15 +775,105 @@ class TradeExecutor:
         """
         open_trades = await self.db.get_open_trades(tenant_id=self.tenant_id)
 
-        for trade in open_trades:
-            try:
-                await self._manage_position(trade)
-            except Exception as e:
-                logger.error(
-                    "Position management error",
-                    trade_id=trade["trade_id"],
-                    error=str(e)
-                )
+        if open_trades:
+            results = await asyncio.gather(
+                *[self._manage_position(trade) for trade in open_trades],
+                return_exceptions=True,
+            )
+            for trade, result in zip(open_trades, results):
+                if isinstance(result, Exception):
+                    logger.error(
+                        "Position management error",
+                        trade_id=trade["trade_id"],
+                        error=str(result),
+                    )
+
+    async def _place_exchange_stop(
+        self, trade_id: str, pair: str, side: str, stop_price: float, volume: float
+    ) -> Optional[str]:
+        """Place a stop-loss order on the exchange as a crash-proof safety net.
+
+        The software trailing stops remain primary. This exchange stop is placed
+        at the initial SL level and updated when the trailing stop moves.
+        """
+        if not self.rest_client:
+            return None
+        try:
+            # Stop-loss sell for longs, stop-loss buy for shorts
+            stop_side = "sell" if side == "buy" else "buy"
+            coid = f"{trade_id}-sl"
+            result = await self.rest_client.place_order(
+                pair=pair,
+                side=stop_side,
+                order_type="stop-loss",
+                volume=volume,
+                price=stop_price,
+                client_order_id=coid,
+                reduce_only=True,
+            )
+            txid = None
+            if "txid" in result:
+                txid = result["txid"][0] if isinstance(result["txid"], list) else result["txid"]
+            if txid:
+                # Store the stop order txid in trade metadata for later amendment/cancel
+                try:
+                    trade = await self.db.get_trade_by_id(trade_id, tenant_id=self.tenant_id)
+                    if trade:
+                        meta = self._parse_meta(trade.get("metadata"))
+                        meta["exchange_stop_txid"] = txid
+                        await self.db.update_trade(trade_id, {"metadata": meta}, tenant_id=self.tenant_id)
+                except Exception as e:
+                    logger.warning("Failed to persist exchange stop txid", trade_id=trade_id, error=repr(e))
+                logger.info("Exchange stop order placed", trade_id=trade_id, pair=pair, stop_price=stop_price, txid=txid)
+            return txid
+        except Exception as e:
+            # Non-fatal: software stops still protect the position
+            logger.warning("Exchange stop order failed (software stop still active)", trade_id=trade_id, error=repr(e))
+            return None
+
+    async def _update_exchange_stop(
+        self, trade_id: str, pair: str, side: str, new_stop_price: float, volume: float
+    ) -> None:
+        """Cancel existing exchange stop and place a new one at updated price."""
+        if not self.rest_client:
+            return
+        try:
+            # Get current stop txid from metadata
+            trade = await self.db.get_trade_by_id(trade_id, tenant_id=self.tenant_id)
+            if not trade:
+                return
+            meta = self._parse_meta(trade.get("metadata"))
+            old_txid = meta.get("exchange_stop_txid")
+            if old_txid:
+                try:
+                    await self.rest_client.cancel_order(old_txid)
+                except Exception:
+                    pass  # May already be filled/cancelled
+
+            # Place new stop at updated price
+            new_txid = await self._place_exchange_stop(trade_id, pair, side, new_stop_price, volume)
+            # _place_exchange_stop already persists the new txid
+        except Exception as e:
+            logger.warning("Exchange stop update failed (software stop still active)", trade_id=trade_id, error=repr(e))
+
+    async def _cancel_exchange_stop(self, trade_id: str) -> None:
+        """Cancel any exchange-native stop order for this trade."""
+        if not self.rest_client:
+            return
+        try:
+            trade = await self.db.get_trade_by_id(trade_id, tenant_id=self.tenant_id)
+            if not trade:
+                return
+            meta = self._parse_meta(trade.get("metadata"))
+            txid = meta.get("exchange_stop_txid")
+            if txid:
+                try:
+                    await self.rest_client.cancel_order(txid)
+                    logger.info("Exchange stop cancelled", trade_id=trade_id, txid=txid)
+                except Exception:
+                    pass  # May already be filled/cancelled
+        except Exception as e:
+            logger.debug("Exchange stop cancel lookup failed", trade_id=trade_id, error=repr(e))
 
     async def _manage_position(self, trade: Dict[str, Any]) -> None:
         """Manage a single open position."""
@@ -645,12 +892,11 @@ class TradeExecutor:
         if current_price <= 0:
             return
 
-        # Max trade duration: auto-close positions older than 24 hours
-        max_duration_hours = 24
+        # Max trade duration: auto-close positions older than configured limit
+        max_duration_hours = self.max_trade_duration_hours
         entry_time_str = trade.get("entry_time", "")
         if entry_time_str:
             try:
-                from datetime import datetime, timezone
                 entry_dt = datetime.fromisoformat(entry_time_str.replace("Z", "+00:00"))
                 age_hours = (datetime.now(timezone.utc) - entry_dt).total_seconds() / 3600
                 if age_hours >= max_duration_hours:
@@ -691,15 +937,9 @@ class TradeExecutor:
         # Check take profit
         take_profit = trade.get("take_profit", 0)
         if take_profit > 0:
-            if side == "buy" and current_price >= take_profit:
-                await self._close_position(
-                    trade_id, pair, side, entry_price,
-                    current_price, quantity, "take_profit",
-                    metadata=trade.get("metadata"),
-                    strategy=trade.get("strategy"),
-                )
-                return
-            elif side == "sell" and current_price <= take_profit:
+            tp_hit = (side == "buy" and current_price >= take_profit) or \
+                     (side == "sell" and current_price <= take_profit)
+            if tp_hit:
                 await self._close_position(
                     trade_id, pair, side, entry_price,
                     current_price, quantity, "take_profit",
@@ -711,14 +951,8 @@ class TradeExecutor:
         # Update stop loss in DB if changed
         if state.current_sl > 0:
             # Prepare metadata update with stop loss state
-            meta = {}
-            had_stop_loss_state = False
-            if trade.get("metadata"):
-                try:
-                    meta = json.loads(trade["metadata"]) if isinstance(trade["metadata"], str) else trade["metadata"]
-                    had_stop_loss_state = isinstance(meta.get("stop_loss_state"), dict)
-                except Exception:
-                    pass
+            meta = self._parse_meta(trade.get("metadata"))
+            had_stop_loss_state = isinstance(meta.get("stop_loss_state"), dict)
             
             meta["stop_loss_state"] = state.to_dict()
             
@@ -730,6 +964,118 @@ class TradeExecutor:
                     "trailing_stop": state.current_sl if state.trailing_activated else None,
                     "metadata": meta
                 }, tenant_id=self.tenant_id)
+
+                # Update exchange stop order if SL moved significantly
+                sl_moved_significantly = (
+                    prior_sl > 0
+                    and abs(float(state.current_sl) - prior_sl) / prior_sl > 0.005
+                )
+                if self.mode == "live" and sl_moved_significantly:
+                    await self._update_exchange_stop(trade_id, trade["pair"], side, state.current_sl, quantity)
+
+    async def _exit_live_order(
+        self,
+        trade_id: str,
+        pair: str,
+        side: str,
+        quantity: float,
+        tenant_id: str,
+    ) -> Optional[tuple]:
+        """Place a live market exit order with typed retry logic.
+
+        Returns (exit_price, filled_quantity, exit_fee) on success,
+        or None if the exit fails permanently (trade is marked as error).
+        """
+        close_side = "sell" if side == "buy" else "buy"
+        actual_exit_price = 0.0
+        actual_quantity = quantity
+        exit_fee = 0.0
+
+        for attempt in range(3):
+            try:
+                place_sig = inspect.signature(self.rest_client.place_order)
+                extra_kwargs = {}
+                if "reduce_only" in place_sig.parameters:
+                    extra_kwargs["reduce_only"] = True
+                result = await self.rest_client.place_order(
+                    pair=pair,
+                    side=close_side,
+                    order_type="market",
+                    volume=quantity,
+                    **extra_kwargs,
+                )
+                txid = None
+                if isinstance(result, dict):
+                    txids = result.get("txid") or []
+                    if isinstance(txids, list) and txids:
+                        txid = txids[0]
+                    elif isinstance(txids, str):
+                        txid = txids
+                if txid:
+                    fill_price, filled_units, partial, fee = await self._wait_for_fill(
+                        txid, timeout=30
+                    )
+                    if fill_price and filled_units and filled_units > 0:
+                        actual_exit_price = fill_price
+                        if filled_units < actual_quantity:
+                            logger.warning(
+                                "Partial exit fill detected",
+                                trade_id=trade_id,
+                                requested=actual_quantity,
+                                filled=filled_units,
+                            )
+                            actual_quantity = filled_units
+                        exit_fee = fee if fee and fee > 0 else 0.0
+                return (actual_exit_price, actual_quantity, exit_fee)
+            except PermanentExchangeError as e:
+                logger.error(
+                    "Exit order permanently failed (non-retryable)",
+                    trade_id=trade_id, attempt=attempt + 1,
+                    error=str(e), error_type=type(e).__name__,
+                )
+                break  # No retry for permanent errors
+            except RateLimitError as e:
+                delay = max(e.retry_after, 2 ** attempt)
+                logger.warning(
+                    "Exit order rate-limited, backing off",
+                    trade_id=trade_id, attempt=attempt + 1,
+                    error=str(e), delay=delay,
+                )
+                if attempt < 2:
+                    await asyncio.sleep(delay)
+                    continue
+                break
+            except TransientExchangeError as e:
+                logger.warning(
+                    "Exit order failed (transient), retrying",
+                    trade_id=trade_id, attempt=attempt + 1,
+                    error=str(e), error_type=type(e).__name__,
+                )
+                if attempt < 2:
+                    await asyncio.sleep(2 ** attempt)
+                    continue
+                break
+            except Exception as e:
+                logger.error(
+                    "Exit order failed",
+                    trade_id=trade_id, attempt=attempt + 1, error=str(e),
+                )
+                if attempt < 2:
+                    await asyncio.sleep(2 ** attempt)
+                    continue
+                break
+        else:
+            # All 3 attempts succeeded (shouldn't reach here due to early return)
+            return (actual_exit_price, actual_quantity, exit_fee)
+
+        # All retries exhausted — mark trade as error
+        await self.db.update_trade(trade_id, {
+            "notes": "EXIT FAILED after 3 attempts",
+            "status": "error",
+        }, tenant_id=tenant_id)
+        logger.critical("Exit order permanently failed", trade_id=trade_id)
+        self.risk_manager.close_position(trade_id, 0.0)
+        return None
 
     async def _close_position(
         self,
@@ -746,15 +1092,14 @@ class TradeExecutor:
     ) -> None:
         """Close a position and record the result.
         Optional tenant_id for multi-tenant close_all; defaults to self.tenant_id."""
+        # Cancel exchange stop order if present
+        if self.mode == "live" and self.rest_client:
+            await self._cancel_exchange_stop(trade_id)
+
         tid = tenant_id if tenant_id is not None else self.tenant_id
         # C7 FIX: Include both entry and exit fees in PnL
         entry_fee_rate = self.taker_fee
-        meta = {}
-        if metadata:
-            try:
-                meta = json.loads(metadata) if isinstance(metadata, str) else dict(metadata)
-            except Exception:
-                meta = {}
+        meta = self._parse_meta(metadata)
 
         if meta:
             meta_entry_fee = float(meta.get("entry_fee", 0.0) or 0.0)
@@ -769,64 +1114,12 @@ class TradeExecutor:
 
         # C6 FIX: Retry exit order in live mode; don't leave ghost positions
         if self.mode == "live":
-            close_side = "sell" if side == "buy" else "buy"
-            for attempt in range(3):
-                try:
-                    # Use Limit Order for closing if possible, but Market is safer for stops
-                    # For now, sticking to Market for stops/TP to ensure exit
-                    # Only pass reduce_only for exchanges that support it (Kraken).
-                    # Coinbase does not accept this kwarg.
-                    place_sig = inspect.signature(self.rest_client.place_order)
-                    extra_kwargs = {}
-                    if "reduce_only" in place_sig.parameters:
-                        extra_kwargs["reduce_only"] = True
-                    result = await self.rest_client.place_order(
-                        pair=pair,
-                        side=close_side,
-                        order_type="market",
-                        volume=quantity,
-                        **extra_kwargs,
-                    )
-                    txid = None
-                    if isinstance(result, dict):
-                        txids = result.get("txid") or []
-                        if isinstance(txids, list) and txids:
-                            txid = txids[0]
-                        elif isinstance(txids, str):
-                            txid = txids
-                    if txid:
-                        fill_price, filled_units, partial, fee = await self._wait_for_fill(
-                            txid, timeout=30
-                        )
-                        if fill_price and filled_units and filled_units > 0:
-                            actual_exit_price = fill_price
-                            if filled_units < actual_quantity:
-                                logger.warning(
-                                    "Partial exit fill detected",
-                                    trade_id=trade_id,
-                                    requested=actual_quantity,
-                                    filled=filled_units,
-                                )
-                                actual_quantity = filled_units
-                            exit_fee = fee if fee and fee > 0 else 0.0
-                    break  # Success
-                except Exception as e:
-                    logger.error(
-                        "Exit order failed",
-                        trade_id=trade_id, attempt=attempt + 1, error=str(e)
-                    )
-                    if attempt < 2:
-                        await asyncio.sleep(2 ** attempt)
-                    else:
-                        # Mark as error state so it's not lost
-                        await self.db.update_trade(trade_id, {
-                            "notes": f"EXIT FAILED after 3 attempts: {str(e)}",
-                            "status": "error",
-                        }, tenant_id=tid)
-                        logger.critical("Exit order permanently failed", trade_id=trade_id)
-                        # Clean up risk manager state so the position slot is freed
-                        self.risk_manager.close_position(trade_id, 0.0)
-                        return
+            result = await self._exit_live_order(
+                trade_id, pair, side, quantity, tid,
+            )
+            if result is None:
+                return  # Exit failed permanently — already logged and marked error
+            actual_exit_price, actual_quantity, exit_fee = result
 
         if actual_quantity <= 0:
             return
@@ -956,14 +1249,8 @@ class TradeExecutor:
         """Check and cache smart exit config."""
         if self._smart_exit_enabled is not None:
             return self._smart_exit_enabled
-        try:
-            from src.core.config import get_config
-            se_cfg = get_config().risk.smart_exit
-            self._smart_exit_enabled = bool(se_cfg.enabled)
-            self._smart_exit_tiers = se_cfg.tiers if se_cfg.enabled else []
-        except Exception:
-            self._smart_exit_enabled = False
-            self._smart_exit_tiers = []
+        self._smart_exit_enabled = bool(self._smart_exit_constructor_flag)
+        self._smart_exit_tiers = self._smart_exit_constructor_tiers if self._smart_exit_enabled else []
         return self._smart_exit_enabled
 
     async def _check_smart_exit(self, trade: Dict[str, Any], current_price: float) -> bool:
@@ -972,12 +1259,7 @@ class TradeExecutor:
         if not tiers:
             return False
 
-        meta = {}
-        if trade.get("metadata"):
-            try:
-                meta = json.loads(trade["metadata"]) if isinstance(trade["metadata"], str) else dict(trade["metadata"])
-            except Exception:
-                meta = {}
+        meta = self._parse_meta(trade.get("metadata"))
 
         current_tier = int(meta.get("exit_tier", 0))
         if current_tier >= len(tiers):
@@ -1290,6 +1572,20 @@ class TradeExecutor:
 
             return None, None, False, 0.0
 
+        except PermanentExchangeError as e:
+            logger.warning(
+                "Live order permanently failed",
+                pair=pair, side=side, error=str(e),
+                error_type=type(e).__name__,
+            )
+            return None, None, False, 0.0
+        except TransientExchangeError as e:
+            logger.debug(
+                "Live order failed (transient)",
+                pair=pair, side=side, error=str(e),
+                error_type=type(e).__name__,
+            )
+            return None, None, False, 0.0
         except Exception as e:
             logger.error(
                 "Live order failed",
