@@ -22,6 +22,14 @@ from typing import Any, Dict, List, Optional, Tuple
 import httpx
 
 from src.core.logger import get_logger, log_performance
+from src.exchange.exceptions import (
+    AuthenticationError,
+    InsufficientFundsError,
+    InvalidOrderError,
+    PermanentExchangeError,
+    RateLimitError,
+    TransientExchangeError,
+)
 
 logger = get_logger("kraken_rest")
 
@@ -179,21 +187,40 @@ class KrakenRESTClient:
 
                     if result.get("error") and len(result["error"]) > 0:
                         errors = result["error"]
+                        error_str = ", ".join(errors)
                         if any("EAPI:Rate limit" in e for e in errors):
-                            last_error = KrakenAPIError(errors)
+                            last_error = RateLimitError(error_str)
                             # Fall through to retry logic below
+                        elif any("EAPI:Invalid key" in e or "EAPI:Invalid nonce" in e
+                                 or "EAPI:Invalid signature" in e for e in errors):
+                            raise AuthenticationError(error_str)
+                        elif any("EOrder:Insufficient funds" in e
+                                 or "EOrder:Insufficient initial margin" in e
+                                 for e in errors):
+                            raise InsufficientFundsError(error_str)
+                        elif any(e.startswith("EOrder:") for e in errors):
+                            raise InvalidOrderError(error_str)
+                        elif any(e.startswith("EGeneral:") for e in errors):
+                            raise PermanentExchangeError(error_str)
                         else:
                             raise KrakenAPIError(errors)
                     else:
                         return result.get("result", {})
 
                 except httpx.HTTPStatusError as e:
-                    if e.response.status_code >= 500:
-                        last_error = e
+                    if e.response.status_code == 429:
+                        retry_after = float(
+                            e.response.headers.get("Retry-After", 0)
+                        )
+                        last_error = RateLimitError(
+                            f"HTTP 429: {e}", retry_after=retry_after
+                        )
+                    elif e.response.status_code >= 500:
+                        last_error = TransientExchangeError(str(e))
                     else:
                         raise
                 except (httpx.ConnectError, httpx.ReadTimeout) as e:
-                    last_error = e
+                    last_error = TransientExchangeError(str(e))
 
             # Backoff OUTSIDE the semaphore context (H3 FIX)
             if last_error and attempt < self.max_retries:

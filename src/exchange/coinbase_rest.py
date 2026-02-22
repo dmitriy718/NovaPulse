@@ -24,6 +24,14 @@ import jwt
 from cryptography.hazmat.primitives import serialization
 
 from src.core.logger import get_logger
+from src.exchange.exceptions import (
+    AuthenticationError,
+    InsufficientFundsError,
+    InvalidOrderError,
+    PermanentExchangeError,
+    RateLimitError,
+    TransientExchangeError,
+)
 
 logger = get_logger("coinbase_rest")
 
@@ -168,11 +176,40 @@ class CoinbaseRESTClient:
                     resp.raise_for_status()
                     return resp.json() if resp.content else {}
                 except httpx.HTTPStatusError as e:
-                    last_error = e
-                    if e.response.status_code < 500:
-                        raise
+                    status = e.response.status_code
+                    body_text = ""
+                    try:
+                        body_text = e.response.text
+                    except Exception:
+                        pass
+                    if status == 429:
+                        retry_after = float(
+                            e.response.headers.get("Retry-After", 0)
+                        )
+                        last_error = RateLimitError(
+                            f"HTTP 429: {e}", retry_after=retry_after
+                        )
+                    elif status == 401 or status == 403:
+                        raise AuthenticationError(
+                            f"Coinbase auth error ({status}): {body_text or e}"
+                        )
+                    elif status == 400:
+                        lower_body = body_text.lower()
+                        if "insufficient" in lower_body or "nsf" in lower_body:
+                            raise InsufficientFundsError(
+                                f"Coinbase insufficient funds: {body_text}"
+                            )
+                        raise InvalidOrderError(
+                            f"Coinbase bad request: {body_text or e}"
+                        )
+                    elif status >= 500:
+                        last_error = TransientExchangeError(str(e))
+                    else:
+                        raise PermanentExchangeError(
+                            f"Coinbase error ({status}): {body_text or e}"
+                        )
                 except (httpx.ConnectError, httpx.ReadTimeout) as e:
-                    last_error = e
+                    last_error = TransientExchangeError(str(e))
 
             if last_error and attempt < self.max_retries:
                 delay = (2 ** attempt) * 0.5 + 0.5

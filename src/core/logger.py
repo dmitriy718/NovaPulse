@@ -345,3 +345,97 @@ def attach_telegram_alerts(telegram_bot: Any, min_interval: float = 10.0) -> Non
         level=logging.ERROR,
     )
     logging.getLogger().addHandler(_telegram_alert_handler)
+
+
+# ---------------------------------------------------------------------------
+# Dashboard Alert Handler - forwards WARNING+ logs to dashboard alert panel
+# ---------------------------------------------------------------------------
+
+# Components whose WARNING+ logs are forwarded to the dashboard alert panel.
+_DASHBOARD_ALERT_COMPONENTS = {"executor", "risk_manager", "engine", "exchange", "market_data"}
+
+
+class DashboardAlertHandler(logging.Handler):
+    """
+    Logging handler that forwards WARNING+ log messages from key components
+    to the dashboard server's alert ring buffer.
+
+    Features:
+    - Filters to key components only (executor, risk_manager, engine, exchange, market_data)
+    - Rate-limited: max 1 alert per unique message per 30 seconds
+    - Strips ANSI color codes from formatted messages
+    """
+
+    RATE_LIMIT_SECONDS = 30.0
+
+    def __init__(self, dashboard_server: Any, level: int = logging.WARNING):
+        super().__init__(level)
+        self._dashboard_server = dashboard_server
+        self._recent: Dict[str, float] = {}  # message -> last_emit_time
+
+    def emit(self, record: logging.LogRecord) -> None:
+        """Push a log record to the dashboard alert ring buffer."""
+        try:
+            # Only forward logs from key components
+            if record.name not in _DASHBOARD_ALERT_COMPONENTS:
+                return
+
+            msg = self.format(record) if self.formatter else record.getMessage()
+            # Strip ANSI color codes that structlog console renderer adds
+            msg = re.sub(r"\x1b\[[0-9;]*m", "", msg)
+            if len(msg) > 500:
+                msg = msg[:500] + "..."
+
+            # Rate limit: max 1 per unique message per 30 seconds
+            now = time.time()
+            dedup_key = f"{record.name}:{record.msg}"
+            last_time = self._recent.get(dedup_key, 0.0)
+            if now - last_time < self.RATE_LIMIT_SECONDS:
+                return
+            self._recent[dedup_key] = now
+
+            # Purge stale dedup entries periodically (keep dict bounded)
+            if len(self._recent) > 500:
+                cutoff = now - self.RATE_LIMIT_SECONDS
+                self._recent = {k: v for k, v in self._recent.items() if v > cutoff}
+
+            # Map log level to alert level
+            if record.levelno >= logging.CRITICAL:
+                level = "critical"
+            elif record.levelno >= logging.ERROR:
+                level = "error"
+            else:
+                level = "warning"
+
+            self._dashboard_server.push_alert(
+                level=level,
+                component=record.name,
+                message=msg,
+            )
+        except Exception:
+            # Never let the handler itself crash the application
+            pass
+
+
+# Global reference so it can be attached after DashboardServer is initialized
+_dashboard_alert_handler: Optional[DashboardAlertHandler] = None
+
+
+def attach_dashboard_alerts(dashboard_server: Any) -> None:
+    """
+    Attach a DashboardAlertHandler to the root logger so all WARNING+ logs
+    from key components are forwarded to the dashboard alert panel.
+
+    Call this after the DashboardServer is initialized.
+    """
+    global _dashboard_alert_handler
+
+    # Remove previous handler if re-attaching
+    if _dashboard_alert_handler is not None:
+        logging.getLogger().removeHandler(_dashboard_alert_handler)
+
+    _dashboard_alert_handler = DashboardAlertHandler(
+        dashboard_server,
+        level=logging.WARNING,
+    )
+    logging.getLogger().addHandler(_dashboard_alert_handler)

@@ -8,11 +8,42 @@ so auth and routing stay in one place. The router delegates to the engine/execut
 from __future__ import annotations
 
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Protocol, runtime_checkable
 
 from src.core.logger import get_logger
 
 logger = get_logger("control_router")
+
+
+@runtime_checkable
+class EngineInterface(Protocol):
+    """Minimal engine interface that ControlRouter depends on.
+
+    Any object satisfying this protocol (e.g. BotEngine) can be passed to
+    ControlRouter, enabling testability and decoupling from the concrete engine.
+    """
+
+    # --- attributes ---
+    tenant_id: str
+    mode: str
+    exchange_name: str
+    pairs: List[str]
+    scan_interval: int
+    _running: bool
+    _trading_paused: bool
+    _priority_paused: bool
+    _start_time: float
+    _scan_count: int
+
+    # --- sub-components (may be None during early init) ---
+    db: Any
+    executor: Any
+    risk_manager: Any
+    market_data: Any
+    ws_client: Any
+
+    # --- methods ---
+    async def stop(self) -> None: ...
 
 
 class ControlRouter:
@@ -24,7 +55,7 @@ class ControlRouter:
     all use the same logic.
     """
 
-    def __init__(self, engine) -> None:
+    def __init__(self, engine: EngineInterface) -> None:
         self._engine = engine
 
     def _resolve_tenant(self, tenant_id: Optional[str]) -> str:

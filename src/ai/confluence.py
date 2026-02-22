@@ -484,52 +484,26 @@ class ConfluenceDetector:
         opens = opens[-n:]
 
         bucket_seconds = timeframe * 60
-        agg_closes: List[float] = []
-        agg_opens: List[float] = []
-        agg_highs: List[float] = []
-        agg_lows: List[float] = []
-        agg_volumes: List[float] = []
 
-        current_bucket = None
-        count = 0
-        open_val = high_val = low_val = close_val = vol_val = 0.0
+        # Compute bucket assignments
+        buckets = (times // bucket_seconds).astype(np.int64)
 
-        for i in range(len(times)):
-            bucket = int(times[i] // bucket_seconds)
-            if current_bucket is None or bucket != current_bucket:
-                if current_bucket is not None and count >= 1:
-                    agg_opens.append(open_val)
-                    agg_highs.append(high_val)
-                    agg_lows.append(low_val)
-                    agg_closes.append(close_val)
-                    agg_volumes.append(vol_val)
-                current_bucket = bucket
-                count = 1
-                open_val = float(opens[i])
-                high_val = float(highs[i])
-                low_val = float(lows[i])
-                close_val = float(closes[i])
-                vol_val = float(volumes[i])
-            else:
-                count += 1
-                high_val = max(high_val, float(highs[i]))
-                low_val = min(low_val, float(lows[i]))
-                close_val = float(closes[i])
-                vol_val += float(volumes[i])
+        # Find where bucket changes occur
+        changes = np.concatenate(([0], np.where(np.diff(buckets) != 0)[0] + 1))
 
-        if current_bucket is not None and count >= 1:
-            agg_opens.append(open_val)
-            agg_highs.append(high_val)
-            agg_lows.append(low_val)
-            agg_closes.append(close_val)
-            agg_volumes.append(vol_val)
+        # Use reduceat for vectorized aggregation
+        resampled_open = opens[changes]
+        resampled_close = closes[np.concatenate((changes[1:] - 1, [len(closes) - 1]))]
+        resampled_high = np.maximum.reduceat(highs, changes)
+        resampled_low = np.minimum.reduceat(lows, changes)
+        resampled_volume = np.add.reduceat(volumes, changes)
 
         return (
-            np.array(agg_closes),
-            np.array(agg_highs),
-            np.array(agg_lows),
-            np.array(agg_volumes),
-            np.array(agg_opens),
+            resampled_close,
+            resampled_high,
+            resampled_low,
+            resampled_volume,
+            resampled_open,
         )
 
     # Timeframe confidence weights: higher TFs carry more weight

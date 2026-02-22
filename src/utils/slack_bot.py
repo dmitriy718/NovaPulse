@@ -47,9 +47,10 @@ class SlackBot:
         self._control_router = router
 
     def _is_authorized(self, channel_id: Optional[str]) -> bool:
-        """Return True if channel is in allowlist or no restriction."""
+        """Return True if channel is in allowlist. Fail-closed when no allowlist configured."""
         if not self.allowed_channel_id:
-            return True
+            logger.warning("Slack command denied: SLACK_ALLOWED_CHANNEL_ID not configured")
+            return False
         return channel_id == self.allowed_channel_id
 
     async def initialize(self) -> bool:

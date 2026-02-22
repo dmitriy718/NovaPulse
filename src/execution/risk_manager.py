@@ -538,8 +538,15 @@ class RiskManager:
         entry_price: float,
         size_usd: float,
         strategy: Optional[str] = None,
+        is_restart: bool = False,
     ) -> None:
-        """Register a new open position."""
+        """Register a new open position.
+
+        Args:
+            is_restart: When True (e.g. during reinitialize_positions), skip
+                incrementing _daily_trades and updating cooldown timestamps
+                because these positions already exist in the DB.
+        """
         self._open_positions[trade_id] = {
             "pair": pair,
             "side": side,
@@ -548,8 +555,9 @@ class RiskManager:
             "strategy": strategy,
             "opened_at": time.time(),
         }
-        self._last_trade_time[pair] = time.time()
-        self._daily_trades += 1
+        if not is_restart:
+            self._last_trade_time[pair] = time.time()
+            self._daily_trades += 1
 
     def close_position(self, trade_id: str, pnl: float) -> None:
         """Close a position and update risk metrics."""

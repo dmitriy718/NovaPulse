@@ -441,6 +441,7 @@ async def run_bot():
             asyncio.create_task(_run_with_restart(engine, "ws_loop", engine._ws_data_loop, critical=True)),
             asyncio.create_task(_run_with_restart(engine, "health_monitor", engine._health_monitor, critical=True)),
             asyncio.create_task(_run_with_restart(engine, "cleanup_loop", engine._cleanup_loop)),
+            asyncio.create_task(_run_with_restart(engine, "reconciliation_loop", engine._reconciliation_loop)),
             asyncio.create_task(_run_with_restart(engine, "auto_retrainer", engine.retrainer.run)),
         ]
         priority_targets = [engine] + ([stock_engine] if stock_engine else [])
@@ -606,6 +607,13 @@ async def run_bot():
     dashboard.set_bot_engine(hub)
     dashboard.set_control_router(MultiControlRouter([e.control_router for e in hub_engines if getattr(e, "control_router", None)]))
 
+    # A-MED-5: Attach dashboard alert handler in multi-engine path
+    try:
+        from src.core.logger import attach_dashboard_alerts
+        attach_dashboard_alerts(dashboard)
+    except Exception:
+        pass
+
     uvi_config = uvicorn.Config(
         app=dashboard.app,
         host=engines[0].config.dashboard.host,
@@ -642,6 +650,7 @@ async def run_bot():
             asyncio.create_task(_run_with_restart(eng, f"{label}:ws_loop", eng._ws_data_loop, critical=True)),
             asyncio.create_task(_run_with_restart(eng, f"{label}:health_monitor", eng._health_monitor, critical=True)),
             asyncio.create_task(_run_with_restart(eng, f"{label}:cleanup_loop", eng._cleanup_loop)),
+            asyncio.create_task(_run_with_restart(eng, f"{label}:reconciliation_loop", eng._reconciliation_loop)),
             asyncio.create_task(_run_with_restart(eng, f"{label}:auto_retrainer", eng.retrainer.run)),
         ]
         if getattr(eng, "auto_tuner", None):

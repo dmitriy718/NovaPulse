@@ -128,6 +128,9 @@ class DashboardServer:
         self._stripe_service = None
         self._ws_cache_by_tenant: Dict[str, Dict[str, Any]] = {}
         self._ws_cache_time_by_tenant: Dict[str, float] = {}
+        self._alerts: List[Dict[str, Any]] = []  # Ring buffer of recent alerts
+        self._alerts_max = 200  # Keep last 200 alerts
+        self._favorites_cache: Dict[str, list] = {}  # In-memory favorites cache per tenant
 
     def set_bot_engine(self, engine) -> None:
         """Inject the bot engine reference."""
@@ -159,6 +162,20 @@ class DashboardServer:
     def set_control_router(self, router) -> None:
         """Inject the control router for pause/resume/close_all."""
         self._control_router = router
+
+    def push_alert(self, level: str, component: str, message: str, details: Optional[Dict[str, Any]] = None) -> None:
+        """Add an operational alert to the ring buffer."""
+        alert = {
+            "id": str(uuid.uuid4())[:8],
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "level": level,  # "warning", "error", "critical"
+            "component": component,  # e.g. "executor", "risk", "exchange"
+            "message": message,
+            "details": details or {},
+        }
+        self._alerts.append(alert)
+        if len(self._alerts) > self._alerts_max:
+            self._alerts = self._alerts[-self._alerts_max:]
 
     def set_stripe_service(self, service) -> None:
         """Inject Stripe service for billing endpoints."""
@@ -310,11 +327,15 @@ class DashboardServer:
         return out
 
     async def _read_favorites_state(self, tenant_id: str) -> List[str]:
+        if tenant_id in self._favorites_cache:
+            return self._favorites_cache[tenant_id]
         primary = self._get_primary_engine()
         if not primary or not getattr(primary, "db", None):
             return []
         raw = await primary.db.get_state(self._favorites_state_key(tenant_id), default=[])
-        return self._normalize_favorites(raw)
+        result = self._normalize_favorites(raw)
+        self._favorites_cache[tenant_id] = result
+        return result
 
     async def _write_favorites_state(self, tenant_id: str, favorites: List[str]) -> List[str]:
         primary = self._get_primary_engine()
@@ -322,6 +343,7 @@ class DashboardServer:
             return []
         normalized = self._normalize_favorites(favorites)
         await primary.db.set_state(self._favorites_state_key(tenant_id), normalized)
+        self._favorites_cache[tenant_id] = normalized
         return normalized
 
     def _aggregate_performance_stats(self, stats_list: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -978,171 +1000,211 @@ class DashboardServer:
             buckets[ip] = (tokens - 1.0, now)
             return await call_next(request)
 
-    def _setup_routes(self) -> None:
-        """Register all API routes."""
+    # -----------------------------------------------------------------
+    # Auth helpers (promoted from _setup_routes closure to class methods)
+    # -----------------------------------------------------------------
 
-        # -----------------------------
-        # Auth helpers (cookie session + API keys)
-        # -----------------------------
+    @staticmethod
+    def _is_prod() -> bool:
+        env = (os.getenv("APP_ENV", "") or "").strip().lower()
+        return env in ("prod", "production")
 
-        def _is_prod() -> bool:
-            env = (os.getenv("APP_ENV", "") or "").strip().lower()
-            return env in ("prod", "production")
-
-        def _require_auth_for_reads() -> bool:
-            # Backward compatibility:
-            # - DASHBOARD_REQUIRE_API_KEY_FOR_READS (current)
-            # - DASHBOARD_REQUIRE_AUTH_FOR_READS (legacy)
-            env = (
-                os.getenv("DASHBOARD_REQUIRE_API_KEY_FOR_READS", "")
-                or os.getenv("DASHBOARD_REQUIRE_AUTH_FOR_READS", "")
-                or ""
-            ).strip().lower()
-            if env in ("1", "true", "yes", "y", "on"):
-                return True
-            if env in ("0", "false", "no", "n", "off"):
-                return False
-
-            primary = self._get_primary_engine()
-            if primary and getattr(primary, "config", None):
-                dash = getattr(primary.config, "dashboard", None)
-                if dash is not None and hasattr(dash, "require_api_key_for_reads"):
-                    return bool(getattr(dash, "require_api_key_for_reads"))
-                # Conservative fallback: live mode should require auth for reads.
-                return getattr(primary.config.app, "mode", "paper") == "live"
+    def _require_auth_for_reads(self) -> bool:
+        # Backward compatibility:
+        # - DASHBOARD_REQUIRE_API_KEY_FOR_READS (current)
+        # - DASHBOARD_REQUIRE_AUTH_FOR_READS (legacy)
+        env = (
+            os.getenv("DASHBOARD_REQUIRE_API_KEY_FOR_READS", "")
+            or os.getenv("DASHBOARD_REQUIRE_AUTH_FOR_READS", "")
+            or ""
+        ).strip().lower()
+        if env in ("1", "true", "yes", "y", "on"):
+            return True
+        if env in ("0", "false", "no", "n", "off"):
             return False
 
-        def _serializer():
-            if self._session_serializer is None:
-                from itsdangerous import URLSafeTimedSerializer
+        primary = self._get_primary_engine()
+        if primary and getattr(primary, "config", None):
+            dash = getattr(primary.config, "dashboard", None)
+            if dash is not None and hasattr(dash, "require_api_key_for_reads"):
+                return bool(getattr(dash, "require_api_key_for_reads"))
+            # Conservative fallback: live mode should require auth for reads.
+            return getattr(primary.config.app, "mode", "paper") == "live"
+        return False
 
-                self._session_serializer = URLSafeTimedSerializer(
-                    self._session_secret, salt="novapulse-session-v1"
-                )
-            return self._session_serializer
+    def _serializer(self):
+        if self._session_serializer is None:
+            from itsdangerous import URLSafeTimedSerializer
 
-        def _hasher():
-            if self._password_hasher is None:
-                from argon2 import PasswordHasher
+            self._session_serializer = URLSafeTimedSerializer(
+                self._session_secret, salt="novapulse-session-v1"
+            )
+        return self._session_serializer
 
-                self._password_hasher = PasswordHasher()
-            return self._password_hasher
+    def _hasher(self):
+        if self._password_hasher is None:
+            from argon2 import PasswordHasher
 
-        def _verify_admin_password(password: str) -> bool:
-            password = (password or "").strip()
-            if not password:
-                return False
-            if self._admin_password_hash:
-                # docker compose expands '$' from .env unless escaped as '$$'.
-                # Normalize here so stored hashes remain valid for verification.
-                stored_hash = self._admin_password_hash.replace("$$", "$")
-                if stored_hash.startswith(("$2a$", "$2b$", "$2y$")):
-                    try:
-                        import bcrypt
-                    except Exception:
-                        logger.error("bcrypt hash configured but bcrypt package unavailable")
-                        return False
-                    try:
-                        return bool(
-                            bcrypt.checkpw(
-                                password.encode("utf-8"),
-                                stored_hash.encode("utf-8"),
-                            )
-                        )
-                    except Exception:
-                        return False
+            self._password_hasher = PasswordHasher()
+        return self._password_hasher
+
+    def _verify_admin_password(self, password: str) -> bool:
+        password = (password or "").strip()
+        if not password:
+            return False
+        if self._admin_password_hash:
+            # docker compose expands '$' from .env unless escaped as '$$'.
+            # Normalize here so stored hashes remain valid for verification.
+            stored_hash = self._admin_password_hash.replace("$$", "$")
+            if stored_hash.startswith(("$2a$", "$2b$", "$2y$")):
                 try:
-                    return bool(_hasher().verify(stored_hash, password))
+                    import bcrypt
+                except Exception:
+                    logger.error("bcrypt hash configured but bcrypt package unavailable")
+                    return False
+                try:
+                    return bool(
+                        bcrypt.checkpw(
+                            password.encode("utf-8"),
+                            stored_hash.encode("utf-8"),
+                        )
+                    )
                 except Exception:
                     return False
-            # Dev fallback only; disallow plaintext in production.
-            if _is_prod():
-                return False
-            return secrets.compare_digest(password, self._admin_password or "")
-
-        def _load_session_from_request(request: Request) -> Optional[Dict[str, Any]]:
-            raw = request.cookies.get(self._session_cookie, "")
-            if not raw:
-                return None
             try:
-                data = _serializer().loads(raw, max_age=self._session_ttl_seconds)
-                if not isinstance(data, dict):
-                    return None
-                if data.get("v") != 1:
-                    return None
-                if data.get("role") not in ("admin", "read"):
-                    return None
-                return data
+                return bool(self._hasher().verify(stored_hash, password))
             except Exception:
+                return False
+        # Dev fallback only; disallow plaintext in production.
+        if self._is_prod():
+            return False
+        return secrets.compare_digest(password, self._admin_password or "")
+
+    def _load_session_from_request(self, request: Request) -> Optional[Dict[str, Any]]:
+        raw = request.cookies.get(self._session_cookie, "")
+        if not raw:
+            return None
+        try:
+            data = self._serializer().loads(raw, max_age=self._session_ttl_seconds)
+            if not isinstance(data, dict):
                 return None
+            if data.get("v") != 1:
+                return None
+            if data.get("role") not in ("admin", "read"):
+                return None
+            return data
+        except Exception:
+            return None
 
-        def _issue_session(
-            response: Response,
-            *,
-            role: str,
-            tenant_id: str,
-        ) -> None:
-            session = {"v": 1, "role": role, "tid": tenant_id, "iat": int(time.time())}
-            token = _serializer().dumps(session)
-            csrf = secrets.token_urlsafe(24)
+    def _issue_session(
+        self,
+        response: Response,
+        *,
+        role: str,
+        tenant_id: str,
+    ) -> None:
+        session = {"v": 1, "role": role, "tid": tenant_id, "iat": int(time.time())}
+        token = self._serializer().dumps(session)
+        csrf = secrets.token_urlsafe(24)
 
-            # Secure cookie defaults; "secure" is auto-disabled on localhost HTTP.
-            response.set_cookie(
-                self._session_cookie,
-                token,
-                httponly=True,
-                samesite="strict",
-                secure=_is_prod(),
-                max_age=self._session_ttl_seconds,
-                path="/",
-            )
-            response.set_cookie(
-                self._csrf_cookie,
-                csrf,
-                httponly=False,
-                samesite="strict",
-                secure=_is_prod(),
-                max_age=self._session_ttl_seconds,
-                path="/",
-            )
+        # Secure cookie defaults; "secure" is auto-disabled on localhost HTTP.
+        response.set_cookie(
+            self._session_cookie,
+            token,
+            httponly=True,
+            samesite="strict",
+            secure=self._is_prod(),
+            max_age=self._session_ttl_seconds,
+            path="/",
+        )
+        response.set_cookie(
+            self._csrf_cookie,
+            csrf,
+            httponly=False,
+            samesite="strict",
+            secure=self._is_prod(),
+            max_age=self._session_ttl_seconds,
+            path="/",
+        )
 
-        def _clear_session(response: Response) -> None:
-            response.delete_cookie(self._session_cookie, path="/")
-            response.delete_cookie(self._csrf_cookie, path="/")
+    def _clear_session(self, response: Response) -> None:
+        response.delete_cookie(self._session_cookie, path="/")
+        response.delete_cookie(self._csrf_cookie, path="/")
 
-        def _check_csrf(request: Request, header_token: str) -> None:
-            header_token = (header_token or "").strip()
-            cookie_token = (request.cookies.get(self._csrf_cookie, "") or "").strip()
-            if not (header_token and cookie_token and secrets.compare_digest(header_token, cookie_token)):
-                raise HTTPException(status_code=403, detail="CSRF check failed")
+    def _check_csrf(self, request: Request, header_token: str) -> None:
+        header_token = (header_token or "").strip()
+        cookie_token = (request.cookies.get(self._csrf_cookie, "") or "").strip()
+        if not (header_token and cookie_token and secrets.compare_digest(header_token, cookie_token)):
+            raise HTTPException(status_code=403, detail="CSRF check failed")
 
-            # Minimal origin defense-in-depth for browsers.
-            origin = (request.headers.get("origin", "") or "").strip()
-            if origin and origin not in self._allowed_origins:
-                raise HTTPException(status_code=403, detail="Origin not allowed")
+        # Minimal origin defense-in-depth for browsers.
+        origin = (request.headers.get("origin", "") or "").strip()
+        if origin and origin not in self._allowed_origins:
+            raise HTTPException(status_code=403, detail="Origin not allowed")
 
-        async def _require_read_access(
-            request: Request,
-            x_api_key: str = Header(default="", alias="X-API-Key"),
-        ) -> Dict[str, Any]:
-            sess = _load_session_from_request(request)
-            if sess:
-                return {"auth": "session", "role": sess.get("role"), "tenant_id": sess.get("tid") or "default"}
+    async def _require_read_access(
+        self,
+        request: Request,
+        x_api_key: str = Header(default="", alias="X-API-Key"),
+    ) -> Dict[str, Any]:
+        sess = self._load_session_from_request(request)
+        if sess:
+            return {"auth": "session", "role": sess.get("role"), "tenant_id": sess.get("tid") or "default"}
 
-            if not _require_auth_for_reads():
-                return {"auth": "none", "role": "anon", "tenant_id": _default_tenant_id()}
+        if not self._require_auth_for_reads():
+            return {"auth": "none", "role": "anon", "tenant_id": self._default_tenant_id()}
 
-            api_key = (x_api_key or "").strip()
-            if not api_key:
-                raise HTTPException(status_code=401, detail="Missing credentials")
+        api_key = (x_api_key or "").strip()
+        if not api_key:
+            raise HTTPException(status_code=401, detail="Missing credentials")
 
-            # Global keys
-            if api_key == self._admin_key:
-                return {"auth": "key", "role": "admin", "tenant_id": _default_tenant_id()}
-            if self._read_key and api_key == self._read_key:
-                return {"auth": "key", "role": "read", "tenant_id": _default_tenant_id()}
+        # Global keys
+        if api_key == self._admin_key:
+            return {"auth": "key", "role": "admin", "tenant_id": self._default_tenant_id()}
+        if self._read_key and api_key == self._read_key:
+            return {"auth": "key", "role": "read", "tenant_id": self._default_tenant_id()}
 
-            # Tenant keys (read-only)
+        # Tenant keys (read-only)
+        for eng in self._get_engines():
+            db = getattr(eng, "db", None)
+            if not db:
+                continue
+            try:
+                tenant_id = await db.get_tenant_id_by_api_key(api_key)
+            except Exception:
+                tenant_id = None
+            if tenant_id:
+                return {"auth": "tenant_key", "role": "read", "tenant_id": tenant_id}
+
+        raise HTTPException(status_code=403, detail="Invalid credentials")
+
+    async def _require_control_access(
+        self,
+        request: Request,
+        x_api_key: str = Header(default="", alias="X-API-Key"),
+        x_csrf_token: str = Header(default="", alias="X-CSRF-Token"),
+    ) -> Dict[str, Any]:
+        # Session-based admin (web UI)
+        sess = self._load_session_from_request(request)
+        if sess and sess.get("role") == "admin":
+            self._check_csrf(request, x_csrf_token)
+            return {"auth": "session", "role": "admin", "tenant_id": sess.get("tid") or self._default_tenant_id()}
+
+        # Admin key
+        api_key = (x_api_key or "").strip()
+        if api_key and api_key == self._admin_key:
+            return {"auth": "key", "role": "admin", "tenant_id": self._default_tenant_id()}
+
+        # Optional: allow tenant API keys for control endpoints.
+        primary = self._get_primary_engine()
+        allow_tenant = False
+        if primary and getattr(primary, "config", None):
+            dash = getattr(primary.config, "dashboard", None)
+            allow_tenant = bool(getattr(dash, "allow_tenant_keys_for_control", False))
+        if not allow_tenant:
+            raise HTTPException(status_code=403, detail="Unauthorized")
+
+        if api_key:
             for eng in self._get_engines():
                 db = getattr(eng, "db", None)
                 if not db:
@@ -1152,54 +1214,64 @@ class DashboardServer:
                 except Exception:
                     tenant_id = None
                 if tenant_id:
-                    return {"auth": "tenant_key", "role": "read", "tenant_id": tenant_id}
+                    return {"auth": "tenant_key", "role": "operator", "tenant_id": tenant_id}
 
-            raise HTTPException(status_code=403, detail="Invalid credentials")
+        raise HTTPException(status_code=403, detail="Unauthorized")
 
-        async def _require_control_access(
-            request: Request,
-            x_api_key: str = Header(default="", alias="X-API-Key"),
-            x_csrf_token: str = Header(default="", alias="X-CSRF-Token"),
-        ) -> Dict[str, Any]:
-            # Session-based admin (web UI)
-            sess = _load_session_from_request(request)
-            if sess and sess.get("role") == "admin":
-                _check_csrf(request, x_csrf_token)
-                return {"auth": "session", "role": "admin", "tenant_id": sess.get("tid") or _default_tenant_id()}
+    def _default_tenant_id(self) -> str:
+        primary = self._get_primary_engine()
+        if primary and getattr(primary, "config", None):
+            return primary.config.billing.tenant.default_tenant_id
+        return "default"
 
-            # Admin key
-            api_key = (x_api_key or "").strip()
-            if api_key and api_key == self._admin_key:
-                return {"auth": "key", "role": "admin", "tenant_id": _default_tenant_id()}
+    async def _resolve_tenant_from_credentials(
+        self,
+        requested_tenant_id: str = "",
+        api_key: str = "",
+        require_api_key: bool = False,
+    ) -> str:
+        return await self.resolve_tenant_id(
+            requested_tenant_id=requested_tenant_id,
+            api_key=api_key,
+            require_api_key=require_api_key,
+        )
 
-            # Optional: allow tenant API keys for control endpoints.
-            primary = self._get_primary_engine()
-            allow_tenant = False
-            if primary and getattr(primary, "config", None):
-                dash = getattr(primary.config, "dashboard", None)
-                allow_tenant = bool(getattr(dash, "allow_tenant_keys_for_control", False))
-            if not allow_tenant:
-                raise HTTPException(status_code=403, detail="Unauthorized")
+    async def _resolve_tenant_id_read(
+        self,
+        request: Request,
+        x_tenant_id: str = Header(default="", alias="X-Tenant-ID"),
+        x_api_key: str = Header(default="", alias="X-API-Key"),
+    ) -> str:
+        """Resolve tenant_id for read endpoints from either session or API key context."""
+        requested = (x_tenant_id or "").strip()
+        ctx = await self._require_read_access(request, x_api_key=x_api_key)
 
-            if api_key:
-                for eng in self._get_engines():
-                    db = getattr(eng, "db", None)
-                    if not db:
-                        continue
-                    try:
-                        tenant_id = await db.get_tenant_id_by_api_key(api_key)
-                    except Exception:
-                        tenant_id = None
-                    if tenant_id:
-                        return {"auth": "tenant_key", "role": "operator", "tenant_id": tenant_id}
+        if ctx.get("auth") == "session":
+            if ctx.get("role") == "admin":
+                return requested or self._default_tenant_id()
+            return ctx.get("tenant_id") or self._default_tenant_id()
 
-            raise HTTPException(status_code=403, detail="Unauthorized")
+        if ctx.get("auth") in ("key", "tenant_key"):
+            return await self._resolve_tenant_from_credentials(
+                requested_tenant_id=requested,
+                api_key=x_api_key,
+                require_api_key=True,
+            )
+
+        # No auth required -> never trust arbitrary requested tenant IDs.
+        return self._default_tenant_id()
+
+    def _setup_routes(self) -> None:
+        """Register all API routes."""
+
+        # Local alias for Depends() injection (instance methods need wrapping).
+        _resolve_tid_read = self._resolve_tenant_id_read
 
         @self.app.get("/login", response_class=HTMLResponse)
         async def login_page(request: Request):
             """Login page for the web dashboard (cookie-based session)."""
             # If already logged in, go to dashboard.
-            if _load_session_from_request(request):
+            if self._load_session_from_request(request):
                 return RedirectResponse(url="/", status_code=302)
             return HTMLResponse(
                 content=(
@@ -1232,31 +1304,60 @@ class DashboardServer:
                 )
             )
 
+        # Login brute-force protection: track failed attempts per IP.
+        _login_failures: Dict[str, List[float]] = {}  # ip -> list of failure timestamps
+        _LOGIN_MAX_ATTEMPTS = 5  # max failures before lockout
+        _LOGIN_WINDOW = 300.0  # 5-minute sliding window
+        # Lockout duration equals the sliding window — once failures age out
+        # of _LOGIN_WINDOW, the user can retry.
+
         @self.app.post("/login")
         async def login_submit(
+            request: Request,
             username: str = Form(default=""),
             password: str = Form(default=""),
         ):
+            ip = request.client.host if request.client else "unknown"
+            now = time.monotonic()
+
+            # Prune old failures and check lockout
+            failures = _login_failures.get(ip, [])
+            failures = [ts for ts in failures if (now - ts) < _LOGIN_WINDOW]
+            _login_failures[ip] = failures
+
+            if len(failures) >= _LOGIN_MAX_ATTEMPTS:
+                logger.warning("Login locked out", ip=ip, attempts=len(failures))
+                raise HTTPException(
+                    status_code=429,
+                    detail="Too many failed login attempts. Try again later.",
+                )
+
             username = (username or "").strip()
             if not secrets.compare_digest(username, self._admin_username):
+                failures.append(now)
+                _login_failures[ip] = failures
                 raise HTTPException(status_code=401, detail="Invalid credentials")
-            if not _verify_admin_password(password):
+            if not self._verify_admin_password(password):
+                failures.append(now)
+                _login_failures[ip] = failures
                 raise HTTPException(status_code=401, detail="Invalid credentials")
 
+            # Successful login: clear failures for this IP
+            _login_failures.pop(ip, None)
             resp = RedirectResponse(url="/", status_code=302)
-            _issue_session(resp, role="admin", tenant_id=_default_tenant_id())
+            self._issue_session(resp, role="admin", tenant_id=self._default_tenant_id())
             return resp
 
         @self.app.post("/logout")
         async def logout():
             resp = RedirectResponse(url="/login", status_code=302)
-            _clear_session(resp)
+            self._clear_session(resp)
             return resp
 
         @self.app.get("/", response_class=HTMLResponse)
         async def dashboard(request: Request):
             """Serve the main dashboard page (requires login when auth is enabled)."""
-            if _require_auth_for_reads() and not _load_session_from_request(request):
+            if self._require_auth_for_reads() and not self._load_session_from_request(request):
                 return RedirectResponse(url="/login", status_code=302)
 
             dashboard_path = Path("static/index.html")
@@ -1289,7 +1390,7 @@ class DashboardServer:
             x_api_key: str = Header(default="", alias="X-API-Key"),
         ):
             """Get overall system status."""
-            await _require_read_access(request, x_api_key=x_api_key)
+            await self._require_read_access(request, x_api_key=x_api_key)
             engines = self._get_engines()
             if not engines:
                 return {"status": "initializing"}
@@ -1373,7 +1474,7 @@ class DashboardServer:
             Operator heartbeat endpoint for external watchdogs/VPS probes.
             Includes per-engine stale pair counts and connectivity status.
             """
-            await _require_read_access(request, x_api_key=x_api_key)
+            await self._require_read_access(request, x_api_key=x_api_key)
             engines = self._get_engines()
             if not engines:
                 return {"status": "initializing", "engines": []}
@@ -1410,51 +1511,10 @@ class DashboardServer:
                 "engines": rows,
             }
 
-        def _default_tenant_id() -> str:
-            primary = self._get_primary_engine()
-            if primary and getattr(primary, "config", None):
-                return primary.config.billing.tenant.default_tenant_id
-            return "default"
-
-        async def _resolve_tenant_from_credentials(
-            requested_tenant_id: str = "",
-            api_key: str = "",
-            require_api_key: bool = False,
-        ) -> str:
-            return await self.resolve_tenant_id(
-                requested_tenant_id=requested_tenant_id,
-                api_key=api_key,
-                require_api_key=require_api_key,
-            )
-
-        async def _resolve_tenant_id_read(
-            request: Request,
-            x_tenant_id: str = Header(default="", alias="X-Tenant-ID"),
-            x_api_key: str = Header(default="", alias="X-API-Key"),
-        ) -> str:
-            """Resolve tenant_id for read endpoints from either session or API key context."""
-            requested = (x_tenant_id or "").strip()
-            ctx = await _require_read_access(request, x_api_key=x_api_key)
-
-            if ctx.get("auth") == "session":
-                if ctx.get("role") == "admin":
-                    return requested or _default_tenant_id()
-                return ctx.get("tenant_id") or _default_tenant_id()
-
-            if ctx.get("auth") in ("key", "tenant_key"):
-                return await _resolve_tenant_from_credentials(
-                    requested_tenant_id=requested,
-                    api_key=x_api_key,
-                    require_api_key=True,
-                )
-
-            # No auth required -> never trust arbitrary requested tenant IDs.
-            return _default_tenant_id()
-
         @self.app.get("/api/v1/trades")
         async def get_trades(
             limit: int = Query(default=100, ge=1, le=1000),
-            tenant_id: str = Depends(_resolve_tenant_id_read),
+            tenant_id: str = Depends(_resolve_tid_read),
         ):
             """Get trade history."""
             engines = self._get_engines()
@@ -1482,7 +1542,7 @@ class DashboardServer:
         @self.app.get("/api/v1/export/trades.csv")
         async def export_trades_csv(
             limit: int = Query(default=1000, ge=1, le=10000),
-            tenant_id: str = Depends(_resolve_tenant_id_read),
+            tenant_id: str = Depends(_resolve_tid_read),
         ):
             """Export recent trades as CSV (download)."""
             engines = self._get_engines()
@@ -1534,7 +1594,7 @@ class DashboardServer:
             return StreamingResponse(_iter_csv(), media_type="text/csv", headers=headers)
 
         @self.app.get("/api/v1/positions")
-        async def get_positions(tenant_id: str = Depends(_resolve_tenant_id_read)):
+        async def get_positions(tenant_id: str = Depends(_resolve_tid_read)):
             """Get open positions."""
             engines = self._get_engines()
             if not engines:
@@ -1569,7 +1629,7 @@ class DashboardServer:
             return positions
 
         @self.app.get("/api/v1/performance")
-        async def get_performance(tenant_id: str = Depends(_resolve_tenant_id_read)):
+        async def get_performance(tenant_id: str = Depends(_resolve_tid_read)):
             """Get performance metrics including unrealized P&L."""
             engines = self._get_engines()
             if not engines:
@@ -1616,7 +1676,7 @@ class DashboardServer:
             x_api_key: str = Header(default="", alias="X-API-Key"),
         ):
             """Get strategy performance stats."""
-            await _require_read_access(request, x_api_key=x_api_key)
+            await self._require_read_access(request, x_api_key=x_api_key)
             engines = self._get_engines()
             if not engines:
                 return []
@@ -1633,12 +1693,9 @@ class DashboardServer:
 
         @self.app.get("/api/v1/strategy-performance")
         async def get_strategy_performance(
-            request: Request,
-            x_api_key: str = Header(default="", alias="X-API-Key"),
-            tenant_id: str = Depends(_resolve_tenant_id_read),
+            tenant_id: str = Depends(_resolve_tid_read),
         ):
             """Get per-strategy win rate and PnL stats from trade history."""
-            await _require_read_access(request, x_api_key=x_api_key)
             engines = self._get_engines()
             if not engines:
                 return {}
@@ -1653,7 +1710,7 @@ class DashboardServer:
             x_api_key: str = Header(default="", alias="X-API-Key"),
         ):
             """Get risk management report."""
-            await _require_read_access(request, x_api_key=x_api_key)
+            await self._require_read_access(request, x_api_key=x_api_key)
             engines = self._get_engines()
             if not engines:
                 return {}
@@ -1662,10 +1719,21 @@ class DashboardServer:
             reports = [eng.risk_manager.get_risk_report() for eng in engines if getattr(eng, "risk_manager", None)]
             return self._aggregate_risk_reports(reports)
 
+        @self.app.get("/api/v1/alerts")
+        async def get_alerts(
+            request: Request,
+            x_api_key: str = Header(default="", alias="X-API-Key"),
+            limit: int = Query(default=50, ge=1, le=200),
+        ):
+            """Get recent operational alerts."""
+            await self._require_read_access(request, x_api_key=x_api_key)
+            recent = list(reversed(self._alerts[-limit:]))
+            return {"alerts": recent}
+
         @self.app.get("/api/v1/thoughts")
         async def get_thoughts(
             limit: int = 50,
-            tenant_id: str = Depends(_resolve_tenant_id_read),
+            tenant_id: str = Depends(_resolve_tid_read),
         ):
             """Get AI thought feed."""
             engines = self._get_engines()
@@ -1695,7 +1763,7 @@ class DashboardServer:
             x_api_key: str = Header(default="", alias="X-API-Key"),
         ):
             """Get market scanner status."""
-            await _require_read_access(request, x_api_key=x_api_key)
+            await self._require_read_access(request, x_api_key=x_api_key)
             engines = self._get_engines()
             if not engines:
                 return {}
@@ -1722,12 +1790,9 @@ class DashboardServer:
 
         @self.app.get("/api/v1/favorites")
         async def get_favorites(
-            request: Request,
-            x_api_key: str = Header(default="", alias="X-API-Key"),
-            tenant_id: str = Depends(_resolve_tenant_id_read),
+            tenant_id: str = Depends(_resolve_tid_read),
         ):
             """Get dashboard favorites list."""
-            await _require_read_access(request, x_api_key=x_api_key)
             return {"favorites": await self._read_favorites_state(tenant_id)}
 
         @self.app.post("/api/v1/favorites")
@@ -1736,10 +1801,10 @@ class DashboardServer:
             body: dict = Body(...),
             x_api_key: str = Header(default="", alias="X-API-Key"),
             x_csrf_token: str = Header(default="", alias="X-CSRF-Token"),
-            tenant_id: str = Depends(_resolve_tenant_id_read),
+            tenant_id: str = Depends(_resolve_tid_read),
         ):
             """Add a symbol to dashboard favorites (auto-saved)."""
-            await _require_control_access(request, x_api_key=x_api_key, x_csrf_token=x_csrf_token)
+            await self._require_control_access(request, x_api_key=x_api_key, x_csrf_token=x_csrf_token)
             symbol = self._normalize_symbol(body.get("symbol", ""))
             if not symbol:
                 raise HTTPException(status_code=400, detail="symbol is required")
@@ -1757,10 +1822,10 @@ class DashboardServer:
             request: Request,
             x_api_key: str = Header(default="", alias="X-API-Key"),
             x_csrf_token: str = Header(default="", alias="X-CSRF-Token"),
-            tenant_id: str = Depends(_resolve_tenant_id_read),
+            tenant_id: str = Depends(_resolve_tid_read),
         ):
             """Remove a symbol from dashboard favorites (auto-saved)."""
-            await _require_control_access(request, x_api_key=x_api_key, x_csrf_token=x_csrf_token)
+            await self._require_control_access(request, x_api_key=x_api_key, x_csrf_token=x_csrf_token)
             norm = self._normalize_symbol(symbol)
             favorites = await self._read_favorites_state(tenant_id)
             favorites = [s for s in favorites if s != norm]
@@ -1780,7 +1845,7 @@ class DashboardServer:
             x_api_key: str = Header(default="", alias="X-API-Key"),
         ):
             """Get OHLCV candles for the dashboard chart viewer."""
-            await _require_read_access(request, x_api_key=x_api_key)
+            await self._require_read_access(request, x_api_key=x_api_key)
 
             p = (pair or "").strip().upper()
             ex, acct = self._split_exchange_account(exchange, account_id)
@@ -1830,7 +1895,7 @@ class DashboardServer:
             x_api_key: str = Header(default="", alias="X-API-Key"),
         ):
             """Get execution statistics."""
-            await _require_read_access(request, x_api_key=x_api_key)
+            await self._require_read_access(request, x_api_key=x_api_key)
             engines = self._get_engines()
             if not engines:
                 return {}
@@ -1852,7 +1917,7 @@ class DashboardServer:
             x_api_key: str = Header(default="", alias="X-API-Key"),
         ):
             """List exchange integration status and connectivity health."""
-            await _require_read_access(request, x_api_key=x_api_key)
+            await self._require_read_access(request, x_api_key=x_api_key)
             engines = self._get_engines()
             rows: List[Dict[str, Any]] = []
             for eng in engines:
@@ -1878,7 +1943,7 @@ class DashboardServer:
             x_api_key: str = Header(default="", alias="X-API-Key"),
         ):
             """Return canonical persistence contract and resolved storage targets."""
-            await _require_read_access(request, x_api_key=x_api_key)
+            await self._require_read_access(request, x_api_key=x_api_key)
             engines = self._get_engines()
             rows: List[Dict[str, Any]] = []
             for eng in engines:
@@ -1972,7 +2037,7 @@ class DashboardServer:
             x_api_key: str = Header(default="", alias="X-API-Key"),
         ):
             """List built-in strategy templates (marketplace-style packs)."""
-            await _require_read_access(request, x_api_key=x_api_key)
+            await self._require_read_access(request, x_api_key=x_api_key)
             return {"templates": list(_MARKETPLACE_TEMPLATES.values())}
 
         @self.app.post("/api/v1/marketplace/strategies/apply")
@@ -1983,7 +2048,7 @@ class DashboardServer:
             x_csrf_token: str = Header(default="", alias="X-CSRF-Token"),
         ):
             """Apply a strategy template to one or more running engines."""
-            await _require_control_access(request, x_api_key=x_api_key, x_csrf_token=x_csrf_token)
+            await self._require_control_access(request, x_api_key=x_api_key, x_csrf_token=x_csrf_token)
 
             template_id = str(body.get("template_id", "")).strip()
             if not template_id or template_id not in _MARKETPLACE_TEMPLATES:
@@ -2079,12 +2144,9 @@ class DashboardServer:
 
         @self.app.get("/api/v1/copy-trading/providers")
         async def list_copy_trading_providers(
-            request: Request,
-            tenant_id: str = Depends(_resolve_tenant_id_read),
-            x_api_key: str = Header(default="", alias="X-API-Key"),
+            tenant_id: str = Depends(_resolve_tid_read),
         ):
             """List copy-trading signal providers for the tenant."""
-            await _require_read_access(request, x_api_key=x_api_key)
             primary = self._get_primary_engine()
             if not primary or not getattr(primary, "db", None):
                 return {"providers": []}
@@ -2102,7 +2164,7 @@ class DashboardServer:
             x_csrf_token: str = Header(default="", alias="X-CSRF-Token"),
         ):
             """Create or replace a copy-trading provider definition."""
-            ctx = await _require_control_access(request, x_api_key=x_api_key, x_csrf_token=x_csrf_token)
+            ctx = await self._require_control_access(request, x_api_key=x_api_key, x_csrf_token=x_csrf_token)
             primary = self._get_primary_engine()
             if not primary or not getattr(primary, "db", None):
                 raise HTTPException(status_code=503, detail="Bot DB unavailable")
@@ -2135,7 +2197,7 @@ class DashboardServer:
             x_csrf_token: str = Header(default="", alias="X-CSRF-Token"),
         ):
             """Update an existing copy-trading provider definition."""
-            ctx = await _require_control_access(request, x_api_key=x_api_key, x_csrf_token=x_csrf_token)
+            ctx = await self._require_control_access(request, x_api_key=x_api_key, x_csrf_token=x_csrf_token)
             primary = self._get_primary_engine()
             if not primary or not getattr(primary, "db", None):
                 raise HTTPException(status_code=503, detail="Bot DB unavailable")
@@ -2158,13 +2220,10 @@ class DashboardServer:
 
         @self.app.get("/api/v1/backtest/runs")
         async def list_backtest_runs(
-            request: Request,
             limit: int = Query(default=25, ge=1, le=200),
-            tenant_id: str = Depends(_resolve_tenant_id_read),
-            x_api_key: str = Header(default="", alias="X-API-Key"),
+            tenant_id: str = Depends(_resolve_tid_read),
         ):
             """List historical backtest/optimization runs."""
-            await _require_read_access(request, x_api_key=x_api_key)
             engines = self._get_engines()
             if not engines:
                 return {"runs": []}
@@ -2196,7 +2255,7 @@ class DashboardServer:
             x_csrf_token: str = Header(default="", alias="X-CSRF-Token"),
         ):
             """Run a backtest using recent historical candles and persist the result."""
-            await _require_control_access(request, x_api_key=x_api_key, x_csrf_token=x_csrf_token)
+            await self._require_control_access(request, x_api_key=x_api_key, x_csrf_token=x_csrf_token)
 
             pair = str(body.get("pair", "")).strip().upper()
             if not pair:
@@ -2328,7 +2387,7 @@ class DashboardServer:
             """
             Run a compact parameter optimization sweep for confluence/confidence thresholds.
             """
-            await _require_control_access(request, x_api_key=x_api_key, x_csrf_token=x_csrf_token)
+            await self._require_control_access(request, x_api_key=x_api_key, x_csrf_token=x_csrf_token)
 
             pair = str(body.get("pair", "")).strip().upper()
             if not pair:
@@ -2487,7 +2546,7 @@ class DashboardServer:
             x_csrf_token: str = Header(default="", alias="X-CSRF-Token"),
         ):
             """Reset paper-trading runtime state for a clean simulation cycle."""
-            await _require_control_access(request, x_api_key=x_api_key, x_csrf_token=x_csrf_token)
+            await self._require_control_access(request, x_api_key=x_api_key, x_csrf_token=x_csrf_token)
             engines = self._get_engines()
             if not engines:
                 raise HTTPException(status_code=503, detail="Bot not running")
@@ -2760,7 +2819,7 @@ class DashboardServer:
             x_api_key: str = Header(default="", alias="X-API-Key"),
         ):
             """Get all tunable settings with current runtime values."""
-            await _require_read_access(request, x_api_key=x_api_key)
+            await self._require_read_access(request, x_api_key=x_api_key)
             primary = self._get_primary_engine()
             if not primary:
                 return {}
@@ -2774,7 +2833,7 @@ class DashboardServer:
             x_csrf_token: str = Header(default="", alias="X-CSRF-Token"),
         ):
             """Update settings at runtime and persist to config.yaml."""
-            await _require_control_access(request, x_api_key=x_api_key, x_csrf_token=x_csrf_token)
+            await self._require_control_access(request, x_api_key=x_api_key, x_csrf_token=x_csrf_token)
             engines = self._get_engines()
             if not engines:
                 raise HTTPException(status_code=503, detail="Bot not running")
@@ -2868,7 +2927,7 @@ class DashboardServer:
             x_csrf_token: str = Header(default="", alias="X-CSRF-Token"),
         ):
             """Create Stripe Checkout session for subscription. Body: tenant_id, plan, success_url, cancel_url, customer_email (optional)."""
-            await _require_control_access(request, x_api_key=x_api_key, x_csrf_token=x_csrf_token)
+            await self._require_control_access(request, x_api_key=x_api_key, x_csrf_token=x_csrf_token)
             if not self._stripe_service or not self._stripe_service.enabled:
                 raise HTTPException(status_code=503, detail="Billing not configured")
             tenant_id = body.get("tenant_id") or "default"
@@ -2955,10 +3014,10 @@ class DashboardServer:
             """Get tenant by id (for dashboard / billing status)."""
             if not self._bot_engine or not self._bot_engine.db:
                 raise HTTPException(status_code=503, detail="Not available")
-            ctx = await _require_read_access(request, x_api_key=x_api_key)
+            ctx = await self._require_read_access(request, x_api_key=x_api_key)
             if ctx.get("role") != "admin":
                 raise HTTPException(status_code=403, detail="Admin required")
-            resolved = await _resolve_tenant_from_credentials(
+            resolved = await self._resolve_tenant_from_credentials(
                 requested_tenant_id=tenant_id,
                 api_key=x_api_key,
                 require_api_key=False,
@@ -2976,7 +3035,7 @@ class DashboardServer:
             x_csrf_token: str = Header(default="", alias="X-CSRF-Token"),
         ):
             """Send a test alert through configured notification channels."""
-            await _require_control_access(request, x_api_key=x_api_key, x_csrf_token=x_csrf_token)
+            await self._require_control_access(request, x_api_key=x_api_key, x_csrf_token=x_csrf_token)
             primary = self._get_primary_engine()
             if not primary:
                 raise HTTPException(status_code=503, detail="Bot not running")
@@ -3026,12 +3085,12 @@ class DashboardServer:
             x_csrf_token: str = Header(default="", alias="X-CSRF-Token"),
         ):
             """Emergency close all positions (admin session + CSRF, or admin API key)."""
-            ctx = await _require_control_access(request, x_api_key=x_api_key, x_csrf_token=x_csrf_token)
+            ctx = await self._require_control_access(request, x_api_key=x_api_key, x_csrf_token=x_csrf_token)
             tenant_id = (x_tenant_id or "").strip()
             if ctx.get("role") != "admin":
-                tenant_id = ctx.get("tenant_id") or _default_tenant_id()
+                tenant_id = ctx.get("tenant_id") or self._default_tenant_id()
             else:
-                tenant_id = tenant_id or _default_tenant_id()
+                tenant_id = tenant_id or self._default_tenant_id()
             if self._control_router:
                 result = await self._control_router.close_all(
                     "api_close_all", tenant_id=tenant_id
@@ -3054,12 +3113,12 @@ class DashboardServer:
             x_csrf_token: str = Header(default="", alias="X-CSRF-Token"),
         ):
             """Pause trading (admin session + CSRF, or admin API key)."""
-            ctx = await _require_control_access(request, x_api_key=x_api_key, x_csrf_token=x_csrf_token)
+            ctx = await self._require_control_access(request, x_api_key=x_api_key, x_csrf_token=x_csrf_token)
             tenant_id = (x_tenant_id or "").strip()
             if ctx.get("role") != "admin":
-                tenant_id = ctx.get("tenant_id") or _default_tenant_id()
+                tenant_id = ctx.get("tenant_id") or self._default_tenant_id()
             else:
-                tenant_id = tenant_id or _default_tenant_id()
+                tenant_id = tenant_id or self._default_tenant_id()
             if self._control_router:
                 result = await self._control_router.pause(tenant_id=tenant_id)
                 if not result.get("ok"):
@@ -3081,12 +3140,12 @@ class DashboardServer:
             x_csrf_token: str = Header(default="", alias="X-CSRF-Token"),
         ):
             """Resume trading (admin session + CSRF, or admin API key)."""
-            ctx = await _require_control_access(request, x_api_key=x_api_key, x_csrf_token=x_csrf_token)
+            ctx = await self._require_control_access(request, x_api_key=x_api_key, x_csrf_token=x_csrf_token)
             tenant_id = (x_tenant_id or "").strip()
             if ctx.get("role") != "admin":
-                tenant_id = ctx.get("tenant_id") or _default_tenant_id()
+                tenant_id = ctx.get("tenant_id") or self._default_tenant_id()
             else:
-                tenant_id = tenant_id or _default_tenant_id()
+                tenant_id = tenant_id or self._default_tenant_id()
             if self._control_router:
                 result = await self._control_router.resume(tenant_id=tenant_id)
                 if not result.get("ok"):
@@ -3120,25 +3179,25 @@ class DashboardServer:
                 sess_raw = (websocket.cookies.get(self._session_cookie, "") or "").strip()
                 if sess_raw:
                     try:
-                        sess = _serializer().loads(sess_raw, max_age=self._session_ttl_seconds)
+                        sess = self._serializer().loads(sess_raw, max_age=self._session_ttl_seconds)
                         if isinstance(sess, dict) and sess.get("v") == 1:
                             role = sess.get("role")
                             if role == "admin":
-                                tenant_id = (requested_tenant_id or "").strip() or _default_tenant_id()
+                                tenant_id = (requested_tenant_id or "").strip() or self._default_tenant_id()
                             else:
-                                tenant_id = (sess.get("tid") or "").strip() or _default_tenant_id()
+                                tenant_id = (sess.get("tid") or "").strip() or self._default_tenant_id()
                     except Exception:
                         tenant_id = ""
 
                 # If no session, fall back to API key (or allow anonymous when disabled).
                 if not tenant_id:
-                    if not _require_auth_for_reads() and not api_key:
-                        tenant_id = _default_tenant_id()
+                    if not self._require_auth_for_reads() and not api_key:
+                        tenant_id = self._default_tenant_id()
                     else:
-                        tenant_id = await _resolve_tenant_from_credentials(
+                        tenant_id = await self._resolve_tenant_from_credentials(
                             requested_tenant_id=requested_tenant_id,
                             api_key=api_key,
-                            require_api_key=_require_auth_for_reads(),
+                            require_api_key=self._require_auth_for_reads(),
                         )
             except HTTPException as exc:
                 await websocket.accept()
@@ -3359,6 +3418,7 @@ class DashboardServer:
                     "favorites": favorites,
                     "risk": risk,
                     "strategies": strategies,
+                    "alerts": list(reversed(self._alerts[-20:])),
                     "status": {
                         "running": any(getattr(e, "_running", False) for e in engines),
                         "paused": all(self._is_engine_paused(e) for e in engines),

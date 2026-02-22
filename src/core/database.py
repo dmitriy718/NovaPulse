@@ -52,6 +52,10 @@ class DatabaseManager:
         self._db: Optional[aiosqlite.Connection] = None
         self._lock = asyncio.Lock()
         self._initialized = False
+        # TTL cache for get_performance_stats (keyed by tenant_id)
+        self._perf_stats_cache: Dict[str, Any] = {}
+        self._perf_stats_cache_ts: float = 0.0
+        self._perf_stats_cache_ttl: float = 5.0
 
     @property
     def is_initialized(self) -> bool:
@@ -320,6 +324,7 @@ class DatabaseManager:
             "CREATE INDEX IF NOT EXISTS idx_ml_features_trade_id ON ml_features(trade_id);",
             "CREATE INDEX IF NOT EXISTS idx_order_book_trade_id ON order_book_snapshots(trade_id);",
             "CREATE INDEX IF NOT EXISTS idx_metrics_tenant ON metrics(tenant_id);",
+            "CREATE INDEX IF NOT EXISTS idx_trades_tenant_status ON trades(tenant_id, status);",
         ]
         for stmt in statements:
             try:
@@ -719,6 +724,24 @@ class DatabaseManager:
         rows = await cursor.fetchall()
         return [dict(zip(columns, row)) for row in rows]
 
+    async def get_trade_by_id(self, trade_id: str, tenant_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Fetch a single trade by its unique trade_id."""
+        if not self._db:
+            return None
+        tc = " AND tenant_id = ?" if tenant_id else ""
+        params: list = [trade_id]
+        if tenant_id:
+            params.append(tenant_id)
+        cursor = await self._db.execute(
+            f"SELECT * FROM trades WHERE trade_id = ?{tc} LIMIT 1",
+            tuple(params),
+        )
+        row = await cursor.fetchone()
+        if not row:
+            return None
+        cols = [d[0] for d in cursor.description]
+        return dict(zip(cols, row))
+
     async def get_trade_history(
         self,
         limit: int = 100,
@@ -1068,8 +1091,21 @@ class DatabaseManager:
     async def get_performance_stats(
         self, tenant_id: Optional[str] = "default"
     ) -> Dict[str, Any]:
-        """Get aggregate performance statistics. Optional tenant_id for multi-tenant."""
-        stats = {}
+        """Get aggregate performance statistics. Optional tenant_id for multi-tenant.
+
+        Uses consolidated SQL queries and a short TTL cache to avoid
+        repeated expensive scans within the same reporting window.
+        """
+        # --- TTL cache check ---
+        cache_key = tenant_id or "__none__"
+        now = time.monotonic()
+        if (
+            cache_key in self._perf_stats_cache
+            and (now - self._perf_stats_cache_ts) < self._perf_stats_cache_ttl
+        ):
+            return self._perf_stats_cache[cache_key]
+
+        stats: Dict[str, Any] = {}
         tc = " AND tenant_id = ?" if tenant_id else ""
         p: list = [tenant_id] if tenant_id else []
 
@@ -1079,81 +1115,65 @@ class DatabaseManager:
             rc = " AND " + self._sql_dt("exit_time") + " >= " + self._sql_dt("?")
             p.append(reset_ts)
 
+        # --- Query 1: All closed-trade aggregates in a single pass ---
         cursor = await self._db.execute(
-            f"SELECT COALESCE(SUM(pnl), 0) FROM trades WHERE status = 'closed'{tc}{rc}",
+            f"""SELECT
+                COUNT(*)                                              AS total,
+                COALESCE(SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END), 0) AS wins,
+                COALESCE(SUM(CASE WHEN pnl <= 0 THEN 1 ELSE 0 END), 0) AS losses,
+                COALESCE(SUM(pnl), 0.0)                              AS total_pnl,
+                AVG(CASE WHEN pnl > 0 THEN pnl END)                  AS avg_win,
+                AVG(CASE WHEN pnl <= 0 THEN pnl END)                 AS avg_loss,
+                COALESCE(SUM(CASE WHEN substr(exit_time, 1, 10) = date('now')
+                              THEN pnl ELSE 0 END), 0.0)             AS today_pnl,
+                -- Sharpe / Sortino building blocks (NULL-safe via pnl IS NOT NULL + ABS(pnl) < 1e308)
+                COUNT(CASE WHEN pnl IS NOT NULL AND ABS(pnl) < 1e308 THEN 1 END) AS n_finite,
+                COALESCE(AVG(CASE WHEN pnl IS NOT NULL AND ABS(pnl) < 1e308 THEN pnl END), 0.0) AS mean_pnl,
+                COALESCE(AVG(CASE WHEN pnl IS NOT NULL AND ABS(pnl) < 1e308 THEN pnl * pnl END), 0.0) AS mean_pnl_sq,
+                -- Downside (pnl < 0) moments for Sortino
+                COUNT(CASE WHEN pnl IS NOT NULL AND ABS(pnl) < 1e308 AND pnl < 0 THEN 1 END) AS n_down,
+                COALESCE(AVG(CASE WHEN pnl IS NOT NULL AND ABS(pnl) < 1e308 AND pnl < 0 THEN pnl * pnl END), 0.0) AS mean_down_sq
+            FROM trades
+            WHERE status = 'closed'{tc}{rc}""",
             tuple(p),
         )
         row = await cursor.fetchone()
-        stats["total_pnl"] = row[0] if row else 0.0
 
-        cursor = await self._db.execute(
-            f"""SELECT COUNT(*) as total,
-                SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
-                SUM(CASE WHEN pnl <= 0 THEN 1 ELSE 0 END) as losses
-            FROM trades WHERE status = 'closed'{tc}{rc}""",
-            tuple(p),
-        )
-        row = await cursor.fetchone()
-        stats["total_trades"] = row[0] if row and row[0] is not None else 0
-        stats["winning_trades"] = row[1] if row and row[1] is not None else 0
-        stats["losing_trades"] = row[2] if row and row[2] is not None else 0
-        stats["win_rate"] = (
-            stats["winning_trades"] / stats["total_trades"]
-            if stats["total_trades"] > 0 else 0.0
-        )
+        total = row[0] if row and row[0] is not None else 0
+        wins = row[1] if row and row[1] is not None else 0
+        losses = row[2] if row and row[2] is not None else 0
+        stats["total_pnl"] = row[3] if row and row[3] is not None else 0.0
+        stats["total_trades"] = total
+        stats["winning_trades"] = wins
+        stats["losing_trades"] = losses
+        stats["win_rate"] = wins / total if total > 0 else 0.0
+        stats["avg_win"] = row[4] if row and row[4] else 0.0
+        stats["avg_loss"] = row[5] if row and row[5] else 0.0
+        stats["today_pnl"] = row[6] if row and row[6] is not None else 0.0
 
-        cursor = await self._db.execute(
-            f"SELECT AVG(pnl) FROM trades WHERE status = 'closed' AND pnl > 0{tc}{rc}",
-            tuple(p),
-        )
-        row = await cursor.fetchone()
-        stats["avg_win"] = row[0] if row and row[0] else 0.0
+        # Sharpe & Sortino from SQL-computed moments
+        n_finite = row[7] if row and row[7] is not None else 0
+        mean_pnl = row[8] if row and row[8] is not None else 0.0
+        mean_pnl_sq = row[9] if row and row[9] is not None else 0.0
+        n_down = row[10] if row and row[10] is not None else 0
+        mean_down_sq = row[11] if row and row[11] is not None else 0.0
 
-        cursor = await self._db.execute(
-            f"SELECT AVG(pnl) FROM trades WHERE status = 'closed' AND pnl <= 0{tc}{rc}",
-            tuple(p),
-        )
-        row = await cursor.fetchone()
-        stats["avg_loss"] = row[0] if row and row[0] else 0.0
-
-        cursor = await self._db.execute(
-            f"SELECT COUNT(*) FROM trades WHERE status = 'open' AND ABS(quantity) > 0.00000001{tc}",
-            tuple([tenant_id] if tenant_id else []),
-        )
-        row = await cursor.fetchone()
-        stats["open_positions"] = row[0] if row else 0
-
-        cursor = await self._db.execute(
-            f"""SELECT COALESCE(SUM(pnl), 0) FROM trades
-            WHERE status = 'closed' AND substr(exit_time, 1, 10) = date('now'){tc}{rc}""",
-            tuple(p),
-        )
-        row = await cursor.fetchone()
-        stats["today_pnl"] = row[0] if row else 0.0
-
-        # Sharpe and Sortino ratios (annualized, based on per-trade returns)
-        cursor = await self._db.execute(
-            f"SELECT pnl FROM trades WHERE status = 'closed'{tc}{rc}",
-            tuple(p),
-        )
-        rows = await cursor.fetchall()
-        pnls = [r[0] for r in rows if r[0] is not None and math.isfinite(r[0])]
-        if len(pnls) >= 5:
-            mean_pnl = sum(pnls) / len(pnls)
-            variance = sum((x - mean_pnl) ** 2 for x in pnls) / max(len(pnls) - 1, 1)
+        if n_finite >= 5:
+            # population variance = E[X^2] - (E[X])^2, then Bessel correction
+            pop_var = mean_pnl_sq - mean_pnl * mean_pnl
+            # Guard against floating-point rounding producing tiny negatives
+            pop_var = max(pop_var, 0.0)
+            variance = pop_var * n_finite / max(n_finite - 1, 1)
             std_dev = math.sqrt(variance) if variance > 0 else 0.0
-            # Annualize: sqrt(trades_per_year). Cap at 2500 to avoid inflated ratios.
-            annual_factor = math.sqrt(min(len(pnls), 2500))
+            annual_factor = math.sqrt(min(n_finite, 2500))
             if std_dev > 1e-12:
                 sharpe = mean_pnl / std_dev * annual_factor
                 stats["sharpe_ratio"] = round(sharpe, 3) if math.isfinite(sharpe) else 0.0
             else:
                 stats["sharpe_ratio"] = 0.0
-            # Sortino: only downside deviation (semi-deviation below zero)
-            downside = [x for x in pnls if x < 0]
-            if downside:
-                down_var = sum(x ** 2 for x in downside) / len(downside)
-                down_dev = math.sqrt(down_var) if down_var > 0 else 0.0
+            # Sortino
+            if n_down > 0:
+                down_dev = math.sqrt(mean_down_sq) if mean_down_sq > 0 else 0.0
                 if down_dev > 1e-12:
                     sortino = mean_pnl / down_dev * annual_factor
                     stats["sortino_ratio"] = round(sortino, 3) if math.isfinite(sortino) else 0.0
@@ -1164,6 +1184,18 @@ class DatabaseManager:
         else:
             stats["sharpe_ratio"] = 0.0
             stats["sortino_ratio"] = 0.0
+
+        # --- Query 2: Open-position count (different WHERE clause, no reset_ts) ---
+        cursor = await self._db.execute(
+            f"SELECT COUNT(*) FROM trades WHERE status = 'open' AND ABS(quantity) > 0.00000001{tc}",
+            tuple([tenant_id] if tenant_id else []),
+        )
+        row = await cursor.fetchone()
+        stats["open_positions"] = row[0] if row else 0
+
+        # --- Populate cache ---
+        self._perf_stats_cache[cache_key] = stats
+        self._perf_stats_cache_ts = now
 
         return stats
 
