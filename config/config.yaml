@@ -62,7 +62,7 @@ trading:
     reversal: 120
   event_price_move_pct: 0.003
   single_strategy_mode: null    # or "keltner", "trend", "mean_reversion", etc. for testing
-  quiet_hours_utc: []  # Disabled to allow 24/7 crypto entries
+  quiet_hours_utc: [0, 1, 2, 3, 4, 5]  # Avoid thin overnight liquidity (UTC)
   max_trades_per_hour: 20
   canary_mode: false
   canary_pairs: ["BTC/USD", "ETH/USD"]  # Optional explicit subset; empty = first N from trading.pairs
