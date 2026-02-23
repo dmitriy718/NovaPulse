@@ -42,6 +42,7 @@ class ReversalStrategy(BaseStrategy):
         rsi_extreme_low: int = 20,
         rsi_extreme_high: int = 80,
         confirmation_candles: int = 3,
+        min_atr_pct: float = 0.005,
         weight: float = 0.15,
         enabled: bool = True,
     ):
@@ -49,6 +50,7 @@ class ReversalStrategy(BaseStrategy):
         self.rsi_extreme_low = rsi_extreme_low
         self.rsi_extreme_high = rsi_extreme_high
         self.confirmation_candles = confirmation_candles
+        self.min_atr_pct = max(0.0, float(min_atr_pct))
 
     def min_bars_required(self) -> int:
         return 50
@@ -152,6 +154,9 @@ class ReversalStrategy(BaseStrategy):
         curr_rsi = rsi_vals[-1]
         curr_atr = atr_vals[-1]
         curr_vol_ratio = vol_ratio[-1]
+        atr_pct = (curr_atr / curr_price) if curr_price > 0 else 0.0
+        if self.min_atr_pct > 0 and atr_pct < self.min_atr_pct:
+            return self._neutral_signal(pair, "ATR below liquidity floor")
 
         # Check if RSI was extreme in recent bars
         recent_rsi = rsi_vals[-self.confirmation_candles - 3:]
