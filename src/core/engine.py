@@ -135,6 +135,7 @@ class BotEngine:
         self._stale_check_count = 0
         self._ws_disconnected_since: Optional[float] = None
         self._auto_pause_reason: str = ""
+        self._invalid_pairs: set = set()  # pairs permanently rejected by exchange
         # In multi-engine mode, only one engine should run ES retention cleanup.
         self._es_cleanup_leader: bool = True
         # Adaptive scan interval: tracks recent event frequency
@@ -1637,12 +1638,24 @@ class BotEngine:
 
     async def _rest_candle_poll_loop(self) -> None:
         """Poll REST candles (Coinbase) to maintain 1m base timeframe."""
+        from src.exchange.exceptions import InvalidOrderError, PermanentExchangeError
         interval = max(30, int(getattr(self.config.trading, "candle_poll_seconds", 60)))
         logger.info("REST candle poll loop started", interval=interval)
         while self._running:
             try:
                 for pair in self.pairs:
-                    ohlc = await self.rest_client.get_ohlc(pair, interval=1, limit=5)
+                    if pair in self._invalid_pairs:
+                        continue
+                    try:
+                        ohlc = await self.rest_client.get_ohlc(pair, interval=1, limit=5)
+                    except (InvalidOrderError, PermanentExchangeError) as e:
+                        self._invalid_pairs.add(pair)
+                        logger.warning(
+                            "Pair permanently excluded from REST polling",
+                            pair=pair,
+                            error=repr(e),
+                        )
+                        continue
                     for bar in ohlc[-5:]:
                         is_new_bar = await self.market_data.update_bar(pair, {
                             "time": float(bar[0]),
@@ -1682,9 +1695,11 @@ class BotEngine:
                     logger.warning("WebSocket disconnected; waiting for reconnect/restart")
 
                 # Check data freshness (5-min threshold — low-volume pairs are naturally slower)
+                # Exclude pairs permanently rejected by the exchange (e.g. invalid ProductIDs)
                 stale_pairs = [
                     pair for pair in self.pairs
-                    if self.market_data.is_stale(pair, max_age_seconds=600)
+                    if pair not in self._invalid_pairs
+                    and self.market_data.is_stale(pair, max_age_seconds=600)
                 ]
                 if stale_pairs:
                     logger.warning(
