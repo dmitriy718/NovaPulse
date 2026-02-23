@@ -51,6 +51,7 @@ def test_status_includes_es_queue_metrics():
                     rate_limit_enabled=False,
                     require_api_key_for_reads=False,
                 ),
+                elasticsearch=SimpleNamespace(enabled=True),
                 app=SimpleNamespace(mode="paper"),
                 billing=SimpleNamespace(
                     tenant=SimpleNamespace(default_tenant_id="default"),
@@ -71,4 +72,5 @@ def test_status_includes_es_queue_metrics():
         "depth": 7,
         "capacity": 50,
         "dropped_docs": 4,
+        "status": "connected",
     }

@@ -1428,6 +1428,13 @@ class DashboardServer:
             es_queue_capacity = sum(int(getattr(es, "queue_capacity", 0) or 0) for es in es_clients)
             es_dropped_docs = sum(int(getattr(es, "dropped_docs", 0) or 0) for es in es_clients)
             es_connected = sum(1 for es in es_clients if bool(getattr(es, "connected", False)))
+            es_enabled = any(
+                bool(getattr(getattr(e, "config", None), "elasticsearch", None) and getattr(e.config.elasticsearch, "enabled", False))
+                for e in engines
+            )
+            es_status = "disabled"
+            if es_enabled:
+                es_status = "connected" if es_connected else "enabled_not_connected"
 
             return {
                 "status": "running" if running else "stopped",
@@ -1471,6 +1478,7 @@ class DashboardServer:
                     "depth": es_queue_depth,
                     "capacity": es_queue_capacity,
                     "dropped_docs": es_dropped_docs,
+                    "status": es_status,
                 },
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }
