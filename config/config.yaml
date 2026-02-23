@@ -190,9 +190,9 @@ ai:
   whale_threshold_usd: 50000
   strategy_guardrails_enabled: true
   strategy_guardrails_min_trades: 20
-  strategy_guardrails_window_trades: 30
+  strategy_guardrails_window_trades: 50
   strategy_guardrails_min_win_rate: 0.35
-  strategy_guardrails_min_profit_factor: 0.85
+  strategy_guardrails_min_profit_factor: 1.0
   strategy_guardrails_disable_minutes: 120
   session:
     enabled: true
