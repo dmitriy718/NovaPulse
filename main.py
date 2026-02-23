@@ -590,6 +590,18 @@ async def run_bot():
                 tenant_id=eng.tenant_id,
             )
 
+    # ML training leader: first engine aggregates data from all exchange DBs
+    if len(engines) > 1:
+        leader = engines[0]
+        follower_db_paths = [eng.config.app.db_path for eng in engines[1:]]
+        if getattr(leader, "ml_trainer", None) and follower_db_paths:
+            leader.ml_trainer.set_additional_db_paths(follower_db_paths)
+            logger.info(
+                "ML training leader configured",
+                leader=f"{leader.exchange_name}:{leader.tenant_id}",
+                additional_dbs=follower_db_paths,
+            )
+
     stock_engine = None
     try:
         base_cfg = engines[0].config if engines else root_cfg
@@ -655,8 +667,14 @@ async def run_bot():
             asyncio.create_task(_run_with_restart(eng, f"{label}:health_monitor", eng._health_monitor, critical=True)),
             asyncio.create_task(_run_with_restart(eng, f"{label}:cleanup_loop", eng._cleanup_loop)),
             asyncio.create_task(_run_with_restart(eng, f"{label}:reconciliation_loop", eng._reconciliation_loop)),
-            asyncio.create_task(_run_with_restart(eng, f"{label}:auto_retrainer", eng.retrainer.run)),
         ]
+        # Only the leader engine (i==0) runs auto_retrainer; it aggregates
+        # training data from all exchange DBs.  Follower engines skip
+        # retraining to avoid model file race conditions.
+        if i == 0:
+            eng._tasks.append(
+                asyncio.create_task(_run_with_restart(eng, f"{label}:auto_retrainer", eng.retrainer.run))
+            )
         if getattr(eng, "auto_tuner", None):
             eng._tasks.append(
                 asyncio.create_task(_run_with_restart(eng, f"{label}:auto_tuner", eng.auto_tuner.run))

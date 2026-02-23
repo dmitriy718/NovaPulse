@@ -90,6 +90,7 @@ class ConfluenceSignal:
         self.timeframe_agreement = timeframe_agreement
         self.timeframes = timeframes or {}
         self.timestamp = datetime.now(timezone.utc).isoformat()
+        self.core_indicators: Dict[str, float] = {}
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -344,9 +345,11 @@ class ConfluenceDetector:
                 trend_regime=trend_regime,
                 vol_regime=vol_regime,
             )
-            timeframe_results[tf] = self._compute_confluence(
+            tf_signal = self._compute_confluence(
                 pair, signals, trend_regime, vol_regime, vol_level, vol_expanding
             )
+            tf_signal.core_indicators = self._extract_core_indicators(indicator_cache, closes)
+            timeframe_results[tf] = tf_signal
 
         return self._combine_timeframes(pair, timeframe_results)
 
@@ -635,6 +638,63 @@ class ConfluenceDetector:
             base.take_profit = highest_sig.take_profit
 
         return base
+
+    def _extract_core_indicators(
+        self, ic: "IndicatorCache", closes: np.ndarray,
+    ) -> Dict[str, float]:
+        """Extract canonical indicator values from the IndicatorCache for ML features.
+
+        These serve as fallback values when individual strategies don't populate
+        the corresponding metadata keys in their signals.
+        """
+        def _safe_last(arr: np.ndarray) -> Optional[float]:
+            if arr is not None and len(arr) > 0:
+                v = float(arr[-1])
+                return v if math.isfinite(v) else None
+            return None
+
+        result: Dict[str, float] = {}
+
+        rsi_val = _safe_last(ic.rsi(14))
+        if rsi_val is not None:
+            result["rsi"] = rsi_val
+
+        adx_val = _safe_last(ic.adx(14))
+        if adx_val is not None:
+            result["adx"] = adx_val
+
+        bb_pos = _safe_last(ic.bb_position(20, 2.0))
+        if bb_pos is not None:
+            result["bb_position"] = bb_pos
+
+        vol_ratio = _safe_last(ic.volume_ratio(20))
+        if vol_ratio is not None:
+            result["volume_ratio"] = vol_ratio
+
+        mom = _safe_last(ic.momentum(10))
+        if mom is not None:
+            result["momentum"] = mom
+
+        fast_ema = ic.ema(12)
+        slow_ema = ic.ema(26)
+        if len(fast_ema) > 0 and len(slow_ema) > 0:
+            sv = float(slow_ema[-1])
+            if sv > 0 and math.isfinite(sv):
+                spread = (float(fast_ema[-1]) - sv) / sv
+                if math.isfinite(spread):
+                    result["ema_spread"] = spread
+
+        atr_vals = ic.atr(14)
+        if len(atr_vals) > 0 and len(closes) > 0 and float(closes[-1]) > 0:
+            atr_pct = float(atr_vals[-1]) / float(closes[-1])
+            if math.isfinite(atr_pct):
+                result["atr_pct"] = atr_pct
+
+        trend_s = _safe_last(ic.trend_strength(12, 26))
+        if trend_s is not None:
+            result["trend_strength"] = trend_s
+
+        return result
 
     def _compute_confluence(
         self,

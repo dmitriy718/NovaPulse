@@ -181,10 +181,51 @@ class ModelTrainer:
         self._executor: Optional[concurrent.futures.ProcessPoolExecutor] = None
         self.tenant_id = tenant_id or "default"
         self._es_provider = None  # Optional ESTrainingDataProvider
+        self._additional_db_paths: List[str] = []
 
     def set_es_provider(self, provider) -> None:
         """Set optional Elasticsearch training data provider for feature enrichment."""
         self._es_provider = provider
+
+    def set_additional_db_paths(self, paths: List[str]) -> None:
+        """Add other exchange DB paths for cross-exchange training data aggregation."""
+        self._additional_db_paths = [p for p in paths if p]
+
+    async def _get_aggregated_training_data(self, min_samples: int) -> List[Dict[str, Any]]:
+        """Load labeled ML features from primary DB + all additional exchange DBs."""
+        import aiosqlite
+
+        data = await self.db.get_ml_training_data(min_samples, tenant_id=self.tenant_id)
+        primary_count = len(data)
+
+        for db_path in self._additional_db_paths:
+            try:
+                async with aiosqlite.connect(db_path) as conn:
+                    cursor = await conn.execute(
+                        "SELECT features, label FROM ml_features "
+                        "WHERE label IS NOT NULL "
+                        "ORDER BY timestamp DESC LIMIT ?",
+                        (min_samples,),
+                    )
+                    rows = await cursor.fetchall()
+                    for row in rows:
+                        features = json.loads(row[0]) if isinstance(row[0], str) else row[0]
+                        data.append({"features": features, "label": row[1]})
+            except Exception as e:
+                logger.warning(
+                    "Failed to read additional DB for training",
+                    path=db_path,
+                    error=repr(e),
+                )
+
+        if len(data) > primary_count:
+            logger.info(
+                "Aggregated cross-exchange training data",
+                primary=primary_count,
+                total=len(data),
+                additional_dbs=len(self._additional_db_paths),
+            )
+        return data
 
     def _get_executor(self) -> concurrent.futures.ProcessPoolExecutor:
         """Lazy-init executor so it can be shut down cleanly."""
@@ -212,11 +253,14 @@ class ModelTrainer:
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
 
-        # Step 1: Get training data
+        # Step 1: Get training data (aggregate across exchange DBs if configured)
         logger.info("Starting model training pipeline")
-        training_data = await self.db.get_ml_training_data(
-            self.min_samples, tenant_id=self.tenant_id
-        )
+        if self._additional_db_paths:
+            training_data = await self._get_aggregated_training_data(self.min_samples)
+        else:
+            training_data = await self.db.get_ml_training_data(
+                self.min_samples, tenant_id=self.tenant_id
+            )
 
         if len(training_data) < 20:
             result["message"] = f"Insufficient training data: {len(training_data)} samples (need 20+)"

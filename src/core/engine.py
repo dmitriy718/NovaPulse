@@ -626,11 +626,13 @@ class BotEngine:
         )
         if enabled:
             try:
+                cl_suffix = f"_{self.exchange_name}" if getattr(self, "exchange_name", "") else ""
+                cl_path = str(Path("models") / f"continuous_sgd{cl_suffix}.joblib")
                 self.continuous_learner = ContinuousLearner(
-                    model_path=str(Path("models") / "continuous_sgd.joblib"),
+                    model_path=cl_path,
                     feature_names=self.config.ml.features,
                 )
-                logger.info("Continuous learner enabled", model_path=str(Path("models") / "continuous_sgd.joblib"))
+                logger.info("Continuous learner enabled", model_path=cl_path)
             except Exception as e:
                 await self.error_handler.handle(e, component="continuous_learner", context="init")
                 self.continuous_learner = None
@@ -1975,6 +1977,15 @@ class BotEngine:
                         metadata[k] = v
         for k in counts:
             metadata[k] = metadata[k] / counts[k]
+
+        # Fill missing indicator keys from core_indicators (computed from
+        # IndicatorCache in confluence).  Strategy metadata takes priority;
+        # core_indicators provides canonical values as fallback.
+        core = getattr(signal, "core_indicators", None) or {}
+        for key in ("rsi", "adx", "bb_position", "volume_ratio", "momentum",
+                     "ema_spread", "atr_pct", "trend_strength"):
+            if key not in metadata and key in core:
+                metadata[key] = core[key]
 
         features = self.predictor.features.feature_dict_from_signals(
             metadata,
