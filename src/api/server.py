@@ -120,12 +120,13 @@ class DashboardServer:
         # Lazy init in case optional deps are removed in some deployments.
         self._session_serializer = None
         self._password_hasher = None
-        self._setup_middleware()
-        self._setup_routes()
-        self._ws_connections: Set[WebSocket] = set()
+        # Core references initialized early so middleware helpers can access safe defaults.
         self._bot_engine = None
         self._control_router = None
         self._stripe_service = None
+        self._setup_middleware()
+        self._setup_routes()
+        self._ws_connections: Set[WebSocket] = set()
         self._ws_cache_by_tenant: Dict[str, Dict[str, Any]] = {}
         self._ws_cache_time_by_tenant: Dict[str, float] = {}
         self._alerts: List[Dict[str, Any]] = []  # Ring buffer of recent alerts
@@ -891,9 +892,7 @@ class DashboardServer:
 
         # Restrict CORS by default; allow explicit overrides via env.
         origins_env = os.getenv("DASHBOARD_CORS_ORIGINS", "").strip()
-        public_origin = _norm_origin(
-            os.getenv("DASHBOARD_PUBLIC_ORIGIN", "https://nova.horizonsvc.com")
-        )
+        public_origin = _norm_origin(os.getenv("DASHBOARD_PUBLIC_ORIGIN", ""))
         if origins_env:
             allow_origins = [_norm_origin(o) for o in origins_env.split(",") if _norm_origin(o)]
         else:
@@ -927,6 +926,17 @@ class DashboardServer:
             allow_methods=["GET", "POST", "PATCH"],
             allow_headers=["*"],
         )
+
+        # Warn when reads are unauthenticated and a non-local origin is allowed.
+        if not self._require_auth_for_reads():
+            def _is_local(origin: str) -> bool:
+                return origin.startswith("http://localhost:") or origin.startswith("http://127.0.0.1:")
+            risky = [o for o in allow_origins if not _is_local(o)]
+            if risky:
+                logger.warning(
+                    "CORS allows non-local origins while read auth is disabled",
+                    origins=risky,
+                )
 
         # Basic security headers for browser-based operator UI.
         @self.app.middleware("http")
