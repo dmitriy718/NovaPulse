@@ -248,9 +248,10 @@ class PolygonClient:
             await self.initialize()
         if not date:
             from datetime import datetime, timezone, timedelta
-            # Use previous trading day (yesterday or Friday if weekend)
+            # Use previous trading day: Mon→Fri(3), Sun→Fri(2), Sat→Fri(1), else→yesterday(1)
             today = datetime.now(timezone.utc).date()
-            offset = max(1, (today.weekday() - 4) % 7) if today.weekday() in (5, 6) else 1
+            wd = today.weekday()
+            offset = 3 if wd == 0 else 2 if wd == 6 else 1 if wd == 5 else 1
             date = (today - timedelta(days=offset)).isoformat()
         url = f"{self.base_url}/v2/aggs/grouped/locale/us/market/stocks/{date}"
         params = {"adjusted": "true", "apiKey": self.api_key}
