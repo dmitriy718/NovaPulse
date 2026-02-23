@@ -418,10 +418,12 @@ class VolatilitySqueezeConfig(StrategyWeights):
 class OrderFlowConfig(StrategyWeights):
     book_score_threshold: float = 0.3
     spread_tight_pct: float = 0.0010
+    spread_tight_multiplier: float = 1.0
     hl_lookback: int = 5
     max_book_age_seconds: int = 5
     atr_period: int = 14
     min_depth_usd: float = 100000.0
+    spread_tight_overrides: Dict[str, float] = Field(default_factory=dict)
     weight: float = 0.15
 
 

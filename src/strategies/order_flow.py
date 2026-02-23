@@ -35,20 +35,25 @@ class OrderFlowStrategy(BaseStrategy):
         self,
         book_score_threshold: float = 0.3,
         spread_tight_pct: float = 0.0010,
+        spread_tight_multiplier: float = 1.0,
         hl_lookback: int = 5,
         max_book_age_seconds: int = 5,
         atr_period: int = 14,
         weight: float = 0.15,
         min_depth_usd: float = 0.0,
+        spread_tight_overrides: Optional[Dict[str, float]] = None,
         enabled: bool = True,
     ):
         super().__init__(name="order_flow", weight=weight, enabled=enabled)
         self.book_score_threshold = book_score_threshold
         self.spread_tight_pct = spread_tight_pct
+        self.spread_tight_multiplier = max(0.1, float(spread_tight_multiplier))
         self.hl_lookback = hl_lookback
         self.max_book_age_seconds = max_book_age_seconds
         self.atr_period = atr_period
         self.min_depth_usd = max(0.0, float(min_depth_usd))
+        self.spread_tight_overrides = spread_tight_overrides or {}
+        self._avg_spread_pct: Dict[str, float] = {}
 
     def min_bars_required(self) -> int:
         return max(self.hl_lookback + 5, 30)
@@ -87,6 +92,13 @@ class OrderFlowStrategy(BaseStrategy):
         spread_pct = float(book_analysis.get("spread_pct", 999.0))
         obi = float(book_analysis.get("obi", 0.0))
         whale_bias = float(book_analysis.get("whale_bias", 0.0))
+        prev_avg = self._avg_spread_pct.get(pair, spread_pct)
+        avg_spread = (prev_avg * 0.9) + (spread_pct * 0.1)
+        self._avg_spread_pct[pair] = avg_spread
+        spread_tight_limit = self.spread_tight_overrides.get(
+            pair,
+            min(self.spread_tight_pct, avg_spread * self.spread_tight_multiplier),
+        )
 
         cache = kwargs.get("indicator_cache")
         if cache:
@@ -114,7 +126,7 @@ class OrderFlowStrategy(BaseStrategy):
         lower_highs = all(recent_highs[i] <= recent_highs[i - 1] for i in range(1, len(recent_highs)))
 
         # Spread compression
-        spread_tight = spread_pct < self.spread_tight_pct
+        spread_tight = spread_pct < spread_tight_limit
 
         direction = SignalDirection.NEUTRAL
         strength = 0.0

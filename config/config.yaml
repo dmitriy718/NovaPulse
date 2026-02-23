@@ -118,6 +118,7 @@ strategies:
     enabled: true
     book_score_threshold: 0.3
     spread_tight_pct: 0.0010
+    spread_tight_multiplier: 1.0
     hl_lookback: 5
     max_book_age_seconds: 5
     atr_period: 14
