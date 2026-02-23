@@ -728,14 +728,79 @@ class TradeExecutor:
         )
         return trade_record
 
+    # Expected ML feature keys and their safe defaults (from predictor.py).
+    _ML_FEATURE_DEFAULTS: Dict[str, float] = {
+        "rsi": 50.0, "ema_ratio": 1.0, "bb_position": 0.5, "adx": 0.0,
+        "volume_ratio": 1.0, "obi": 0.0, "atr_pct": 0.02,
+        "momentum_score": 0.0, "trend_strength": 0.0, "spread_pct": 0.0,
+        "trend_regime_encoded": 1.0, "vol_regime_encoded": 1.0,
+    }
+
     async def _capture_entry_telemetry(
         self, signal: ConfluenceSignal, trade_id: str,
     ) -> None:
-        """Record ML features and order book snapshot at entry (best-effort)."""
-        # ML features
+        """Record ML features and order book snapshot at entry (best-effort).
+
+        Order book data is computed FIRST so that entry-time OBI and spread
+        can override the prediction-time values in the ML feature vector.
+        """
+        # ------------------------------------------------------------------
+        # Step 1: Compute entry-time order book data FIRST
+        # ------------------------------------------------------------------
+        entry_obi: Optional[float] = None
+        entry_spread: Optional[float] = None
+        try:
+            book = self.market_data.get_order_book(signal.pair) if self.market_data else {}
+            bids = (book.get("bids", []) or [])[:10]
+            asks = (book.get("asks", []) or [])[:10]
+
+            def _vol_sum(levels: List[Any]) -> float:
+                total = 0.0
+                for lvl in levels:
+                    try:
+                        if isinstance(lvl, (list, tuple)) and len(lvl) >= 2:
+                            total += float(lvl[1])
+                        elif isinstance(lvl, dict):
+                            for key in ("volume", "qty", "size", "q"):
+                                if key in lvl:
+                                    total += float(lvl[key])
+                                    break
+                    except Exception:
+                        continue
+                return total
+
+            bid_vol = _vol_sum(bids)
+            ask_vol = _vol_sum(asks)
+            entry_obi = order_book_imbalance(bid_vol, ask_vol)
+            entry_spread = self.market_data.get_spread(signal.pair) if self.market_data else 0.0
+
+            await self.db.insert_order_book_snapshot(
+                pair=signal.pair,
+                bid_volume=bid_vol,
+                ask_volume=ask_vol,
+                obi=entry_obi,
+                spread=entry_spread,
+                whale_detected=0,
+                snapshot_data={"bids": bids, "asks": asks},
+                trade_id=trade_id,
+                tenant_id=self.tenant_id,
+            )
+        except Exception as e:
+            logger.debug("Order book snapshot failed (non-fatal)", trade_id=trade_id, error=repr(e))
+
+        # ------------------------------------------------------------------
+        # Step 2: ML features — override OBI/spread with entry-time values,
+        #         validate all 12 keys are present
+        # ------------------------------------------------------------------
         try:
             features = getattr(signal, "prediction_features", None)
             if isinstance(features, dict) and features:
+                # Override with entry-time order book values
+                if entry_obi is not None and math.isfinite(entry_obi):
+                    features["obi"] = entry_obi
+                if entry_spread is not None and math.isfinite(entry_spread):
+                    features["spread_pct"] = entry_spread
+
                 safe_features: Dict[str, float] = {}
                 bad = 0
                 for k, v in features.items():
@@ -751,6 +816,18 @@ class TradeExecutor:
                     except Exception:
                         bad += 1
                         continue
+
+                # Backfill missing feature keys with known defaults
+                missing = [k for k in self._ML_FEATURE_DEFAULTS if k not in safe_features]
+                if missing:
+                    logger.info(
+                        "ML features backfilled",
+                        trade_id=trade_id,
+                        pair=signal.pair,
+                        missing=missing,
+                    )
+                    for k in missing:
+                        safe_features[k] = self._ML_FEATURE_DEFAULTS[k]
 
                 if safe_features:
                     await self.db.insert_ml_features(
@@ -775,46 +852,6 @@ class TradeExecutor:
                 error=repr(e),
                 error_type=type(e).__name__,
             )
-
-        # Order book snapshot
-        try:
-            book = self.market_data.get_order_book(signal.pair) if self.market_data else {}
-            bids = (book.get("bids", []) or [])[:10]
-            asks = (book.get("asks", []) or [])[:10]
-
-            def _vol_sum(levels: List[Any]) -> float:
-                total = 0.0
-                for lvl in levels:
-                    try:
-                        if isinstance(lvl, (list, tuple)) and len(lvl) >= 2:
-                            total += float(lvl[1])
-                        elif isinstance(lvl, dict):
-                            for key in ("volume", "qty", "size", "q"):
-                                if key in lvl:
-                                    total += float(lvl[key])
-                                    break
-                    except Exception:
-                        continue
-                return total
-
-            bid_vol = _vol_sum(bids)
-            ask_vol = _vol_sum(asks)
-            obi = order_book_imbalance(bid_vol, ask_vol)
-            spread = self.market_data.get_spread(signal.pair) if self.market_data else 0.0
-
-            await self.db.insert_order_book_snapshot(
-                pair=signal.pair,
-                bid_volume=bid_vol,
-                ask_volume=ask_vol,
-                obi=obi,
-                spread=spread,
-                whale_detected=0,
-                snapshot_data={"bids": bids, "asks": asks},
-                trade_id=trade_id,
-                tenant_id=self.tenant_id,
-            )
-        except Exception as e:
-            logger.debug("Order book snapshot failed (non-fatal)", trade_id=trade_id, error=repr(e))
 
     async def _get_recent_trades_count(self, cutoff: str) -> int:
         """Fetch recent trade count with a short in-memory cache."""
