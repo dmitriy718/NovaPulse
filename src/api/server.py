@@ -1662,6 +1662,13 @@ class DashboardServer:
             risk_report = self._aggregate_risk_reports(
                 [eng.risk_manager.get_risk_report() for eng in engines if getattr(eng, "risk_manager", None)]
             )
+            # Align displayed bankroll with DB-derived realized P&L to avoid drift.
+            primary = self._get_primary_engine()
+            cfg_initial = getattr(getattr(primary, "config", None), "risk", None)
+            initial_bankroll = float(getattr(cfg_initial, "initial_bankroll", 0.0) or 0.0)
+            realized_equity = initial_bankroll + float(stats.get("total_pnl", 0.0) or 0.0)
+            risk_report["bankroll"] = round(realized_equity, 2)
+            risk_report["initial_bankroll"] = initial_bankroll
 
             # Add unrealized P&L from open positions
             unrealized = 0.0
@@ -1683,9 +1690,7 @@ class DashboardServer:
                         unrealized += (gross - est_entry_fee - est_exit_fee)
 
             stats["unrealized_pnl"] = round(unrealized, 2)
-            stats["total_equity"] = round(
-                (risk_report.get("bankroll", 0.0) or 0.0) + unrealized, 2
-            )
+            stats["total_equity"] = round(realized_equity + unrealized, 2)
             return {**stats, **risk_report}
 
         @self.app.get("/api/v1/strategies")
