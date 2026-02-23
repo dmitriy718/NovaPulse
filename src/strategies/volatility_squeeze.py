@@ -39,7 +39,7 @@ class VolatilitySqueezeStrategy(BaseStrategy):
         kc_multiplier: float = 1.5,
         momentum_period: int = 12,
         atr_period: int = 14,
-        min_squeeze_bars: int = 3,
+        min_squeeze_bars: int = 5,
         weight: float = 0.12,
         enabled: bool = True,
     ):
@@ -120,6 +120,8 @@ class VolatilitySqueezeStrategy(BaseStrategy):
         prev_mom2 = mom_vals[-3] if len(mom_vals) > 2 else 0
         mom_rising = curr_mom > prev_mom
         mom_falling = curr_mom < prev_mom
+        long_mom_slope = curr_mom > prev_mom > prev_mom2
+        short_mom_slope = curr_mom < prev_mom < prev_mom2
         mom_accelerating = (curr_mom - prev_mom) > (prev_mom - prev_mom2)
 
         direction = SignalDirection.NEUTRAL
@@ -128,6 +130,8 @@ class VolatilitySqueezeStrategy(BaseStrategy):
 
         # ---- LONG: squeeze released + positive rising momentum ----
         if curr_mom > 0 and mom_rising:
+            if not long_mom_slope:
+                return self._neutral_signal(pair, "Momentum slope not positive enough")
             long_price_break = price > max(bb_upper[-1], kc_upper[-1])
             long_momentum_persist = prev_mom > 0
             if not (long_price_break or long_momentum_persist):
@@ -156,6 +160,8 @@ class VolatilitySqueezeStrategy(BaseStrategy):
 
         # ---- SHORT: squeeze released + negative falling momentum ----
         elif curr_mom < 0 and mom_falling:
+            if not short_mom_slope:
+                return self._neutral_signal(pair, "Momentum slope not negative enough")
             short_price_break = price < min(bb_lower[-1], kc_lower[-1])
             short_momentum_persist = prev_mom < 0
             if not (short_price_break or short_momentum_persist):
