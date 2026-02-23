@@ -906,6 +906,13 @@ class BotEngine:
         try:
             es_cfg = getattr(self.config, "elasticsearch", None)
             if es_cfg and getattr(es_cfg, "enabled", False):
+                # Fail closed when no credentials are provided to avoid accidental external export.
+                if not getattr(es_cfg, "api_key", None):
+                    logger.warning(
+                        "Elasticsearch enabled but no API key provided; pipeline disabled",
+                        hosts=list(getattr(es_cfg, "hosts", []) or []),
+                    )
+                    return
                 from src.data.es_client import ESClient
                 from src.data.ingestion import ExternalDataCollector, MarketDataIndexer
                 from src.data.training_data import ESTrainingDataProvider

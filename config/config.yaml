@@ -381,7 +381,7 @@ tuner:
   auto_disable_min_trades: 30
 
 elasticsearch:
-  enabled: true  # Analytics/enrichment mirror only; canonical trade ledger remains SQLite.
+  enabled: false  # Default off to avoid accidental external data export. Enable only with explicit keys.
   hosts:
     - "https://my-elasticsearch-project-b2c677.es.us-central1.gcp.elastic.cloud:443"
   api_key: ""   # Set via ES_API_KEY env var or paste here
