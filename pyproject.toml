@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "novapulse"
-version = "3.0.0"
+version = "4.1.1"
 description = "NovaPulse: multi-strategy crypto trading engine + hardened control plane"
 # The system is tested and deployed on Python 3.13 as of 2026-02-15.
 # Keep an upper bound to avoid silent breakage on future majors.
