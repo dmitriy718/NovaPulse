@@ -1,4 +1,4 @@
-# NovaPulse (v4.0)
+# NovaPulse (v4.1.1)
 
 Operator-grade AI crypto trading system: multi-strategy signal engine, risk-first execution, hardened control plane, and continuous self-improvement (guardrailed).
 
