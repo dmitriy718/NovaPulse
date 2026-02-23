@@ -121,6 +121,7 @@ strategies:
     hl_lookback: 5
     max_book_age_seconds: 5
     atr_period: 14
+    min_depth_usd: 100000
     weight: 0.15
   # Trend — untested, fundamentally sound
   trend:

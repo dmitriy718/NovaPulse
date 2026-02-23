@@ -421,6 +421,7 @@ class OrderFlowConfig(StrategyWeights):
     hl_lookback: int = 5
     max_book_age_seconds: int = 5
     atr_period: int = 14
+    min_depth_usd: float = 100000.0
     weight: float = 0.15
 
 

@@ -39,6 +39,7 @@ class OrderFlowStrategy(BaseStrategy):
         max_book_age_seconds: int = 5,
         atr_period: int = 14,
         weight: float = 0.15,
+        min_depth_usd: float = 0.0,
         enabled: bool = True,
     ):
         super().__init__(name="order_flow", weight=weight, enabled=enabled)
@@ -47,6 +48,7 @@ class OrderFlowStrategy(BaseStrategy):
         self.hl_lookback = hl_lookback
         self.max_book_age_seconds = max_book_age_seconds
         self.atr_period = atr_period
+        self.min_depth_usd = max(0.0, float(min_depth_usd))
 
     def min_bars_required(self) -> int:
         return max(self.hl_lookback + 5, 30)
@@ -97,6 +99,12 @@ class OrderFlowStrategy(BaseStrategy):
         curr_atr = atr_vals[-1]
         if curr_atr <= 0:
             return self._neutral_signal(pair, "ATR is zero")
+
+        # Liquidity floor: skip signals when combined depth is too thin.
+        depth_units = float(book_analysis.get("bid_volume", 0.0)) + float(book_analysis.get("ask_volume", 0.0))
+        depth_usd = depth_units * price if price > 0 else 0.0
+        if self.min_depth_usd > 0 and depth_usd < self.min_depth_usd:
+            return self._neutral_signal(pair, f"Depth too thin ({depth_usd:.0f} USD)")
 
         # Price action: higher lows (bullish) or lower highs (bearish)
         lb = self.hl_lookback
