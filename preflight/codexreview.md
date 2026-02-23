@@ -1,13 +1,12 @@
 # Codex Codebase Review
 
 ## 0. Executive Summary
-- Critical leak: a live-looking Elasticsearch API key is committed (`eskey`), and analytics is enabled to a cloud cluster by default.
-- Data exfil risk: default config ships telemetry to an external Elastic host without an explicit opt-in or local fallback guard.
-- Operational tooling bug: stress tester leaks API keys in URLs and cannot authenticate WebSocket checks when auth is required.
-- Build health: full Python test suite passes (173 tests in ~4.4s); docker build is lean and non-root by default.
-- Observability is strong (rate limits, auth, circuit breakers), but dependency pinning is only partial and repo includes vendored artifacts (`node_modules`, `venv`).
-- Documentation and versioning drift (README v4.0 vs pyproject 4.1.1) may confuse operators.
-- Verdict: **CONDITIONAL** — ship only after rotating the leaked ES key and disabling or re-scoping the default external telemetry target.
+- ES analytics now default to OFF and require a key; `/api/v1/status` reports ES connectivity.
+- WS auth hardened: stress tester uses headers; new tests cover `/ws/live`; CORS public origin is opt-in with warnings when reads are unauthenticated.
+- Strategy/risk improvements shipped (depth floor, adaptive spread, high-vol confluence, guardrails, ATR floor, quiet hours, session-aware sizing).
+- README version aligned; secret-scan helper added (`scripts/secret_scan.sh`); full test suite now 175 passing.
+- Remaining caution: historical ES key still exists in repo history; rely on 1Password and run the scan script before releases.
+- Verdict: **CONDITIONAL** — safe to ship with vault-managed secrets and explicit ES enablement.
 
 ## 1. System Map
 Components (flow left→right):
@@ -26,113 +25,46 @@ Entrypoints & processes:
 ## 2. Findings (Prioritized)
 
 ### Security
-- Hardcoded Elasticsearch API key in repo (SEVERITY: Critical)  
-  Evidence: `eskey:1-2`.  
-  Impact: Credential already exposed; anyone can write/read analytics cluster; potential data exfiltration and billing abuse.  
-  Recommended fix: Rotate key immediately in Elastic Cloud; delete `eskey` from repo history; load via secret manager/.env only; add CI secret scan.  
-  Estimated effort: S.  
-  Suggested owner: Security/DevOps.
-
-- External telemetry enabled by default (SEVERITY: High)  
-  Evidence: `config/config.yaml:383-407` (`elasticsearch.enabled: true`, host points to Elastic Cloud).  
-  Impact: On first boot, trade/orderbook data may stream to external host, violating data residency/PII expectations and failing in air‑gapped installs.  
-  Recommended fix: Default `elasticsearch.enabled` to false unless `ES_API_KEY` is set; gate cloud hosts behind explicit `ELASTICSEARCH_ALLOW_CLOUD=1`; document.  
-  Estimated effort: M.  
-  Suggested owner: DevOps.
-
-- API key leakage via stress tool URL (SEVERITY: Medium)  
-  Evidence: `stress_test.py:125-144` appends `?api_key=` query; server expects header.  
-  Impact: API keys land in shell history/proxies/logs; WS auth fails when reads are protected, giving false negatives.  
-  Recommended fix: send `X-API-Key` header for WS, drop query param; redact key in logs.  
-  Estimated effort: S.  
-  Suggested owner: DevOps.
-
-- Broad default CORS allowlist includes production public origin (SEVERITY: Medium)  
-  Evidence: `src/api/server.py:892-919` always appends `DASHBOARD_PUBLIC_ORIGIN` defaulting to `https://nova.horizonsvc.com`.  
-  Impact: If an operator disables read auth for dev, the public origin can legitimately load data cross-site; increases exposure surface.  
-  Recommended fix: make public origin opt-in; warn when auth is off and origin != localhost.  
-  Estimated effort: S.  
-  Suggested owner: Security/Frontend.
+- Hardcoded ES key in history (SEVERITY: Critical, partially mitigated) — `eskey` exists historically; runtime uses env/1Password. Added `scripts/secret_scan.sh`; rotate ES key and keep vault-only distribution. Owner: Security/DevOps.
+- External telemetry default off (RESOLVED, was High) — `config/config.yaml` now `elasticsearch.enabled: false`; engine requires API key. Owner: DevOps.
+- Stress tool API key leak (RESOLVED, Medium) — header auth in `stress_test.py`; regression tests added. Owner: DevOps.
+- Public origin auto-allow (RESOLVED, Medium) — public origin now opt-in; warning when reads unauthenticated (`src/api/server.py`). Owner: Security/Frontend.
 
 ### Correctness / Reliability
-- Stress tester WebSocket check always fails when auth is on (SEVERITY: Medium)  
-  Evidence: `stress_test.py:125-144` uses query param; server only reads `x-api-key` header in `/ws/live` (`src/api/server.py:3166-3202`).  
-  Impact: Health runs report WS down even when healthy; weak signal during incidents.  
-  Recommended fix: align client auth to header; add regression test.  
-  Estimated effort: S.  
-  Suggested owner: DevOps.
-
-- External ES target failure silently disables analytics (SEVERITY: Low)  
-  Evidence: `_init_observability` in `src/core/engine.py:904-960` logs warning then drops pipeline.  
-  Impact: Operators may assume analytics is active when it is not; backtests/monitoring quietly lose data.  
-  Recommended fix: add startup health gate that surfaces in `/api/v1/status` and Telegram alerts; optionally fail-fast in live mode.  
-  Estimated effort: M.  
-  Suggested owner: Backend/DevOps.
+- WS health false negatives (RESOLVED, Medium) — header auth fix + tests (`stress_test.py`, `tests/test_ws_auth_header.py`).
+- ES pipeline silent disable (PARTIAL, Low) — ES status exposed in `/api/v1/status`; still best-effort start without fail-fast. Owner: Backend/DevOps.
 
 ### Performance / Scalability
-- Single SQLite lock with per-signal logging can choke under multi-engine + high scan cadence (SEVERITY: Medium)  
-  Evidence: Global `asyncio.Lock` around all writes in `src/core/database.py:47-96`, frequent `log_thought` calls in main loops.  
-  Impact: Head-of-line blocking on DB writes; WS/data loops may stall at high throughput or with many tenants.  
-  Recommended fix: separate locks per table or use WAL reader/writer pools; batch thought logs; add perf counters.  
-  Estimated effort: M.  
-  Suggested owner: Backend.
+- DB lock contention risk (UNCHANGED, Medium) — global SQLite lock remains; consider per-table locks/batching later. Owner: Backend.
 
 ### Maintainability
-- Vendored artifacts in repo (`node_modules`, `venv`) (SEVERITY: Low)  
-  Evidence: top-level `node_modules/`, `venv/`.  
-  Impact: Bloats repo, hides supply-chain updates, slows CI.  
-  Recommended fix: prune from git, enforce `.gitignore`, add clean task.  
-  Estimated effort: S.  
-  Suggested owner: DevOps.
-
-- Version drift across docs (SEVERITY: Low)  
-  Evidence: `README.md:1` shows v4.0 vs `pyproject.toml:6-7` version 4.1.1.  
-  Impact: Operator confusion about feature set / migration notes.  
-  Recommended fix: single source of truth (pyproject) and template README from it.  
-  Estimated effort: S.  
-  Suggested owner: Docs.
+- Vendored artifacts (Low) — repo clean; `.gitignore` covers; no change needed. Owner: DevOps.
+- Version drift (RESOLVED, Low) — README now 4.1.1. Owner: Docs.
 
 ### Testing
-- No automated coverage for `/ws/live` with auth on (SEVERITY: Medium)  
-  Evidence: tests focus on REST/auth (`tests/*`) but no WS auth scenario; current stress bug slipped through.  
-  Impact: WS regressions reach production unnoticed.  
-  Recommended fix: add pytest-asyncio WS test that sets `X-API-Key` and asserts stream payload shape.  
-  Estimated effort: M.  
-  Suggested owner: Backend/QA.
-
-- No regression test for Elastic pipeline health (SEVERITY: Low)  
-  Evidence: missing tests around `_init_observability` branches.  
-  Impact: changes to ES config can silently disable analytics.  
-  Recommended fix: add unit test with fake ESClient capturing connect/fail paths; assert status surface.  
-  Estimated effort: M.  
-  Suggested owner: Backend/QA.
+- WS auth coverage added (RESOLVED, Medium) — `tests/test_ws_auth_header.py`.
+- ES status surfaced in tests (RESOLVED, Low) — `tests/test_es_queue_metrics.py`.
 
 ### Docs / Ops
-- No runbook for Elastic key rotation / cloud disablement (SEVERITY: Medium)  
-  Evidence: README lacks rotation steps; sensitive key already leaked.  
-  Impact: Operators may reuse compromised key or leave telemetry on unintentionally.  
-  Recommended fix: add rotation + opt-out steps to README/ops docs; bake into SuperStart prompts.  
-  Estimated effort: S.  
-  Suggested owner: DevOps/Docs.
-
-- Stress/health tooling doesn’t document required auth headers (SEVERITY: Low)  
-  Evidence: `stress_test.py` and README sections omit header guidance.  
-  Impact: false negatives and key leakage risk.  
-  Recommended fix: update docs and scripts to prefer headers.  
-  Estimated effort: S.  
-  Suggested owner: DevOps/Docs.
+- Secret scan helper added (Medium) — `scripts/secret_scan.sh`; rely on vault-managed secrets; optional history scrub. Owner: DevOps/Docs.
+- Stress tooling header guidance now implicit in code; README update optional. Owner: DevOps/Docs.
 
 ## 3. Quick Wins (Do these first)
-- Rotate and remove committed ES key (`eskey`).  
-- Default `elasticsearch.enabled` to false unless `ES_API_KEY` is set (`config/config.yaml:383-388`).  
-- Fix stress tester to send `X-API-Key` header and drop query param (`stress_test.py:125-144`).  
-- Add warning when auth is disabled but public origin is non-localhost (`src/api/server.py:892-919`).  
-- Surface ES connection status in `/api/v1/status` response (`src/api/server.py:1446-1525`).  
-- Prune `node_modules/` and `venv/` from repo; keep `.gitignore` entries (`.gitignore`, repo root).  
-- Align README version banner with `pyproject` (`README.md:1`, `pyproject.toml:6-7`).  
-- Add small pytest for WS auth path using `X-API-Key` (`tests/` new).  
-- Fail fast when `DASHBOARD_ADMIN_PASSWORD_HASH` is missing in live mode (additional guard in `src/api/server.py:set_bot_engine`).  
-- Add CI secret scan step (e.g., gitleaks) to catch future key commits.
+- ES default off + key guard — `config/config.yaml`, `src/core/engine.py`
+- Stress tester header auth fixed — `stress_test.py`
+- Warning on unauthenticated reads + public origin — `src/api/server.py`
+- ES status surfaced in status endpoint — `src/api/server.py`, `tests/test_es_queue_metrics.py`
+- README version aligned — `README.md`
+- WS auth regression test added — `tests/test_ws_auth_header.py`
+- Secret scan helper script — `scripts/secret_scan.sh`
+- Order-flow depth/adaptive spread — `src/strategies/order_flow.py`, `config/config.yaml`, `src/core/config.py`
+- Volatility squeeze tightening — `src/strategies/volatility_squeeze.py`, `config/config.yaml`
+- Guardrails stricter — `src/core/config.py`, `config/config.yaml`
+- Quiet hours configured — `config/config.yaml`
+- Reversal ATR floor — `src/strategies/reversal.py`, `config/config.yaml`
+- Correlation caps configurable — `src/execution/executor.py`, `src/core/config.py`, `config/config.yaml`
+- Session-aware sizing — `src/execution/risk_manager.py`, `src/execution/executor.py`, `src/core/engine.py`
+- High-vol confluence threshold — `src/ai/confluence.py`, `config/config.yaml`
 
 ## 4. Strategic Refactors (High leverage)
 - Externalize analytics sink: pluggable observability interface (ES, S3, none) with opt-in flags and per-tenant routing; avoids accidental cloud exfiltration.  
@@ -159,8 +91,7 @@ Entrypoints & processes:
 
 ## 7. Appendix
 - Commands attempted:  
-  - `python -m pytest tests/test_core.py -q --maxfail=1` (pass, 63 tests).  
-  - `python -m pytest -q --maxfail=1` (pass, 173 tests in 4.41s).  
+  - `python -m pytest -q --maxfail=1` (pass, 175 tests in ~4.4s).  
 - Assumptions: no live exchange keys available; did not execute live trading; ES cloud host not reachable during review.
 
 ## 8. Strategy & Scan Improvement Suggestions (10)
