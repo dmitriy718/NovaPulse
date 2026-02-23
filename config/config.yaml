@@ -4,7 +4,7 @@
 
 app:
   name: "AI Crypto Trading Bot"
-  version: "3.0.0"
+  version: "4.1.1"
   mode: "paper"  # paper | live
   log_level: "INFO"
   db_path: "data/trading.db"

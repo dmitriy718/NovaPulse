@@ -812,7 +812,7 @@ class SignalWebhookConfig(BaseModel):
 
 class AppConfig(BaseModel):
     name: str = "AI Crypto Trading Bot"
-    version: str = "3.0.0"
+    version: str = "4.1.1"
     mode: str = "paper"
     log_level: str = "INFO"
     db_path: str = "data/trading.db"
