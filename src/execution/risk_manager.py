@@ -165,6 +165,7 @@ class RiskManager:
         vol_regime: str = "",
         vol_level: float = 0.5,
         vol_expanding: bool = False,
+        session_multiplier: float = 1.0,
     ) -> PositionSizeResult:
         """
         Calculate optimal position size using Kelly Criterion.
@@ -232,7 +233,8 @@ class RiskManager:
 
         # PRIMARY: Fixed fractional risk sizing
         # "Risk X% of bankroll per trade" — always produces a valid size
-        risk_amount = self.current_bankroll * self.max_risk_per_trade
+        session_multiplier = max(0.1, float(session_multiplier))
+        risk_amount = self.current_bankroll * self.max_risk_per_trade * session_multiplier
         position_size_usd = risk_amount / sl_pct if sl_pct > 0 else 0
 
         # SECONDARY: Kelly Criterion cap (only if sufficient history)
@@ -241,7 +243,7 @@ class RiskManager:
         b = avg_win_loss_ratio if avg_win_loss_ratio > 0 else 1.0
 
         kelly_full = max((p * b - q) / b, 0)
-        kelly_adjusted = kelly_full * self.kelly_fraction * confidence
+        kelly_adjusted = kelly_full * self.kelly_fraction * confidence * session_multiplier
         kelly_adjusted = min(kelly_adjusted, self.max_kelly_size)
         result.kelly_fraction = kelly_adjusted
 

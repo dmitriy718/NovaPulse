@@ -740,6 +740,8 @@ class BotEngine:
             self.executor.set_continuous_learner(self.continuous_learner)
         if self.confluence:
             self.executor._confluence = self.confluence
+        if self.session_analyzer:
+            self.executor.session_analyzer = self.session_analyzer
 
         # Restore open positions state
         await self.executor.reinitialize_positions()
