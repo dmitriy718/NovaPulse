@@ -438,6 +438,7 @@ class ReversalConfig(StrategyWeights):
     rsi_extreme_low: int = 20
     rsi_extreme_high: int = 80
     confirmation_candles: int = 3
+    min_atr_pct: float = 0.005
 
 
 class KeltnerConfig(StrategyWeights):
