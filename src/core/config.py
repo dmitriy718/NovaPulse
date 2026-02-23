@@ -576,6 +576,19 @@ class RiskConfig(BaseModel):
     max_total_exposure_pct: float = 0.50  # max sum(size_usd) as % of bankroll
     global_cooldown_seconds_on_loss: int = 1800
     smart_exit: SmartExitConfig = Field(default_factory=SmartExitConfig)
+    correlation_groups: Dict[str, str] = Field(
+        default_factory=lambda: {
+            "BTC/USD": "btc",
+            "ETH/USD": "major",
+            "SOL/USD": "alt_l1",
+            "AVAX/USD": "alt_l1",
+            "DOT/USD": "alt_l1",
+            "ADA/USD": "alt_l1",
+            "XRP/USD": "alt_payment",
+            "LINK/USD": "alt_oracle",
+        }
+    )
+    max_positions_per_correlation_group: int = 2
 
     @field_validator("max_risk_per_trade")
     @classmethod
@@ -627,6 +640,14 @@ class RiskConfig(BaseModel):
         v = float(v)
         if v <= 0.0 or v >= 0.5:
             raise ValueError("trailing_step_pct must be in range (0.0, 0.5)")
+        return v
+
+    @field_validator("max_positions_per_correlation_group", mode="before")
+    @classmethod
+    def validate_max_positions_per_correlation_group(cls, v):
+        v = int(v)
+        if v < 1:
+            raise ValueError("max_positions_per_correlation_group must be >= 1")
         return v
 
 
