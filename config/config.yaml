@@ -151,7 +151,7 @@ strategies:
     kc_multiplier: 1.5
     momentum_period: 12
     atr_period: 14
-    min_squeeze_bars: 3
+    min_squeeze_bars: 5
     weight: 0.12
   # Supertrend — ATR-based adaptive trend with volume confirmation
   supertrend:

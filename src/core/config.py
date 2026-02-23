@@ -411,7 +411,7 @@ class VolatilitySqueezeConfig(StrategyWeights):
     kc_multiplier: float = 1.5
     momentum_period: int = 12
     atr_period: int = 14
-    min_squeeze_bars: int = 3
+    min_squeeze_bars: int = 5
     weight: float = 0.12
 
 
