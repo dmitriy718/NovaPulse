@@ -135,6 +135,7 @@ class TradeExecutor:
         # Smart Exit config — loaded lazily from config on first use
         self._smart_exit_enabled: Optional[bool] = None
         self._smart_exit_tiers: Optional[list] = None
+        self.session_analyzer = None
 
     def set_continuous_learner(self, learner: ContinuousLearner) -> None:
         """Attach the continuous learner for online ML updates."""
@@ -572,6 +573,11 @@ class TradeExecutor:
             win_loss_ratio = 1.5
 
         spread_pct = self.market_data.get_spread(signal.pair) if self.market_data else 0.0
+        session_multiplier = 1.0
+        if getattr(self, "session_analyzer", None):
+            session_multiplier = float(
+                self.session_analyzer.get_multiplier(datetime.now(timezone.utc).hour)
+            )
         size_result = self.risk_manager.calculate_position_size(
             pair=signal.pair,
             entry_price=signal.entry_price,
@@ -584,6 +590,7 @@ class TradeExecutor:
             vol_regime=getattr(signal, "volatility_regime", "") or "",
             vol_level=getattr(signal, "vol_level", 0.5),
             vol_expanding=getattr(signal, "vol_expanding", False),
+            session_multiplier=session_multiplier,
         )
 
         if not size_result.allowed:
