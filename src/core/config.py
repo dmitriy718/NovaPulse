@@ -538,9 +538,9 @@ class AIConfig(BaseModel):
     whale_threshold_usd: float = 50000.0
     strategy_guardrails_enabled: bool = True
     strategy_guardrails_min_trades: int = 20
-    strategy_guardrails_window_trades: int = 30
+    strategy_guardrails_window_trades: int = 50
     strategy_guardrails_min_win_rate: float = 0.35
-    strategy_guardrails_min_profit_factor: float = 0.85
+    strategy_guardrails_min_profit_factor: float = 1.0
     strategy_guardrails_disable_minutes: int = 120
     session: SessionConfig = Field(default_factory=SessionConfig)
     regime: RegimeConfig = Field(default_factory=RegimeConfig)
