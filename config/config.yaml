@@ -185,7 +185,7 @@ ai:
   obi_weight: 0.4
   allow_keltner_solo: true
   allow_any_solo: false
-  keltner_solo_min_confidence: 0.55
+  keltner_solo_min_confidence: 0.60
   solo_min_confidence: 0.67
   whale_threshold_usd: 50000
   strategy_guardrails_enabled: true
