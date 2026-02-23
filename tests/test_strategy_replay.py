@@ -75,7 +75,7 @@ class _FakeMarketData:
         return {
             "updated_at": time.time(),
             "book_score": 0.65,
-            "spread_pct": 0.0005,
+            "spread_pct": 0.0003,
             "obi": 0.35,
             "whale_bias": 0.2,
         }
