@@ -128,9 +128,8 @@ class StressTester:
         try:
             import websockets
             ws_url = self.DASHBOARD_URL.replace("http", "ws") + "/ws/live"
-            if self.api_key:
-                ws_url += f"?api_key={self.api_key}"
-            async with websockets.connect(ws_url) as ws:
+            headers = {"X-API-Key": self.api_key} if self.api_key else {}
+            async with websockets.connect(ws_url, extra_headers=headers) as ws:
                 msg = await asyncio.wait_for(ws.recv(), timeout=5)
                 data = json.loads(msg)
                 if data.get("type") == "update":
