@@ -549,6 +549,7 @@ class BotEngine:
         """Initialize market data cache and session analyzer."""
         self.market_data = MarketDataCache(
             max_bars=self.config.trading.warmup_bars,
+            outlier_threshold=self.config.trading.outlier_threshold,
         )
 
         # ---- NON-CRITICAL: Session Analyzer ----
@@ -731,6 +732,8 @@ class BotEngine:
         )
         if self.continuous_learner:
             self.executor.set_continuous_learner(self.continuous_learner)
+        if self.confluence:
+            self.executor._confluence = self.confluence
 
         # Restore open positions state
         await self.executor.reinitialize_positions()
@@ -953,6 +956,157 @@ class BotEngine:
             await self.error_handler.handle(e, component="elasticsearch", context="init")
             self.es_client = None
 
+    async def _init_crypto_universe(self) -> None:
+        """Initialize the dynamic crypto pair scanner if enabled."""
+        self._crypto_universe = None
+        self._warming_pairs: set[str] = set()
+
+        cu_cfg = getattr(self.config.trading, "crypto_universe", None)
+        if not cu_cfg or not cu_cfg.enabled:
+            return
+
+        try:
+            from src.core.crypto_universe import CryptoUniverseScanner
+
+            pinned = cu_cfg.pinned_pairs or list(self.config.trading.pairs or [])
+            coingecko_key = getattr(
+                getattr(self.config, "elasticsearch", None),
+                "coingecko_api_key", "",
+            ) or ""
+
+            self._crypto_universe = CryptoUniverseScanner(
+                rest_client=self.rest_client,
+                config=cu_cfg,
+                pinned_pairs=pinned,
+                coingecko_api_key=coingecko_key,
+                exchange_name=getattr(self, "exchange_name", "kraken"),
+            )
+
+            # Build exchange pair catalog
+            await self._crypto_universe.build_exchange_pair_catalog()
+
+            # Initial refresh
+            universe = await self._crypto_universe.refresh()
+            if universe:
+                await self._apply_universe_update(universe)
+                logger.info("Crypto universe scanner loaded initial pairs", count=len(universe))
+        except Exception as e:
+            logger.warning(
+                "Crypto universe scanner init failed, keeping static pairs",
+                error=repr(e),
+            )
+            self._crypto_universe = None
+
+    async def _crypto_universe_refresh_loop(self) -> None:
+        """Periodically refresh the dynamic crypto pair universe (24/7)."""
+        cfg = self.config.trading.crypto_universe
+        interval = max(60, cfg.refresh_interval_minutes) * 60
+        while self._running:
+            try:
+                await asyncio.sleep(interval)
+                if not self._running:
+                    break
+                universe = await self._crypto_universe.refresh()
+                if universe:
+                    await self._apply_universe_update(universe)
+                    logger.info("Crypto universe refreshed", count=len(universe))
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning("Crypto universe refresh loop error", error=repr(e))
+                await asyncio.sleep(min(interval, 300))
+
+    async def _apply_universe_update(self, new_pairs: List[str]) -> None:
+        """Apply a universe update: manage WS subscriptions, warmup, PAIR_MAP."""
+        old_set = set(self.pairs)
+        new_set = set(new_pairs)
+
+        added = new_set - old_set
+        removed = old_set - new_set
+
+        # Never remove pairs with open positions
+        if removed:
+            try:
+                open_trades = await self.db.get_open_trades(tenant_id=self.tenant_id)
+                open_pairs = {str(t.get("pair", "")).upper() for t in open_trades}
+                protected = removed & open_pairs
+                if protected:
+                    removed -= protected
+                    # Re-add protected pairs to the new list
+                    new_pairs = new_pairs + [p for p in protected if p not in new_set]
+                    logger.info("Keeping pairs with open positions", pairs=list(protected))
+            except Exception:
+                pass
+
+        if not added and not removed:
+            self.pairs = new_pairs
+            return
+
+        # 1. Unsubscribe removed pairs from WS
+        if removed and hasattr(self, "ws_client") and self.ws_client and getattr(self.ws_client, "is_connected", False):
+            removed_list = list(removed)
+            try:
+                await self.ws_client.unsubscribe("ticker", removed_list)
+                await self.ws_client.unsubscribe("ohlc", removed_list)
+                await self.ws_client.unsubscribe("book", removed_list)
+                logger.info("Unsubscribed removed pairs", pairs=removed_list)
+            except Exception as e:
+                logger.warning("WS unsubscribe failed for removed pairs", error=repr(e))
+
+        # 2. Update the pair list
+        self.pairs = new_pairs
+
+        # 3. Subscribe new pairs to WS
+        if added and hasattr(self, "ws_client") and self.ws_client and getattr(self.ws_client, "is_connected", False):
+            added_list = list(added)
+            try:
+                await self.ws_client.subscribe_ticker(added_list)
+                await self.ws_client.subscribe_ohlc(added_list, interval=1)
+                await self.ws_client.subscribe_book(
+                    added_list, depth=self.config.ai.order_book_depth,
+                )
+                logger.info("Subscribed new pairs", pairs=added_list)
+            except Exception as e:
+                logger.warning("WS subscribe failed for new pairs", error=repr(e))
+
+        # 4. Update Kraken REST PAIR_MAP if applicable
+        if self._crypto_universe and hasattr(self.rest_client, "_dynamic_pair_map"):
+            self.rest_client._dynamic_pair_map.update(
+                self._crypto_universe.exchange_pair_map
+            )
+
+        # 5. Update ExternalDataCollector CoinGecko map
+        if self._crypto_universe and hasattr(self, "external_data_collector") and self.external_data_collector:
+            self.external_data_collector.pairs = list(new_pairs)
+            if hasattr(self.external_data_collector, "update_coingecko_map"):
+                self.external_data_collector.update_coingecko_map(
+                    self._crypto_universe.coingecko_id_map
+                )
+
+        # 6. Warmup new pairs with historical data (background)
+        cu_cfg = getattr(self.config.trading, "crypto_universe", None)
+        if added and cu_cfg and cu_cfg.warmup_new_pairs:
+            self._warming_pairs |= added
+            asyncio.create_task(self._warmup_new_pairs(list(added)))
+
+        logger.info(
+            "Universe update applied",
+            total=len(new_pairs),
+            added=len(added),
+            removed=len(removed),
+        )
+
+    async def _warmup_new_pairs(self, pairs: List[str]) -> None:
+        """Warmup newly discovered pairs with historical data."""
+        for pair in pairs:
+            try:
+                bars = await self._warmup_pair(pair)
+                logger.info("New pair warmup complete", pair=pair, bars=bars)
+            except Exception as e:
+                logger.warning("New pair warmup failed", pair=pair, error=repr(e))
+            finally:
+                self._warming_pairs.discard(pair)
+
     async def initialize(self) -> None:
         """Initialize all subsystems with graceful error handling.
 
@@ -993,6 +1147,9 @@ class BotEngine:
 
         # ---- NON-CRITICAL: Elasticsearch Data Pipeline ----
         await self._init_observability()
+
+        # ---- NON-CRITICAL: Crypto Universe Scanner ----
+        await self._init_crypto_universe()
 
         # ---- Post-init logging ----
         initial_bankroll = self._init_bankroll
@@ -1218,6 +1375,28 @@ class BotEngine:
                         exec_confidence,
                         float(getattr(self.config.trading, "canary_min_confidence", 0.68)),
                     )
+
+                # Cold-start gating: when no trained ML model exists, the
+                # heuristic returns ~0.50-0.69 which barely filters anything.
+                # Require higher confluence and confidence to compensate.
+                _model_loaded = (
+                    self.predictor and self.predictor.is_model_loaded
+                ) or (
+                    self.continuous_learner and getattr(self.continuous_learner, "is_trained", False)
+                )
+                if not _model_loaded:
+                    min_confluence = max(min_confluence, 3)
+                    exec_confidence = max(exec_confidence, 0.60)
+
+                # Session-aware hard gating: raise confluence floor during
+                # historically losing hours (sub-40% WR → 4+, sub-30% → 5+).
+                if self.session_analyzer:
+                    _hour = datetime.now(timezone.utc).hour
+                    session_floor = self.session_analyzer.get_confluence_floor(
+                        _hour, base_min=min_confluence,
+                    )
+                    min_confluence = max(min_confluence, session_floor)
+
                 allow_keltner_solo = getattr(self.config.ai, "allow_keltner_solo", False)
                 allow_any_solo = getattr(self.config.ai, "allow_any_solo", False)
                 if self.canary_mode:
@@ -1334,6 +1513,27 @@ class BotEngine:
                         spread = self.market_data.get_spread(signal.pair)
                         if spread <= 0 or book_age > max_book_age or spread > max_spread:
                             continue
+
+                    # Spread-relative TP adjustment: widen TP to cover
+                    # round-trip spread costs when spread > 0.1%.
+                    if (
+                        signal.entry_price > 0
+                        and signal.take_profit > 0
+                        and hasattr(self, "market_data")
+                    ):
+                        _spread_pct = 0.0
+                        try:
+                            _spread_pct = self.market_data.get_spread(signal.pair)
+                        except Exception:
+                            pass
+                        if _spread_pct > 0.001:
+                            spread_offset = signal.entry_price * _spread_pct * 2
+                            if signal.direction == SignalDirection.LONG:
+                                signal.take_profit = signal.take_profit + spread_offset
+                            else:
+                                signal.take_profit = max(
+                                    signal.take_profit - spread_offset, 0.01,
+                                )
 
                     # Execute if meets threshold
                     if signal.confidence >= exec_confidence:
@@ -1531,7 +1731,9 @@ class BotEngine:
             try:
                 await asyncio.sleep(interval)
                 if self.executor:
-                    await self.executor.reconcile_exchange_positions()
+                    await self.executor.reconcile_exchange_positions(
+                        auto_close_ghost_after_hours=6,
+                    )
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -1622,11 +1824,20 @@ class BotEngine:
                 pairs.add(pair)
                 self._recent_event_count += 1
         except asyncio.TimeoutError:
-            return list(self.pairs), False
+            result_pairs = list(self.pairs)
+            # Exclude pairs still warming up from dynamic universe
+            warming = getattr(self, "_warming_pairs", None)
+            if warming:
+                result_pairs = [p for p in result_pairs if p not in warming]
+            return result_pairs, False
         except asyncio.QueueEmpty:
             pass
         for p in pairs:
             self._pending_scan_pairs.discard(p)
+        # Exclude warming pairs from event-driven scan too
+        warming = getattr(self, "_warming_pairs", None)
+        if warming:
+            pairs = {p for p in pairs if p not in warming}
         return list(pairs), True
 
     # ------------------------------------------------------------------
@@ -1769,6 +1980,8 @@ class BotEngine:
             metadata,
             obi=(signal.book_score if getattr(signal, "book_score", 0.0) else signal.obi),
             spread=self.market_data.get_spread(signal.pair),
+            trend_regime=getattr(signal, "regime", "") or "",
+            vol_regime=getattr(signal, "volatility_regime", "") or "",
         )
         return features
 

@@ -148,6 +148,28 @@ class CoinbaseWebSocketClient:
     async def subscribe_trade(self, pairs: List[str]) -> None:
         await self._subscribe("market_trades", pairs)
 
+    async def unsubscribe(self, channel: str, pairs: List[str]) -> None:
+        """Unsubscribe specific pairs from a channel."""
+        product_ids_to_remove = {self._pair_to_product_id(p) for p in pairs}
+        sub = self._subscriptions.get(channel)
+        if sub:
+            sub["product_ids"] = [
+                pid for pid in sub["product_ids"]
+                if pid not in product_ids_to_remove
+            ]
+            if not sub["product_ids"]:
+                del self._subscriptions[channel]
+        if self._ws and self._connected:
+            payload = {
+                "type": "unsubscribe",
+                "channel": channel,
+                "product_ids": list(product_ids_to_remove),
+            }
+            try:
+                await self._ws.send(json.dumps(payload))
+            except Exception as e:
+                logger.warning("Coinbase WS unsubscribe failed", channel=channel, error=repr(e))
+
     async def _subscribe(
         self,
         channel: str,

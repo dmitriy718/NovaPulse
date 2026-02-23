@@ -35,6 +35,7 @@ class SessionAnalyzer:
         self.tenant_id = tenant_id
 
         self._cache: Dict[int, float] = {}  # hour → multiplier
+        self._win_rates: Dict[int, Optional[float]] = {}  # hour → win_rate (None = insufficient data)
         self._last_refresh: float = 0.0
         self._refresh_interval: float = 3600.0  # 1 hour
 
@@ -47,13 +48,16 @@ class SessionAnalyzer:
             return
 
         new_cache: Dict[int, float] = {}
+        new_win_rates: Dict[int, Optional[float]] = {}
         for hour in range(24):
             entry = stats.get(hour)
             if not entry or entry["total"] < self.min_trades:
                 new_cache[hour] = 1.0
+                new_win_rates[hour] = None
                 continue
 
             win_rate = entry["wins"] / entry["total"]
+            new_win_rates[hour] = round(win_rate, 3)
             # Linear interpolation:
             # win_rate 0.50 → 1.0 (neutral)
             # win_rate 0.80+ → max_boost (1.15)
@@ -70,6 +74,7 @@ class SessionAnalyzer:
             new_cache[hour] = round(mult, 3)
 
         self._cache = new_cache
+        self._win_rates = new_win_rates
         self._last_refresh = time.time()
 
         non_neutral = {h: m for h, m in new_cache.items() if m != 1.0}
@@ -79,6 +84,22 @@ class SessionAnalyzer:
     def get_multiplier(self, hour: int) -> float:
         """Get confidence multiplier for given UTC hour (synchronous, cached)."""
         return self._cache.get(hour % 24, 1.0)
+
+    def get_confluence_floor(self, hour: int, base_min: int = 2) -> int:
+        """Return minimum confluence count for the given UTC hour.
+
+        Hours with a recorded win rate below 40% require 4+ strategies.
+        Hours below 30% require 5+. Hours with insufficient data or
+        acceptable win rates return *base_min* unchanged.
+        """
+        wr = self._win_rates.get(hour % 24)
+        if wr is None:
+            return base_min
+        if wr < 0.30:
+            return max(base_min, 5)
+        if wr < 0.40:
+            return max(base_min, 4)
+        return base_min
 
     async def maybe_refresh(self) -> None:
         """Refresh if stale. Call this from the main scan loop."""

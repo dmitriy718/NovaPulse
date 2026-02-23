@@ -473,6 +473,10 @@ async def run_bot():
             engine._tasks.append(
                 asyncio.create_task(_run_with_restart(engine, "es_onchain", edc.poll_onchain))
             )
+        if getattr(engine, "_crypto_universe", None):
+            engine._tasks.append(
+                asyncio.create_task(_run_with_restart(engine, "crypto_universe_refresh", engine._crypto_universe_refresh_loop))
+            )
         if getattr(engine, "exchange_name", "") == "coinbase":
             engine._tasks.append(
                 asyncio.create_task(_run_with_restart(engine, "rest_candles", engine._rest_candle_poll_loop, critical=True))
@@ -670,6 +674,10 @@ async def run_bot():
             )
             eng._tasks.append(
                 asyncio.create_task(_run_with_restart(eng, f"{label}:es_onchain", edc.poll_onchain))
+            )
+        if getattr(eng, "_crypto_universe", None):
+            eng._tasks.append(
+                asyncio.create_task(_run_with_restart(eng, f"{label}:crypto_universe_refresh", eng._crypto_universe_refresh_loop))
             )
         if getattr(eng, "exchange_name", "") == "coinbase":
             eng._tasks.append(

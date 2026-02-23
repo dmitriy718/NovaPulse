@@ -26,6 +26,7 @@ from src.exchange.exceptions import (
     AuthenticationError,
     InsufficientFundsError,
     InvalidOrderError,
+    KrakenAPIError,
     PermanentExchangeError,
     RateLimitError,
     TransientExchangeError,
@@ -51,8 +52,8 @@ class KrakenRESTClient:
 
     BASE_URL = "https://api.kraken.com"
 
-    # Kraken uses different pair names internally
-    PAIR_MAP = {
+    # Static pair map seed — extended dynamically at runtime
+    _STATIC_PAIR_MAP = {
         "BTC/USD": "XXBTZUSD",
         "ETH/USD": "XETHZUSD",
         "SOL/USD": "SOLUSD",
@@ -62,6 +63,9 @@ class KrakenRESTClient:
         "AVAX/USD": "AVAXUSD",
         "LINK/USD": "LINKUSD",
     }
+
+    # Known Kraken symbol renames (wsname → canonical)
+    _KRAKEN_RENAMES = {"XBT": "BTC", "XDG": "DOGE", "XETC": "ETC"}
 
     def __init__(
         self,
@@ -79,9 +83,16 @@ class KrakenRESTClient:
         self._nonce_lock = asyncio.Lock()
         self._rate_semaphore = asyncio.Semaphore(rate_limit)
         self._time_offset: float = 0.0
+        # Dynamic pair map: starts with static defaults, extended at runtime
+        self._dynamic_pair_map: Dict[str, str] = dict(self._STATIC_PAIR_MAP)
         # M12 FIX: Use OrderedDict for FIFO eviction of order IDs
         from collections import OrderedDict
         self._recent_order_ids: OrderedDict = OrderedDict()
+
+    @property
+    def PAIR_MAP(self) -> Dict[str, str]:
+        """Dynamic pair mapping — static defaults extended at runtime."""
+        return self._dynamic_pair_map
 
     async def initialize(self) -> None:
         """Initialize the HTTP client and synchronize time."""
@@ -331,6 +342,30 @@ class KrakenRESTClient:
         """Get all tradeable asset pairs."""
         return await self._request("GET", "/0/public/AssetPairs")
 
+    async def build_dynamic_pair_map(self) -> Dict[str, str]:
+        """Fetch all exchange pairs and build canonical -> Kraken REST pair mapping.
+
+        The AssetPairs response provides 'wsname' (e.g. 'XBT/USD')
+        and the key is the REST pair name (e.g. 'XXBTZUSD').
+        """
+        try:
+            raw = await self.get_asset_pairs()
+            new_map: Dict[str, str] = {}
+            for kraken_key, info in raw.items():
+                wsname = info.get("wsname", "")
+                if not wsname or "/" not in wsname:
+                    continue
+                base, quote = wsname.split("/", 1)
+                base = self._KRAKEN_RENAMES.get(base, base)
+                canonical = f"{base}/{quote}"
+                new_map[canonical] = kraken_key
+            self._dynamic_pair_map.update(new_map)
+            logger.info("Dynamic pair map built", count=len(new_map))
+            return new_map
+        except Exception as e:
+            logger.warning("Failed to build dynamic pair map", error=repr(e))
+            return {}
+
     # ------------------------------------------------------------------
     # Private (Authenticated) Endpoints
     # ------------------------------------------------------------------
@@ -523,9 +558,3 @@ class KrakenRESTClient:
         return (2, 8)
 
 
-class KrakenAPIError(Exception):
-    """Custom exception for Kraken API errors."""
-
-    def __init__(self, errors: List[str]):
-        self.errors = errors
-        super().__init__(f"Kraken API Error: {', '.join(errors)}")

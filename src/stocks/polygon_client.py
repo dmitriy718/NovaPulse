@@ -131,6 +131,144 @@ class PolygonClient:
             )
             return []
 
+    async def get_all_snapshots(self) -> List[Dict[str, Any]]:
+        """
+        Fetch all US stock snapshots in a single bulk call.
+
+        Returns list of snapshot dicts with keys: ticker, day, prevDay,
+        lastTrade, min, etc.  Empty list on error or if endpoint is
+        unavailable (e.g. free-tier restriction).
+        """
+        if not self.enabled:
+            return []
+        if self._client is None:
+            await self.initialize()
+        url = f"{self.base_url}/v2/snapshot/locale/us/markets/stocks/tickers"
+        params = {"apiKey": self.api_key}
+        try:
+            resp = await self._client.get(url, params=params, timeout=60.0)
+            resp.raise_for_status()
+            data = resp.json()
+            return data.get("tickers", []) or []
+        except Exception as e:
+            logger.warning("Polygon bulk snapshot fetch failed", error=repr(e))
+            return []
+
+    async def get_reference_tickers(
+        self,
+        *,
+        market: str = "stocks",
+        ticker_type: str = "CS",
+        active: bool = True,
+        limit: int = 1000,
+        cursor: str = "",
+    ) -> tuple[List[Dict[str, Any]], str]:
+        """
+        Fetch tickers from /v3/reference/tickers with cursor pagination.
+
+        Returns (tickers_list, next_cursor).  next_cursor is empty when
+        there are no more pages.
+        """
+        if not self.enabled:
+            return [], ""
+        if self._client is None:
+            await self.initialize()
+        url = f"{self.base_url}/v3/reference/tickers"
+        params: Dict[str, Any] = {
+            "market": market,
+            "type": ticker_type,
+            "active": str(active).lower(),
+            "order": "asc",
+            "limit": min(limit, 1000),
+            "sort": "ticker",
+            "apiKey": self.api_key,
+        }
+        if cursor:
+            params["cursor"] = cursor
+        try:
+            resp = await self._client.get(url, params=params)
+            resp.raise_for_status()
+            data = resp.json()
+            tickers = data.get("results", []) or []
+            next_cursor = data.get("next_url", "") or ""
+            # Extract cursor param from next_url if present
+            if next_cursor and "cursor=" in next_cursor:
+                next_cursor = next_cursor.split("cursor=", 1)[1].split("&", 1)[0]
+            elif next_cursor:
+                next_cursor = ""
+            return tickers, next_cursor
+        except Exception as e:
+            logger.warning("Polygon reference tickers fetch failed", error=repr(e))
+            return [], ""
+
+    async def get_gainers_losers(
+        self, direction: str = "gainers"
+    ) -> List[Dict[str, Any]]:
+        """
+        Fetch top gainers or losers snapshot.
+
+        direction: "gainers" or "losers"
+        Returns list of snapshot dicts.
+        """
+        if not self.enabled:
+            return []
+        if self._client is None:
+            await self.initialize()
+        direction = direction if direction in ("gainers", "losers") else "gainers"
+        url = (
+            f"{self.base_url}/v2/snapshot/locale/us/markets/stocks/{direction}"
+        )
+        params = {"apiKey": self.api_key}
+        try:
+            resp = await self._client.get(url, params=params)
+            resp.raise_for_status()
+            data = resp.json()
+            return data.get("tickers", []) or []
+        except Exception as e:
+            logger.warning(
+                "Polygon gainers/losers fetch failed",
+                direction=direction,
+                error=repr(e),
+            )
+            return []
+
+    async def get_grouped_daily_bars(
+        self, date: str = "",
+    ) -> Dict[str, Dict[str, Any]]:
+        """
+        Fetch grouped daily OHLCV for ALL US stocks in a single call.
+
+        Uses /v2/aggs/grouped/locale/us/market/stocks/{date}.
+        Returns dict keyed by ticker with keys: o, h, l, c, v, t.
+        Available on free tier.
+        """
+        if not self.enabled:
+            return {}
+        if self._client is None:
+            await self.initialize()
+        if not date:
+            from datetime import datetime, timezone, timedelta
+            # Use previous trading day (yesterday or Friday if weekend)
+            today = datetime.now(timezone.utc).date()
+            offset = max(1, (today.weekday() - 4) % 7) if today.weekday() in (5, 6) else 1
+            date = (today - timedelta(days=offset)).isoformat()
+        url = f"{self.base_url}/v2/aggs/grouped/locale/us/market/stocks/{date}"
+        params = {"adjusted": "true", "apiKey": self.api_key}
+        try:
+            resp = await self._client.get(url, params=params, timeout=60.0)
+            resp.raise_for_status()
+            data = resp.json()
+            results = data.get("results", []) or []
+            out: Dict[str, Dict[str, Any]] = {}
+            for row in results:
+                ticker = (row.get("T") or "").strip().upper()
+                if ticker:
+                    out[ticker] = row
+            return out
+        except Exception as e:
+            logger.warning("Polygon grouped daily fetch failed", error=repr(e))
+            return {}
+
     @staticmethod
     def _polygon_ticker(symbol: str) -> str:
         raw = str(symbol or "").strip().upper()

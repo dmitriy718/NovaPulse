@@ -117,8 +117,8 @@ class BaseStrategy(ABC):
         self._win_count = 0
         self._total_pnl = 0.0
         # Sliding window of recent trades for adaptive weighting
-        # Each entry: (pnl, trend_regime, vol_regime, timestamp)
-        self._recent_trades: Deque[Tuple[float, str, str, float]] = deque(maxlen=50)
+        # Each entry: (pnl, trend_regime, vol_regime, timestamp, hold_hours)
+        self._recent_trades: Deque[Tuple[float, str, str, float, float]] = deque(maxlen=50)
 
     @abstractmethod
     async def analyze(
@@ -154,6 +154,7 @@ class BaseStrategy(ABC):
         self, pnl: float,
         trend_regime: str = "",
         vol_regime: str = "",
+        hold_hours: float = 0.0,
     ) -> None:
         """Record a trade result for performance tracking."""
         self._trade_count += 1
@@ -161,7 +162,17 @@ class BaseStrategy(ABC):
             self._win_count += 1
         self._total_pnl += pnl
         import time
-        self._recent_trades.append((pnl, trend_regime, vol_regime, time.time()))
+        self._recent_trades.append((pnl, trend_regime, vol_regime, time.time(), hold_hours))
+
+    def avg_winning_hold_hours(self) -> float:
+        """Average hold duration (hours) of recent winning trades.
+
+        Returns 0.0 if fewer than 3 winning trades are recorded.
+        """
+        durations = [t[4] for t in self._recent_trades if t[0] > 0 and t[4] > 0]
+        if len(durations) < 3:
+            return 0.0
+        return float(np.mean(durations))
 
     @property
     def win_rate(self) -> float:

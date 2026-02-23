@@ -59,8 +59,9 @@ class MarketDataCache:
     COL_COUNT = 7
     NUM_COLS = 8
 
-    def __init__(self, max_bars: int = 500):
+    def __init__(self, max_bars: int = 500, outlier_threshold: float = 0.10):
         self.max_bars = max_bars
+        self.outlier_threshold = outlier_threshold
         self._buffers: Dict[str, Dict[int, RingBuffer]] = defaultdict(dict)
         self._locks: Dict[str, asyncio.Lock] = {}
         self._lock_guard = asyncio.Lock()  # protects _locks creation
@@ -174,17 +175,18 @@ class MarketDataCache:
             }
 
             # Outlier check — reject bars with extreme price jumps (bad data / exchange glitch)
-            if time_buf.size > 2:
+            if time_buf.size > 2 and self.outlier_threshold > 0:
                 last_close = self._buffers[pair][self.COL_CLOSE].get_last()
                 if last_close > 0:
                     deviation = abs(values[self.COL_CLOSE] - last_close) / last_close
-                    if deviation > 0.10:
+                    if deviation > self.outlier_threshold:
                         logger.warning(
                             "Outlier bar rejected",
                             pair=pair,
                             close=values[self.COL_CLOSE],
                             last_close=last_close,
-                            deviation=f"{deviation:.2%}"
+                            deviation=f"{deviation:.2%}",
+                            threshold=f"{self.outlier_threshold:.2%}",
                         )
                         return False
 
