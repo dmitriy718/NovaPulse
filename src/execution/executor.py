@@ -99,6 +99,9 @@ class TradeExecutor:
         self._smart_exit_constructor_tiers = list(smart_exit_tiers) if smart_exit_tiers else []
 
         self.continuous_learner: Optional[ContinuousLearner] = None
+        # Optional reference to confluence detector for hold-duration queries.
+        # Set by the engine after construction.
+        self._confluence: Optional[Any] = None
 
         # Correlation groups: pairs in the same group share a single slot
         # to prevent concentrated directional exposure.
@@ -223,13 +226,19 @@ class TradeExecutor:
                 trade_id=trade_id, pair=pair, sl=sl
             )
 
-    async def reconcile_exchange_positions(self) -> None:
+    async def reconcile_exchange_positions(
+        self, auto_close_ghost_after_hours: float = 0,
+    ) -> None:
         """Compare DB open trades against exchange open orders at startup.
 
         Detects ghost positions (DB says open but exchange has no matching
         order) and orphan orders (exchange has an open order not tracked in
-        the DB).  This is informational only — nothing is auto-closed or
-        cancelled.
+        the DB).
+
+        If *auto_close_ghost_after_hours* > 0, ghost positions whose entry
+        is older than that many hours are automatically marked closed in the
+        DB at their entry price (zero P&L).  This prevents the bot from
+        endlessly managing a non-existent exchange position.
         """
         if self.mode != "live":
             logger.info("Skipping exchange position reconciliation (mode=%s)", self.mode)
@@ -250,6 +259,7 @@ class TradeExecutor:
             # Build set of order_txids tracked in DB trades
             db_txids: set[str] = set()
             trades_without_txid: list[str] = []
+            txid_to_trade: Dict[str, Dict[str, Any]] = {}
 
             for trade in db_trades:
                 trade_id = trade["trade_id"]
@@ -260,6 +270,7 @@ class TradeExecutor:
 
                 if txid:
                     db_txids.add(txid)
+                    txid_to_trade[txid] = trade
                 else:
                     trades_without_txid.append(trade_id)
 
@@ -267,18 +278,68 @@ class TradeExecutor:
             # exchange no longer shows as open.  Note — filled orders also
             # disappear from open orders, so a ghost warning does NOT always
             # mean something is wrong; it simply flags trades worth checking.
-            for txid in db_txids:
-                if txid not in exchange_orders:
+            exchange_txids = set(exchange_orders.keys())
+            ghost_txids = db_txids - exchange_txids
+            auto_closed = 0
+
+            for txid in ghost_txids:
+                trade = txid_to_trade.get(txid)
+                trade_id = trade["trade_id"] if trade else "unknown"
+
+                # Determine age of the trade
+                trade_age_hours = 0.0
+                if trade:
+                    try:
+                        created = trade.get("created_at", "")
+                        if created:
+                            created_dt = datetime.fromisoformat(
+                                str(created).replace("Z", "+00:00")
+                            )
+                            trade_age_hours = (
+                                datetime.now(timezone.utc) - created_dt
+                            ).total_seconds() / 3600.0
+                    except Exception:
+                        pass
+
+                if (
+                    auto_close_ghost_after_hours > 0
+                    and trade_age_hours >= auto_close_ghost_after_hours
+                    and trade
+                ):
+                    entry_price = float(trade.get("entry_price", 0) or 0)
+                    logger.warning(
+                        "Auto-closing stale ghost position",
+                        trade_id=trade_id,
+                        order_txid=txid,
+                        pair=trade.get("pair"),
+                        age_hours=round(trade_age_hours, 1),
+                    )
+                    try:
+                        await self.db.update_trade(trade_id, {
+                            "status": "closed",
+                            "exit_price": entry_price,
+                            "pnl": 0.0,
+                            "close_reason": "ghost_reconciliation",
+                        })
+                        self.risk_manager.release_position(trade_id)
+                        auto_closed += 1
+                    except Exception as e:
+                        logger.error(
+                            "Failed to auto-close ghost position",
+                            trade_id=trade_id, error=repr(e),
+                        )
+                else:
                     logger.info(
                         "Potential ghost position: DB trade references order_txid "
                         "not found in exchange open orders (may be filled)",
                         order_txid=txid,
+                        trade_id=trade_id,
+                        age_hours=round(trade_age_hours, 1),
                         tenant_id=self.tenant_id,
                     )
 
             # Orphan orders: exchange has an open order that no DB trade
             # references.
-            exchange_txids = set(exchange_orders.keys())
             orphan_txids = exchange_txids - db_txids
             for txid in orphan_txids:
                 order_info = exchange_orders[txid]
@@ -302,7 +363,8 @@ class TradeExecutor:
                 "Exchange position reconciliation complete",
                 db_open_trades=len(db_trades),
                 exchange_open_orders=len(exchange_orders),
-                ghost_candidates=len(db_txids - exchange_txids),
+                ghost_candidates=len(ghost_txids),
+                ghost_auto_closed=auto_closed,
                 orphan_candidates=len(orphan_txids),
             )
 
@@ -892,31 +954,55 @@ class TradeExecutor:
         if current_price <= 0:
             return
 
-        # Max trade duration: auto-close positions older than configured limit
-        max_duration_hours = self.max_trade_duration_hours
+        # Compute trade age (used for max-duration check and hold-duration optimization)
         entry_time_str = trade.get("entry_time", "")
+        age_hours = 0.0
         if entry_time_str:
             try:
                 entry_dt = datetime.fromisoformat(entry_time_str.replace("Z", "+00:00"))
                 age_hours = (datetime.now(timezone.utc) - entry_dt).total_seconds() / 3600
-                if age_hours >= max_duration_hours:
-                    await self._close_position(
-                        trade_id, pair, side, entry_price,
-                        current_price, quantity, "max_duration",
-                        metadata=trade.get("metadata"),
-                        strategy=trade.get("strategy"),
-                    )
-                    return
-            except Exception as e:
-                logger.warning(
-                    "Max duration check failed",
-                    trade_id=trade_id, error=repr(e),
-                )
+            except Exception:
+                pass
+
+        # Max trade duration: auto-close positions older than configured limit
+        max_duration_hours = self.max_trade_duration_hours
+        if age_hours >= max_duration_hours and entry_time_str:
+            await self._close_position(
+                trade_id, pair, side, entry_price,
+                current_price, quantity, "max_duration",
+                metadata=trade.get("metadata"),
+                strategy=trade.get("strategy"),
+            )
+            return
 
         # Update trailing stop
         state = self.risk_manager.update_stop_loss(
             trade_id, current_price, entry_price, side
         )
+
+        # Hold-duration optimization: if the trade has been open longer than
+        # 2x the strategy's average winning hold time, tighten the trailing
+        # stop to lock in any remaining profit (prevent "hope trades").
+        strategy_name = trade.get("strategy", "")
+        if strategy_name and self._confluence and entry_time_str and state.current_sl > 0:
+            try:
+                avg_win_hours = self._confluence.avg_winning_hold_hours(strategy_name)
+                if avg_win_hours > 0 and age_hours > 2 * avg_win_hours:
+                    # Trade is overstaying — tighten SL to 50% of current distance
+                    if side == "buy":
+                        distance = current_price - state.current_sl
+                        if distance > 0:
+                            tightened = current_price - distance * 0.5
+                            if tightened > state.current_sl:
+                                state.current_sl = tightened
+                    else:
+                        distance = state.current_sl - current_price
+                        if distance > 0:
+                            tightened = current_price + distance * 0.5
+                            if tightened < state.current_sl:
+                                state.current_sl = tightened
+            except Exception:
+                pass  # Non-fatal: default trailing stop still protects
 
         # Check if stopped out
         if self.risk_manager.should_stop_out(trade_id, current_price, side):
@@ -1210,7 +1296,15 @@ class TradeExecutor:
             try:
                 trend_regime = meta.get("trend_regime", "") if meta else ""
                 vol_regime = meta.get("vol_regime", "") if meta else ""
-                self._strategy_result_cb(strategy, pnl, trend_regime, vol_regime)
+                hold_hours = 0.0
+                _et = meta.get("entry_time", "") if meta else ""
+                if _et:
+                    try:
+                        _entry_dt = datetime.fromisoformat(str(_et).replace("Z", "+00:00"))
+                        hold_hours = (datetime.now(timezone.utc) - _entry_dt).total_seconds() / 3600.0
+                    except Exception:
+                        pass
+                self._strategy_result_cb(strategy, pnl, trend_regime, vol_regime, hold_hours=hold_hours)
             except Exception as e:
                 logger.debug("Strategy result callback failed (non-fatal)", strategy=strategy, error=repr(e))
 

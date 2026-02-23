@@ -39,7 +39,8 @@ class TradePredictorFeatures:
 
     FEATURE_NAMES = [
         "rsi", "ema_ratio", "bb_position", "adx", "volume_ratio",
-        "obi", "atr_pct", "momentum_score", "trend_strength", "spread_pct"
+        "obi", "atr_pct", "momentum_score", "trend_strength", "spread_pct",
+        "trend_regime_encoded", "vol_regime_encoded",
     ]
 
     def __init__(self, feature_names: Optional[List[str]] = None):
@@ -140,6 +141,8 @@ class TradePredictorFeatures:
             "momentum_score": (0.0, 0.05),  # Center at 0
             "trend_strength": (0.0, 0.01),  # Center at 0
             "spread_pct": (0.001, 0.0005),  # Center at 0.1%
+            "trend_regime_encoded": (1.0, 1.0),  # 0=range, 1=mild_trend, 2=strong_trend
+            "vol_regime_encoded": (1.0, 1.0),     # 0=low, 1=normal, 2=high
         }
 
         center, scale = normalization_map.get(name, (0.0, 1.0))
@@ -148,9 +151,13 @@ class TradePredictorFeatures:
         return np.clip((value - center) / scale, -3.0, 3.0)
 
     def feature_dict_from_signals(
-        self, signals: Dict[str, Any], obi: float = 0.0, spread: float = 0.0
+        self, signals: Dict[str, Any], obi: float = 0.0, spread: float = 0.0,
+        trend_regime: str = "", vol_regime: str = "",
     ) -> Dict[str, float]:
         """Build a feature dictionary from strategy signal metadata."""
+        # Encode regimes as ordinal integers for ML consumption
+        _trend_map = {"range": 0.0, "": 1.0, "trend": 2.0}
+        _vol_map = {"low_vol": 0.0, "mid_vol": 1.0, "": 1.0, "high_vol": 2.0}
         return {
             "rsi": signals.get("rsi", 50.0),
             "ema_ratio": signals.get("ema_spread", 0.0) + 1.0,
@@ -162,6 +169,8 @@ class TradePredictorFeatures:
             "momentum_score": signals.get("momentum", 0.0),
             "trend_strength": signals.get("trend_strength", 0.0),
             "spread_pct": spread,
+            "trend_regime_encoded": _trend_map.get(trend_regime, 1.0),
+            "vol_regime_encoded": _vol_map.get(vol_regime, 1.0),
         }
 
 

@@ -34,3 +34,15 @@ class InsufficientFundsError(PermanentExchangeError):
 
 class InvalidOrderError(PermanentExchangeError):
     """Invalid order parameters (bad pair, size below minimum, etc)."""
+
+
+class KrakenAPIError(ExchangeError):
+    """Kraken API returned one or more errors.
+
+    Inherits from ExchangeError so generic ``except ExchangeError`` handlers
+    will catch it.
+    """
+
+    def __init__(self, errors: list):
+        self.errors = errors
+        super().__init__(f"Kraken API Error: {', '.join(errors)}")

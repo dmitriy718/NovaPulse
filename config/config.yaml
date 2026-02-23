@@ -49,6 +49,7 @@ trading:
   cooldown_seconds: 30
   max_spread_pct: 0.0030
   use_closed_candles_only: true
+  outlier_threshold: 0.15         # reject bars with >15% close-to-close deviation (0 disables)
   strategy_cooldowns_seconds:
     keltner: 120
     mean_reversion: 120
@@ -71,6 +72,16 @@ trading:
   canary_min_confidence: 0.68
   canary_min_confluence: 3
   canary_scan_interval_seconds: 60
+  crypto_universe:
+    enabled: false
+    pinned_pairs: []              # Empty = use trading.pairs as pinned
+    min_volume_24h: 50000000      # $50M minimum 24h volume
+    min_market_cap: 500000000     # $500M minimum market cap
+    max_universe_size: 20
+    refresh_interval_minutes: 30
+    coingecko_rate_limit_per_min: 25
+    warmup_new_pairs: true
+    warmup_grace_scans: 3
 
 strategies:
   # Keltner Channel — proven winner (100% WR, 2 trades)
@@ -280,6 +291,19 @@ stocks:
   alpaca_api_key: ""    # or set ALPACA_API_KEY env
   alpaca_api_secret: "" # or set ALPACA_API_SECRET env
   alpaca_base_url: "https://paper-api.alpaca.markets"
+  universe:
+    enabled: false            # Set true to enable dynamic universe scanning
+    pinned_symbols: []        # Always include these (empty = use stocks.symbols)
+    min_avg_volume: 500000    # Minimum average daily volume
+    min_price: 5.0            # Minimum last price
+    max_price: 1000.0         # Maximum last price
+    max_universe_size: 100    # Cap total symbols (pinned + dynamic)
+    include_movers: true      # Overlay top gainers into universe
+    movers_count: 10          # How many movers to splice in
+    refresh_interval_minutes: 60   # Re-scan universe every 60 min during market hours
+    market_hours_only: true        # Only refresh during US market hours (+ pre_market_minutes)
+    pre_market_minutes: 30         # Start refreshing 30 min before open (9:00 AM ET)
+    polygon_rate_limit_per_min: 5  # Free plan = 5; increase for paid
 
 control:
   web:

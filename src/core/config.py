@@ -107,6 +107,7 @@ def _apply_env_overrides(config: Dict[str, Any]) -> None:
         "CANARY_MIN_CONFIDENCE": ("trading", "canary_min_confidence", float),
         "CANARY_MIN_CONFLUENCE": ("trading", "canary_min_confluence", int),
         "CANARY_SCAN_INTERVAL_SECONDS": ("trading", "canary_scan_interval_seconds", int),
+        "OUTLIER_THRESHOLD": ("trading", "outlier_threshold", float),
         "STOCKS_ENABLED": (
             "stocks",
             "enabled",
@@ -153,6 +154,32 @@ def _apply_env_overrides(config: Dict[str, Any]) -> None:
         "ALPACA_API_KEY": ("stocks", "alpaca_api_key"),
         "ALPACA_API_SECRET": ("stocks", "alpaca_api_secret"),
         "ALPACA_BASE_URL": ("stocks", "alpaca_base_url"),
+        "STOCKS_UNIVERSE_ENABLED": (
+            ("stocks", "universe", "enabled"),
+            lambda v: v.lower() in ("1", "true", "yes", "on"),
+        ),
+        "STOCKS_UNIVERSE_MIN_VOLUME": (("stocks", "universe", "min_avg_volume"), int),
+        "STOCKS_UNIVERSE_MIN_PRICE": (("stocks", "universe", "min_price"), float),
+        "STOCKS_UNIVERSE_MAX_PRICE": (("stocks", "universe", "max_price"), float),
+        "STOCKS_UNIVERSE_MAX_SIZE": (("stocks", "universe", "max_universe_size"), int),
+        "STOCKS_UNIVERSE_MOVERS": (
+            ("stocks", "universe", "include_movers"),
+            lambda v: v.lower() in ("1", "true", "yes", "on"),
+        ),
+        "STOCKS_UNIVERSE_REFRESH_MINUTES": (("stocks", "universe", "refresh_interval_minutes"), int),
+        "STOCKS_UNIVERSE_MARKET_HOURS_ONLY": (
+            ("stocks", "universe", "market_hours_only"),
+            lambda v: v.lower() in ("1", "true", "yes", "on"),
+        ),
+        "STOCKS_UNIVERSE_RATE_LIMIT": (("stocks", "universe", "polygon_rate_limit_per_min"), int),
+        "CRYPTO_UNIVERSE_ENABLED": (
+            ("trading", "crypto_universe", "enabled"),
+            lambda v: v.lower() in ("1", "true", "yes", "on"),
+        ),
+        "CRYPTO_UNIVERSE_MIN_VOLUME": (("trading", "crypto_universe", "min_volume_24h"), float),
+        "CRYPTO_UNIVERSE_MIN_MARKET_CAP": (("trading", "crypto_universe", "min_market_cap"), float),
+        "CRYPTO_UNIVERSE_MAX_SIZE": (("trading", "crypto_universe", "max_universe_size"), int),
+        "CRYPTO_UNIVERSE_REFRESH_MINUTES": (("trading", "crypto_universe", "refresh_interval_minutes"), int),
         "ELASTICSEARCH_ENABLED": (
             "elasticsearch",
             "enabled",
@@ -272,6 +299,19 @@ class ExchangeConfig(BaseModel):
     limit_fallback_to_market: bool = True
 
 
+class CryptoUniverseConfig(BaseModel):
+    """Dynamic crypto pair universe scanner configuration."""
+    enabled: bool = False
+    pinned_pairs: List[str] = Field(default_factory=list)
+    min_volume_24h: float = 50_000_000.0
+    min_market_cap: float = 500_000_000.0
+    max_universe_size: int = 20
+    refresh_interval_minutes: int = 30
+    coingecko_rate_limit_per_min: int = 25
+    warmup_new_pairs: bool = True
+    warmup_grace_scans: int = 3
+
+
 class TradingConfig(BaseModel):
     pairs: List[str] = Field(default_factory=lambda: ["BTC/USD", "ETH/USD"])
     scan_interval_seconds: int = 60
@@ -303,6 +343,11 @@ class TradingConfig(BaseModel):
     canary_min_confidence: float = 0.68
     canary_min_confluence: int = 3
     canary_scan_interval_seconds: int = 60
+    # Outlier bar rejection threshold (fraction of close-to-close deviation).
+    # Bars with larger jumps are dropped as bad data. 0 disables filtering.
+    # Crypto markets flash-crash more than stocks, so 0.15-0.20 is safer for crypto.
+    outlier_threshold: float = 0.15
+    crypto_universe: CryptoUniverseConfig = Field(default_factory=CryptoUniverseConfig)
 
     @field_validator("scan_interval_seconds", mode="before")
     @classmethod
@@ -665,6 +710,22 @@ class MonitoringConfig(BaseModel):
     emergency_close_on_auto_pause: bool = False
 
 
+class UniverseConfig(BaseModel):
+    """Dynamic stock universe scanner configuration."""
+    enabled: bool = False
+    pinned_symbols: List[str] = Field(default_factory=list)
+    min_avg_volume: int = 500_000
+    min_price: float = 5.0
+    max_price: float = 1000.0
+    max_universe_size: int = 100
+    include_movers: bool = True
+    movers_count: int = 10
+    refresh_interval_minutes: int = 60
+    market_hours_only: bool = True
+    pre_market_minutes: int = 30
+    polygon_rate_limit_per_min: int = 5
+
+
 class StocksConfig(BaseModel):
     enabled: bool = False
     symbols: List[str] = Field(default_factory=lambda: ["AAPL", "MSFT", "NVDA", "TSLA"])
@@ -689,6 +750,7 @@ class StocksConfig(BaseModel):
     alpaca_api_key: str = ""
     alpaca_api_secret: str = ""
     alpaca_base_url: str = "https://paper-api.alpaca.markets"
+    universe: UniverseConfig = Field(default_factory=UniverseConfig)
 
     @field_validator("min_hold_days")
     @classmethod

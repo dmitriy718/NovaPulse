@@ -171,6 +171,7 @@ class ConfluenceDetector:
         self.primary_timeframe = primary_timeframe if primary_timeframe in self.timeframes else 1
 
         # Initialize strategies — Keltner + Mean Reversion are proven winners
+        # Weights are relative priorities; _normalize_weights() scales them to sum to 1.0
         self.strategies: List[BaseStrategy] = [
             KeltnerStrategy(weight=0.30),
             MeanReversionStrategy(weight=0.25),
@@ -182,6 +183,7 @@ class ConfluenceDetector:
             SupertrendStrategy(weight=0.10),
             ReversalStrategy(weight=0.10),
         ]
+        self._normalize_weights()
 
         self._last_confluence: Dict[str, ConfluenceSignal] = {}
         self._signal_history: Deque[ConfluenceSignal] = deque(maxlen=1000)
@@ -238,6 +240,13 @@ class ConfluenceDetector:
             "ichimoku": 0.9,
         }
 
+    def _normalize_weights(self) -> None:
+        """Scale strategy weights so they sum to 1.0."""
+        total = sum(s.weight for s in self.strategies)
+        if total > 0 and len(self.strategies) > 0:
+            for s in self.strategies:
+                s.weight = s.weight / total
+
     def configure_strategies(
         self, config: Dict[str, Any], single_strategy_mode: Optional[str] = None
     ) -> None:
@@ -271,6 +280,7 @@ class ConfluenceDetector:
                     if k in sig.parameters and k != "self"
                 }
                 self.strategies.append(cls(**valid_params))
+        self._normalize_weights()
 
     def set_cooldown_checker(self, checker) -> None:
         """Inject a cooldown checker: fn(pair, strategy_name, side) -> bool."""
@@ -340,6 +350,10 @@ class ConfluenceDetector:
 
         return self._combine_timeframes(pair, timeframe_results)
 
+    # Strategy sets for regime-based binary gating
+    _TREND_STRATEGIES = {"trend", "ichimoku", "supertrend"}
+    _MEAN_REVERSION_STRATEGIES = {"mean_reversion", "stochastic_divergence", "reversal"}
+
     async def _run_strategies(
         self,
         pair: str,
@@ -353,11 +367,27 @@ class ConfluenceDetector:
         vol_regime: Optional[str] = None,
     ) -> List[StrategySignal]:
         """Run all strategies for a given timeframe with timeout + cooldown filtering."""
+        # Regime-aware binary gating: completely skip strategies that are
+        # mismatched with the current regime.  This is stricter than the
+        # existing soft weight multipliers.
+        adx_vals = indicator_cache.adx(14)
+        adx_val = float(adx_vals[-1]) if len(adx_vals) else 0.0
+        if not math.isfinite(adx_val):
+            adx_val = 0.0
+
+        gated_out: set = set()
+        if trend_regime == "range" and adx_val < 20:
+            gated_out = self._TREND_STRATEGIES
+        elif trend_regime == "trend" and adx_val > 40:
+            gated_out = self._MEAN_REVERSION_STRATEGIES
+
         signals: List[StrategySignal] = []
         for strategy in self.strategies:
             if not strategy.enabled:
                 continue
             if self._is_runtime_disabled(strategy.name):
+                continue
+            if strategy.name in gated_out:
                 continue
             try:
                 signal = await asyncio.wait_for(
@@ -1043,13 +1073,21 @@ class ConfluenceDetector:
         self, strategy_name: str, pnl: float,
         trend_regime: str = "",
         vol_regime: str = "",
+        hold_hours: float = 0.0,
     ) -> None:
         """Record a trade result for adaptive strategy weighting."""
         for strategy in self.strategies:
             if strategy.name == strategy_name:
-                strategy.record_trade_result(pnl, trend_regime, vol_regime)
+                strategy.record_trade_result(pnl, trend_regime, vol_regime, hold_hours=hold_hours)
                 self._evaluate_strategy_guardrail(strategy)
                 break
+
+    def avg_winning_hold_hours(self, strategy_name: str) -> float:
+        """Return average winning hold duration for a strategy (0 if insufficient data)."""
+        for s in self.strategies:
+            if s.name == strategy_name:
+                return s.avg_winning_hold_hours()
+        return 0.0
 
     def get_last_confluence(self, pair: str) -> Optional[ConfluenceSignal]:
         """Get the most recent confluence signal for a pair."""

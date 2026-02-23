@@ -183,6 +183,7 @@ class ExternalDataCollector:
         coingecko_interval: int = 600,
         cryptopanic_interval: int = 600,
         onchain_interval: int = 3600,
+        coingecko_id_map: Optional[Dict[str, str]] = None,
     ):
         self.es = es
         self.pairs = pairs
@@ -192,6 +193,11 @@ class ExternalDataCollector:
         self.coingecko_interval = coingecko_interval
         self.cryptopanic_interval = cryptopanic_interval
         self.onchain_interval = onchain_interval
+        self._dynamic_coingecko_map: Dict[str, str] = dict(coingecko_id_map or {})
+
+    def update_coingecko_map(self, new_map: Dict[str, str]) -> None:
+        """Update the CoinGecko ID mapping (called by universe scanner)."""
+        self._dynamic_coingecko_map.update(new_map)
 
     # ------------------------------------------------------------------
     # Fear & Greed Index (alternative.me — no key needed)
@@ -233,16 +239,7 @@ class ExternalDataCollector:
         import httpx
 
         logger.info("CoinGecko polling started", interval=self.coingecko_interval)
-        coin_ids = [
-            _PAIR_TO_COINGECKO[p]
-            for p in self.pairs
-            if p in _PAIR_TO_COINGECKO
-        ]
-        if not coin_ids:
-            logger.warning("No CoinGecko IDs mapped for configured pairs")
-            return
 
-        ids_str = ",".join(coin_ids)
         base_url = "https://api.coingecko.com/api/v3/coins/markets"
         headers: Dict[str, str] = {}
         if self.coingecko_api_key:
@@ -250,6 +247,18 @@ class ExternalDataCollector:
 
         while True:
             try:
+                # Rebuild mapping each iteration (pairs may change dynamically)
+                effective_map = {**_PAIR_TO_COINGECKO, **self._dynamic_coingecko_map}
+                coin_ids = [
+                    effective_map[p]
+                    for p in self.pairs
+                    if p in effective_map
+                ]
+                if not coin_ids:
+                    await asyncio.sleep(self.coingecko_interval)
+                    continue
+
+                ids_str = ",".join(coin_ids)
                 params = {
                     "vs_currency": "usd",
                     "ids": ids_str,
@@ -263,7 +272,7 @@ class ExternalDataCollector:
 
                 now = time.time()
                 # Reverse map: coingecko_id -> pair
-                id_to_pair = {v: k for k, v in _PAIR_TO_COINGECKO.items()}
+                id_to_pair = {v: k for k, v in effective_map.items()}
 
                 for coin in coins:
                     cid = coin.get("id", "")

@@ -270,6 +270,19 @@ class StockSwingEngine:
             base_url=self.config.stocks.alpaca_base_url,
         )
 
+        # Dynamic universe scanner (optional)
+        self._universe_scanner: Optional[Any] = None
+        if getattr(self.config.stocks, "universe", None) and self.config.stocks.universe.enabled:
+            from src.stocks.universe import UniverseScanner
+            self._universe_scanner = UniverseScanner(
+                polygon=self.polygon,
+                config=self.config.stocks,
+            )
+
+        # Bar cache: symbol -> (timestamp, bars)
+        self._bar_cache: Dict[str, tuple[float, List[Dict[str, Any]]]] = {}
+        self._bar_cache_ttl = max(60.0, self.scan_interval * 0.8)
+
         self._execution_stats: Dict[str, Any] = {
             "orders_placed": 0,
             "orders_filled": 0,
@@ -286,6 +299,17 @@ class StockSwingEngine:
             await self._reconcile_broker_positions(source="startup")
         await self._backfill_open_trade_protection(source="startup")
         await self._load_historical_stats()
+
+        # Initial universe refresh (updates self.pairs if scanner is active)
+        if self._universe_scanner:
+            try:
+                universe = await self._universe_scanner.refresh()
+                if universe:
+                    self.pairs = universe
+                    logger.info("Universe scanner loaded initial symbols", count=len(universe))
+            except Exception as e:
+                logger.warning("Initial universe refresh failed, keeping static symbols", error=repr(e))
+
         await self.db.log_thought(
             "system",
             (
@@ -318,6 +342,13 @@ class StockSwingEngine:
         self._tasks = [
             asyncio.create_task(self._scan_loop(), name="stocks:scan_loop"),
         ]
+        if self._universe_scanner:
+            self._tasks.append(
+                asyncio.create_task(
+                    self._universe_refresh_loop(),
+                    name="stocks:universe_refresh",
+                )
+            )
 
     async def stop(self) -> None:
         self._running = False
@@ -471,6 +502,30 @@ class StockSwingEngine:
             tenant_id=self.tenant_id,
         )
 
+    async def _universe_refresh_loop(self) -> None:
+        """Periodically refresh the dynamic stock universe during market hours."""
+        cfg = self.config.stocks.universe
+        interval = max(60, cfg.refresh_interval_minutes) * 60  # seconds
+        check_interval = 60  # check market hours every 60s when waiting
+        while self._running:
+            try:
+                await asyncio.sleep(interval)
+                if not self._running:
+                    break
+                # Skip refresh outside market hours if configured
+                if cfg.market_hours_only and not self._universe_scanner.is_market_hours():
+                    await asyncio.sleep(check_interval)
+                    continue
+                universe = await self._universe_scanner.refresh()
+                if universe:
+                    self.pairs = universe
+                    logger.info("Universe refreshed", count=len(universe))
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning("Universe refresh loop error", error=repr(e))
+                await asyncio.sleep(min(interval, 300))
+
     async def _scan_loop(self) -> None:
         while self._running:
             try:
@@ -494,9 +549,19 @@ class StockSwingEngine:
                 pending_symbols = set(self._pending_opens.keys())
                 open_count = len(open_rows) + len(pending_symbols)
                 lookback_limit = max(60, int(self.config.stocks.lookback_bars))
-                bars_by_symbol = await self._fetch_scan_bars(self.pairs, lookback_limit)
 
-                for symbol in self.pairs:
+                # Snapshot current pairs to avoid mid-iteration mutation
+                scan_symbols = list(self.pairs)
+
+                # Tier 1 pre-filter: narrow large universe using cached snapshots
+                if self._universe_scanner and self._universe_scanner.cached_snapshots:
+                    scan_symbols = self._tier1_prefilter(
+                        scan_symbols, open_by_symbol, pending_symbols,
+                    )
+
+                bars_by_symbol = await self._fetch_scan_bars(scan_symbols, lookback_limit)
+
+                for symbol in scan_symbols:
                     bars = bars_by_symbol.get(symbol, [])
                     if not bars:
                         continue
@@ -533,30 +598,104 @@ class StockSwingEngine:
                 logger.error("Stock scan loop error", error=repr(e))
                 await asyncio.sleep(min(self.scan_interval, 60))
 
+    def _tier1_prefilter(
+        self,
+        symbols: List[str],
+        open_by_symbol: Dict[str, Any],
+        pending_symbols: set,
+    ) -> List[str]:
+        """Pre-filter large universe using cached snapshot data.
+
+        Always keeps: pinned symbols, symbols with open/pending positions.
+        Ranks the rest by absolute daily change% descending and takes top N.
+        """
+        scanner = self._universe_scanner
+        snaps = scanner.cached_snapshots
+        pinned = set(scanner._pinned)
+        must_include = pinned | set(open_by_symbol.keys()) | pending_symbols
+
+        # Target ~30 candidates for deep bar analysis
+        max_candidates = 30
+
+        must = [s for s in symbols if s in must_include]
+        remaining_slots = max(0, max_candidates - len(must))
+
+        if remaining_slots == 0 or len(symbols) <= max_candidates:
+            return symbols
+
+        # Score non-must symbols by absolute daily change %
+        scored: List[tuple[str, float]] = []
+        for sym in symbols:
+            if sym in must_include:
+                continue
+            snap = snaps.get(sym)
+            if not snap:
+                continue
+            try:
+                day = snap.get("day") or {}
+                prev_day = snap.get("prevDay") or {}
+                close = float(day.get("c", 0) or 0)
+                prev_close = float(prev_day.get("c", 0) or 0)
+                volume = float(day.get("v", 0) or 0)
+                if prev_close > 0 and close > 0:
+                    change_pct = abs((close - prev_close) / prev_close)
+                else:
+                    change_pct = 0.0
+                # Composite score: change% weighted by volume rank
+                scored.append((sym, change_pct * (1.0 + min(volume / 1e7, 5.0))))
+            except (ValueError, TypeError):
+                continue
+
+        scored.sort(key=lambda x: x[1], reverse=True)
+        top = [sym for sym, _ in scored[:remaining_slots]]
+        return must + top
+
     async def _fetch_scan_bars(
         self,
         symbols: List[str],
         limit: int,
     ) -> Dict[str, List[Dict[str, Any]]]:
-        """Fetch daily bars for scan symbols with bounded concurrency."""
+        """Fetch daily bars for scan symbols with rate limiting and caching."""
         if not symbols:
             return {}
-        parallelism = max(1, min(6, len(symbols)))
-        sem = asyncio.Semaphore(parallelism)
+        now = time.time()
 
-        async def _one(symbol: str) -> tuple[str, List[Dict[str, Any]]]:
-            async with sem:
-                bars = await self.polygon.get_daily_bars(symbol, limit=limit)
-                return symbol, bars
-
+        # Separate cached hits from symbols needing API calls
         out: Dict[str, List[Dict[str, Any]]] = {}
-        results = await asyncio.gather(*[_one(sym) for sym in symbols], return_exceptions=True)
-        for item in results:
-            if isinstance(item, BaseException):
-                logger.warning("Stock scan bars fetch failed", error=repr(item))
-                continue
-            symbol, bars = item
-            out[symbol] = bars
+        to_fetch: List[str] = []
+        for symbol in symbols:
+            cached = self._bar_cache.get(symbol)
+            if cached:
+                cached_ts, cached_bars = cached
+                if now - cached_ts < self._bar_cache_ttl and cached_bars:
+                    out[symbol] = cached_bars
+                    continue
+            to_fetch.append(symbol)
+
+        if not to_fetch:
+            return out
+
+        # Rate-limited sequential fetch to respect Polygon API limits
+        rate = 5  # default free tier
+        if self._universe_scanner:
+            rate = max(1, self.config.stocks.universe.polygon_rate_limit_per_min)
+        min_interval = 60.0 / rate
+        last_ts = getattr(self, "_bar_fetch_last_ts", 0.0)
+
+        for symbol in to_fetch:
+            try:
+                elapsed = time.time() - last_ts
+                if elapsed < min_interval:
+                    await asyncio.sleep(min_interval - elapsed)
+                bars = await self.polygon.get_daily_bars(symbol, limit=limit)
+                last_ts = time.time()
+                if bars:
+                    self._bar_cache[symbol] = (time.time(), bars)
+                out[symbol] = bars
+            except Exception as e:
+                logger.warning("Stock scan bars fetch failed", symbol=symbol, error=repr(e))
+
+        self._bar_fetch_last_ts = last_ts
         return out
 
     def _derive_protective_levels(self, entry_price: float) -> tuple[float, float]:

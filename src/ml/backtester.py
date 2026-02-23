@@ -782,6 +782,8 @@ class Backtester:
             metadata,
             obi=(signal.book_score if getattr(signal, "book_score", 0.0) else signal.obi),
             spread=0.0,
+            trend_regime=getattr(signal, "regime", "") or "",
+            vol_regime=getattr(signal, "volatility_regime", "") or "",
         )
 
     def _primary_strategy(self, signal) -> str:
