@@ -77,6 +77,8 @@ class TradeExecutor:
         smart_exit_enabled: bool = False,
         smart_exit_tiers: Optional[list] = None,
         max_trade_duration_hours: int = 24,
+        correlation_groups: Optional[Dict[str, str]] = None,
+        max_per_correlation_group: int = 2,
     ):
         self.rest_client = rest_client
         self.market_data = market_data
@@ -105,7 +107,7 @@ class TradeExecutor:
 
         # Correlation groups: pairs in the same group share a single slot
         # to prevent concentrated directional exposure.
-        self._correlation_groups: Dict[str, str] = {
+        self._correlation_groups: Dict[str, str] = correlation_groups or {
             "BTC/USD": "btc",
             "ETH/USD": "major",
             "SOL/USD": "alt_l1",
@@ -115,7 +117,7 @@ class TradeExecutor:
             "XRP/USD": "alt_payment",
             "LINK/USD": "alt_oracle",
         }
-        self._max_per_correlation_group = 2  # max open positions in same group
+        self._max_per_correlation_group = max(1, int(max_per_correlation_group or 1))
 
         self._execution_stats = {
             "orders_placed": 0,

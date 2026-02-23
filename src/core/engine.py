@@ -732,6 +732,8 @@ class BotEngine:
             quiet_hours_utc=tuple(self.config.trading.quiet_hours_utc) if self.config.trading.quiet_hours_utc else (),
             smart_exit_enabled=bool(self.config.risk.smart_exit.enabled),
             smart_exit_tiers=self.config.risk.smart_exit.tiers if self.config.risk.smart_exit.enabled else [],
+            correlation_groups=getattr(self.config.risk, "correlation_groups", None),
+            max_per_correlation_group=getattr(self.config.risk, "max_positions_per_correlation_group", 2),
         )
         if self.continuous_learner:
             self.executor.set_continuous_learner(self.continuous_learner)
