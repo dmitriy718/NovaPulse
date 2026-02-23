@@ -173,6 +173,7 @@ strategies:
 
 ai:
   confluence_threshold: 2  # 2 strategies agreeing = tradable (3 was too strict, rejected most setups)
+  high_vol_confluence_threshold: 3
   min_confidence: 0.55     # More permissive to restore trade flow in paper/live scan loops
   min_risk_reward_ratio: 1.2  # Lowered from 1.5 — crypto setups often have 1.2-1.3 R:R
   tflite_model_path: "models/trade_predictor.tflite"

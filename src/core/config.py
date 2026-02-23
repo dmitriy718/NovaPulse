@@ -526,6 +526,7 @@ class AIConfig(BaseModel):
     allow_any_solo: bool = False
     keltner_solo_min_confidence: float = 0.60
     solo_min_confidence: float = 0.65
+    high_vol_confluence_threshold: int | None = None
     tflite_model_path: str = "models/trade_predictor.tflite"
     order_book_depth: int = 25
     obi_threshold: float = 0.15

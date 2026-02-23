@@ -583,6 +583,7 @@ class BotEngine:
                     self.config.ai, "obi_counts_as_confluence", False
                 ),
                 obi_weight=getattr(self.config.ai, "obi_weight", 0.4),
+                high_vol_confluence_threshold=getattr(self.config.ai, "high_vol_confluence_threshold", None),
                 round_trip_fee_pct=self.config.exchange.taker_fee * 2,
                 use_closed_candles_only=getattr(self.config.trading, "use_closed_candles_only", False),
                 regime_config=getattr(self.config.ai, "regime", None),

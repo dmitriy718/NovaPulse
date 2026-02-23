@@ -142,6 +142,7 @@ class ConfluenceDetector:
         obi_weight: float = 0.4,
         round_trip_fee_pct: float = 0.0052,
         use_closed_candles_only: bool = False,
+        high_vol_confluence_threshold: Optional[int] = None,
         regime_config: Optional[Any] = None,
         timeframes: Optional[List[int]] = None,
         multi_timeframe_min_agreement: int = 1,
@@ -164,6 +165,11 @@ class ConfluenceDetector:
         self.obi_weight = obi_weight
         self.round_trip_fee_pct = round_trip_fee_pct
         self.use_closed_candles_only = use_closed_candles_only
+        self.high_vol_confluence_threshold = (
+            int(high_vol_confluence_threshold)
+            if high_vol_confluence_threshold is not None
+            else max(self.confluence_threshold, self.confluence_threshold + 1)
+        )
         self.regime_config = regime_config or {}
         self.timeframes = sorted(timeframes or [1])
         if 1 not in self.timeframes:
@@ -893,9 +899,13 @@ class ConfluenceDetector:
             weighted_confidence *= session_mult
             weighted_confidence = max(0.0, min(1.0, weighted_confidence))
 
-        # "Sure Fire" detection: threshold strategies + OBI agreement
+        # "Sure Fire" detection: threshold strategies + OBI agreement (tightened in high vol)
+        threshold_for_regime = self.confluence_threshold
+        if vol_regime == "high_vol":
+            threshold_for_regime = max(self.confluence_threshold, self.high_vol_confluence_threshold)
+
         is_sure_fire = (
-            confluence_count >= self.confluence_threshold and
+            confluence_count >= threshold_for_regime and
             obi_agrees and
             weighted_confidence >= self.min_confidence
         )
