@@ -45,6 +45,8 @@ class ContinuousLearner:
       probability gate as labeled examples accumulate.
     """
 
+    _SCALER_WARMUP_SAMPLES: int = 200
+
     def __init__(
         self,
         model_path: str = "models/continuous_sgd.joblib",
@@ -168,8 +170,9 @@ class ContinuousLearner:
                     )
 
                 x = self._vectorize(features)
-                # Freeze scaler after enough samples to avoid distribution drift
-                if self.stats.seen < 200:
+                # Freeze scaler after warmup to avoid distribution drift.
+                # Use `seen` (pre-increment) so the 200th sample is the last fitted.
+                if self.stats.seen < self._SCALER_WARMUP_SAMPLES:
                     self._scaler.partial_fit(x)
                 xs = self._scaler.transform(x)
 

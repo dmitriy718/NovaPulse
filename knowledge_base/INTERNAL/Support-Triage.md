@@ -1,7 +1,7 @@
 # NovaPulse Support Triage
 
-**Version:** 4.0.0
-**Last Updated:** 2026-02-22
+**Version:** 4.5.0
+**Last Updated:** 2026-02-24
 
 ---
 

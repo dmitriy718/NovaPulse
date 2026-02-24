@@ -45,6 +45,7 @@ class TrendStrategy(BaseStrategy):
         ema_fast: int = 5,
         ema_slow: int = 13,
         adx_threshold: int = 25,
+        require_fresh_cross: bool = True,
         weight: float = 0.25,
         enabled: bool = True,
     ):
@@ -52,6 +53,7 @@ class TrendStrategy(BaseStrategy):
         self.ema_fast = ema_fast
         self.ema_slow = ema_slow
         self.adx_threshold = adx_threshold
+        self.require_fresh_cross = require_fresh_cross
 
     def min_bars_required(self) -> int:
         return max(self.ema_slow * 3, 50)
@@ -118,6 +120,10 @@ class TrendStrategy(BaseStrategy):
         avg_vol = np.mean(volumes[-20:]) if len(volumes) >= 20 else np.mean(volumes)
         vol_ratio = volumes[-1] / avg_vol if avg_vol > 0 else 1.0
 
+        # Fresh cross gate: if enabled, require a crossover on the current bar
+        if self.require_fresh_cross and not bullish_cross and not bearish_cross:
+            return self._neutral_signal(pair, "No fresh EMA cross")
+
         # Signal scoring
         direction = SignalDirection.NEUTRAL
         strength = 0.0
@@ -144,10 +150,9 @@ class TrendStrategy(BaseStrategy):
                 if vol_ratio > 1.3:
                     strength += 0.1
 
-                # Confidence based on alignment
-                confidence = 0.4
-                if price_above_emas:
-                    confidence += 0.15
+                # Confidence based on alignment (price_above_emas already required
+                # by the outer if — don't double-count it)
+                confidence = 0.55
                 if curr_adx > 35:
                     confidence += 0.15
                 if vol_ratio > 1.2:
@@ -172,9 +177,8 @@ class TrendStrategy(BaseStrategy):
                 if vol_ratio > 1.3:
                     strength += 0.1
 
-                confidence = 0.4
-                if price_below_emas:
-                    confidence += 0.15
+                # Confidence (price_below_emas already required by outer if)
+                confidence = 0.55
                 if curr_adx > 35:
                     confidence += 0.15
                 if vol_ratio > 1.2:

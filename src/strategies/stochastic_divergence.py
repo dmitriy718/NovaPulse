@@ -189,7 +189,7 @@ class StochasticDivergenceStrategy(BaseStrategy):
         # Find the two most recent local lows in price
         price_low_indices = []
         for i in range(1, len(window_lows) - 1):
-            if window_lows[i] <= window_lows[i - 1] and window_lows[i] <= window_lows[i + 1]:
+            if window_lows[i] < window_lows[i - 1] and window_lows[i] < window_lows[i + 1]:
                 price_low_indices.append(i)
 
         if len(price_low_indices) < 2:
@@ -224,7 +224,7 @@ class StochasticDivergenceStrategy(BaseStrategy):
 
         price_high_indices = []
         for i in range(1, len(window_highs) - 1):
-            if window_highs[i] >= window_highs[i - 1] and window_highs[i] >= window_highs[i + 1]:
+            if window_highs[i] > window_highs[i - 1] and window_highs[i] > window_highs[i + 1]:
                 price_high_indices.append(i)
 
         if len(price_high_indices) < 2:

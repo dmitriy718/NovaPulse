@@ -1,6 +1,6 @@
 # Understanding Your Metrics
 
-**Last updated:** 2026-02-22
+**Last updated:** 2026-02-24
 
 NovaPulse tracks a wide range of performance and risk metrics so you can understand exactly how the bot is performing. This guide explains every metric in plain language, why it matters, and what values to look for.
 

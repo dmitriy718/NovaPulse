@@ -1,7 +1,7 @@
 # NovaPulse Data Formats
 
-**Version:** 4.0.0
-**Last Updated:** 2026-02-22
+**Version:** 4.5.0
+**Last Updated:** 2026-02-24
 
 ---
 
@@ -333,7 +333,7 @@ CREATE TABLE copy_trading_providers (
 ```json
 {
     "status": "healthy",
-    "version": "3.0.0",
+    "version": "4.5.0",
     "timestamp": "2026-02-22T14:30:00.123456Z"
 }
 ```

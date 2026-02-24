@@ -1,6 +1,6 @@
 # Troubleshooting
 
-**Last updated:** 2026-02-22
+**Last updated:** 2026-02-24
 
 This guide covers the most common issues you might encounter with NovaPulse and how to resolve them. If your issue is not covered here, please [contact support](Contact-Support.md).
 

@@ -348,7 +348,20 @@ async def run_bot():
                             severity="info",
                             tenant_id=getattr(eng, "tenant_id", "default"),
                         )
-                await asyncio.sleep(30)
+                # Sleep until next market transition (open/close), capped at 5 min
+                now_et = datetime.now(timezone.utc).astimezone(_US_EASTERN)
+                mins_now = now_et.hour * 60 + now_et.minute
+                market_open = 9 * 60 + 30
+                market_close = 16 * 60
+                if mins_now < market_open:
+                    secs_until = (market_open - mins_now) * 60
+                elif mins_now < market_close:
+                    secs_until = (market_close - mins_now) * 60
+                else:
+                    # After close: next transition is tomorrow's open
+                    secs_until = ((24 * 60 - mins_now) + market_open) * 60
+                sleep_secs = min(max(secs_until, 30), 300)
+                await asyncio.sleep(sleep_secs)
             except asyncio.CancelledError:
                 break
             except Exception as e:

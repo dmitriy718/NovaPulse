@@ -1,6 +1,6 @@
 # Configuration Guide
 
-**Last updated:** 2026-02-22
+**Last updated:** 2026-02-24
 
 NovaPulse comes pre-configured with sensible defaults, but you can customize many settings to match your trading style and risk tolerance. This guide explains what each setting does and when you might want to change it.
 

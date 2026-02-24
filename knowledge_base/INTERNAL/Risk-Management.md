@@ -1,16 +1,23 @@
 # NovaPulse Risk Management
 
-**Version:** 4.0.0
-**Last Updated:** 2026-02-22
+**Version:** 4.5.0
+**Last Updated:** 2026-02-24
 
 ---
 
 ## Overview
 
-The NovaPulse risk management system provides multi-layered capital preservation through position sizing, stop loss management, daily loss limits, and circuit breakers. The primary goal is to survive losing streaks and protect the bankroll while allowing profitable trades to compound.
+The NovaPulse risk management system provides multi-layered capital preservation through position sizing, stop loss management, daily loss limits, circuit breakers, correlation-based sizing, and cross-engine exposure aggregation. The primary goal is to survive losing streaks and protect the bankroll while allowing profitable trades to compound.
 
-**File:** `src/execution/risk_manager.py`
-**Class:** `RiskManager`
+**Files:**
+- `src/execution/risk_manager.py` — `RiskManager` (per-engine risk controls)
+- `src/execution/global_risk.py` — `GlobalRiskAggregator` (cross-engine exposure cap)
+
+### v4.5.0 Additions
+- **Correlation-based position sizing**: Pearson correlation with open positions; corr > 0.7 → automatic size reduction (min 50%)
+- **Cross-engine risk aggregation**: `GlobalRiskAggregator` singleton tracks total exposure across all engines (Kraken + Coinbase + Stocks); each engine's capacity check considers global cap
+- **Volatility-regime-aware trailing stops**: `update_stop_loss()` accepts `vol_regime` param; `high_vol` → trailing step ×1.5, `low_vol` → trailing step ×0.7
+- **Time-based exit tightening**: in `TradeExecutor`, positions >30 min with <0.5% profit → TP reduced to 60%; >60 min with <1.0% → TP reduced to 40%
 
 ---
 

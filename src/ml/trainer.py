@@ -160,7 +160,7 @@ class ModelTrainer:
         epochs: int = 50,
         batch_size: int = 64,
         validation_split: float = 0.2,
-        min_accuracy: float = 0.55,
+        min_accuracy: float = 0.52,
         feature_names: Optional[List[str]] = None,
         tenant_id: Optional[str] = "default",
     ):
@@ -262,8 +262,9 @@ class ModelTrainer:
                 self.min_samples, tenant_id=self.tenant_id
             )
 
-        if len(training_data) < 20:
-            result["message"] = f"Insufficient training data: {len(training_data)} samples (need 20+)"
+        min_required = max(20, self.min_samples)
+        if len(training_data) < min_required:
+            result["message"] = f"Insufficient training data: {len(training_data)} samples (need {min_required}+)"
             # Expected on fresh deployments; keep this informational.
             logger.info(result["message"])
             return result
@@ -392,10 +393,10 @@ class ModelTrainer:
             if n_val >= n:
                 n_val = max(0, n - 1)
 
-            rng = np.random.default_rng(1337)
-            indices = rng.permutation(n)
-            val_idx = indices[:n_val]
-            train_idx = indices[n_val:]
+            # Chronological split: train on earlier data, validate on later data.
+            # This prevents look-ahead bias in time-series classification.
+            train_idx = np.arange(n - n_val)
+            val_idx = np.arange(n - n_val, n)
 
             X_train = X[train_idx]
             y_train = y[train_idx]

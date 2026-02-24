@@ -75,10 +75,12 @@ class DashboardServer:
     """
 
     def __init__(self):
+        _is_prod = os.getenv("APP_ENV", "").lower() == "production"
         self.app = FastAPI(
             title="NovaPulse Command Center",
             version=__version__,
-            docs_url="/api/docs",
+            docs_url=None if _is_prod else "/api/docs",
+            redoc_url=None if _is_prod else "/api/redoc",
         )
         # Control plane auth:
         # - Cookie session (web UI)
@@ -214,7 +216,7 @@ class DashboardServer:
         )
 
         # Admin/read keys may explicitly target any tenant (control endpoints still require admin).
-        if api_key and (api_key == self._admin_key or (self._read_key and api_key == self._read_key)):
+        if api_key and (secrets.compare_digest(api_key, self._admin_key) or (self._read_key and secrets.compare_digest(api_key, self._read_key))):
             return requested_tenant_id or default_tenant_id
 
         primary_db = primary.db if (primary and getattr(primary, "db", None)) else None
@@ -1169,9 +1171,9 @@ class DashboardServer:
             raise HTTPException(status_code=401, detail="Missing credentials")
 
         # Global keys
-        if api_key == self._admin_key:
+        if secrets.compare_digest(api_key, self._admin_key):
             return {"auth": "key", "role": "admin", "tenant_id": self._default_tenant_id()}
-        if self._read_key and api_key == self._read_key:
+        if self._read_key and secrets.compare_digest(api_key, self._read_key):
             return {"auth": "key", "role": "read", "tenant_id": self._default_tenant_id()}
 
         # Tenant keys (read-only)
@@ -1202,7 +1204,7 @@ class DashboardServer:
 
         # Admin key
         api_key = (x_api_key or "").strip()
-        if api_key and api_key == self._admin_key:
+        if api_key and secrets.compare_digest(api_key, self._admin_key):
             return {"auth": "key", "role": "admin", "tenant_id": self._default_tenant_id()}
 
         # Optional: allow tenant API keys for control endpoints.
@@ -1304,7 +1306,7 @@ class DashboardServer:
                     "<div class='card'>"
                     "<h1>NovaPulse Command Center</h1>"
                     "<form method='post' action='/login'>"
-                    f"<label>Username</label><input name='username' autocomplete='username' value='{html.escape(self._admin_username)}'/>"
+                    "<label>Username</label><input name='username' autocomplete='username'/>"
                     "<label>Password</label><input name='password' type='password' autocomplete='current-password'/>"
                     "<button type='submit'>Login</button>"
                     "</form>"
@@ -1318,8 +1320,7 @@ class DashboardServer:
         _login_failures: Dict[str, List[float]] = {}  # ip -> list of failure timestamps
         _LOGIN_MAX_ATTEMPTS = 5  # max failures before lockout
         _LOGIN_WINDOW = 300.0  # 5-minute sliding window
-        # Lockout duration equals the sliding window — once failures age out
-        # of _LOGIN_WINDOW, the user can retry.
+        _login_last_eviction: list[float] = [0.0]
 
         @self.app.post("/login")
         async def login_submit(
@@ -1329,6 +1330,16 @@ class DashboardServer:
         ):
             ip = request.client.host if request.client else "unknown"
             now = time.monotonic()
+
+            # Periodic eviction of stale IPs to prevent unbounded memory growth
+            if (now - _login_last_eviction[0]) > _LOGIN_WINDOW * 2:
+                stale_ips = [
+                    k for k, v in _login_failures.items()
+                    if not v or (now - v[-1]) > _LOGIN_WINDOW
+                ]
+                for k in stale_ips:
+                    _login_failures.pop(k, None)
+                _login_last_eviction[0] = now
 
             # Prune old failures and check lockout
             failures = _login_failures.get(ip, [])

@@ -22,6 +22,7 @@ SL: 2.0x ATR, TP: 3.0x ATR
 from __future__ import annotations
 
 import time
+from typing import Dict, Optional
 
 import numpy as np
 
@@ -119,11 +120,22 @@ class OrderFlowStrategy(BaseStrategy):
             return self._neutral_signal(pair, f"Depth too thin ({depth_usd:.0f} USD)")
 
         # Price action: higher lows (bullish) or lower highs (bearish)
+        # Relaxed: require 2-of-last-3 comparisons instead of all consecutive
         lb = self.hl_lookback
         recent_lows = lows[-lb:]
         recent_highs = highs[-lb:]
-        higher_lows = all(recent_lows[i] >= recent_lows[i - 1] for i in range(1, len(recent_lows)))
-        lower_highs = all(recent_highs[i] <= recent_highs[i - 1] for i in range(1, len(recent_highs)))
+        n_hl = min(3, len(recent_lows) - 1)
+        count_hl = sum(
+            1 for i in range(len(recent_lows) - n_hl, len(recent_lows))
+            if recent_lows[i] > recent_lows[i - 1]
+        )
+        higher_lows = count_hl >= 2
+        n_lh = min(3, len(recent_highs) - 1)
+        count_lh = sum(
+            1 for i in range(len(recent_highs) - n_lh, len(recent_highs))
+            if recent_highs[i] < recent_highs[i - 1]
+        )
+        lower_highs = count_lh >= 2
 
         # Spread compression
         spread_tight = spread_pct < spread_tight_limit

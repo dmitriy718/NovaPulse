@@ -1,6 +1,6 @@
 # Getting Started with NovaPulse
 
-**Last updated:** 2026-02-22
+**Last updated:** 2026-02-24
 
 Welcome! This guide will walk you through everything you need to get NovaPulse up and running -- from creating your exchange account to watching your first market scan. No prior experience with trading bots is required.
 

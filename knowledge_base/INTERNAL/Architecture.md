@@ -1,13 +1,13 @@
 # NovaPulse Architecture
 
-**Version:** 4.0.0
-**Last Updated:** 2026-02-22
+**Version:** 4.5.0
+**Last Updated:** 2026-02-24
 
 ---
 
 ## System Overview
 
-NovaPulse is a Python asyncio cryptocurrency trading bot that runs 9 technical analysis strategies in parallel, combines their signals through a confluence engine, validates them with AI/ML models, sizes positions using Kelly Criterion, and executes trades on Kraken or Coinbase exchanges.
+NovaPulse is a Python asyncio multi-asset trading bot that runs 12 technical analysis strategies in parallel across crypto and stock markets, combines their signals through a confluence engine with family diversity scoring, validates them with AI/ML models, sizes positions using Kelly Criterion with correlation-based adjustment, and executes trades on Kraken, Coinbase, and Alpaca exchanges with adaptive exit management.
 
 ```
 +-------------------------------------------------------------------+
@@ -51,23 +51,28 @@ NovaPulse is a Python asyncio cryptocurrency trading bot that runs 9 technical a
          v
 +-------------------------------------------------------------------+
 |                    CONFLUENCE DETECTOR                              |
-|   9 strategies run in parallel per pair per timeframe              |
+|   12 strategies run in parallel per pair per timeframe             |
 |                                                                    |
-|   +----------+  +---------------+  +----------+  +-----------+    |
-|   | Keltner  |  | Mean Reversion|  | Ichimoku |  | Order Flow|    |
-|   | (0.30)   |  | (0.25)        |  | (0.15)   |  | (0.15)    |    |
-|   +----------+  +---------------+  +----------+  +-----------+    |
-|   +----------+  +------------------+  +-----------+               |
-|   | Trend    |  | Stochastic Div   |  | Vol Squeeze|              |
-|   | (0.15)   |  | (0.12)           |  | (0.12)     |              |
-|   +----------+  +------------------+  +-----------+               |
-|   +-----------+  +----------+                                      |
-|   | Supertrend|  | Reversal |                                      |
-|   | (0.10)    |  | (0.10)   |                                      |
-|   +-----------+  +----------+                                      |
+|   +----------+  +---------------+  +-------------+  +-----------+ |
+|   | Keltner  |  | Mean Reversion|  | Vol Squeeze  |  | VWAP Mom  | |
+|   | (0.25)   |  | (0.20)        |  | (0.18)       |  | (0.15)    | |
+|   +----------+  +---------------+  +-------------+  +-----------+ |
+|   +-----------+  +------------------+  +-----------+               |
+|   | Order Flow|  | Market Structure  |  | Supertrend|              |
+|   | (0.12)    |  | (0.12)            |  | (0.12)    |              |
+|   +-----------+  +------------------+  +-----------+               |
+|   +-------------+  +----------+  +------------------+  +--------+ |
+|   | Funding Rate|  | Trend    |  | Stochastic Div   |  |Reversal| |
+|   | (0.10)      |  | (0.08)   |  | (0.06)           |  | (0.06) | |
+|   +-------------+  +----------+  +------------------+  +--------+ |
+|   +-----------+                                                    |
+|   | Ichimoku  |                                                    |
+|   | (0.08)    |                                                    |
+|   +-----------+                                                    |
 |                                                                    |
 |   Multi-Timeframe: 1/5/15 min candles, 2/3 agreement required     |
-|   Regime Detection: Trend/Range x High/Mid/Low Vol                 |
+|   Regime Detection: Trend/Range x High/Mid/Low Vol (cap 2.0x)     |
+|   Family Diversity: 7 families, 3+ bonus, same-family penalty      |
 |   Session Analyzer: Per-hour confidence multiplier                 |
 |   Strategy Guardrails: Auto-disable underperformers                |
 +-------------------------------------------------------------------+
@@ -83,13 +88,15 @@ NovaPulse is a Python asyncio cryptocurrency trading bot that runs 9 technical a
          |
          v
 +-------------------------------------------------------------------+
-|                     RISK MANAGER                                   |
+|                     RISK MANAGER + GLOBAL RISK                     |
 |                                                                    |
 |   Position sizing: Fixed-fractional (primary) + Kelly cap          |
+|   Correlation-based sizing: Pearson corr > 0.7 → reduce size      |
 |   ATR-based SL/TP with percentage floors (2.5% SL, 5.0% TP)      |
 |   Drawdown scaling, volatility regime sizing, streak adjustment    |
 |   Max concurrent positions, correlation group limits               |
 |   Daily loss limit, risk of ruin check, global cooldown on loss    |
+|   GlobalRiskAggregator: cross-engine exposure cap (singleton)      |
 +-------------------------------------------------------------------+
          |
          v
@@ -101,6 +108,8 @@ NovaPulse is a Python asyncio cryptocurrency trading bot that runs 9 technical a
 |   Exit:  Market order with 3-retry typed exception handling        |
 |   Stops: Software trailing + exchange-native stop backstop         |
 |   Smart Exit: Multi-tier partial closes (50%@1xTP, 30%@1.5xTP)   |
+|   Time-based tightening: stagnant positions get TP reduced        |
+|   Vol-regime stops: high_vol wider (1.5x), low_vol tighter (0.7x)|
 +-------------------------------------------------------------------+
          |
          v
@@ -134,7 +143,7 @@ NovaPulse is a Python asyncio cryptocurrency trading bot that runs 9 technical a
 
 | File | Class/Module | Responsibility |
 |------|-------------|----------------|
-| `src/ai/confluence.py` | `ConfluenceDetector` | Runs all 9 strategies in parallel, computes weighted confluence, applies regime/session adjustments |
+| `src/ai/confluence.py` | `ConfluenceDetector` | Runs all 12 strategies in parallel, computes weighted confluence with family diversity, applies regime/session adjustments |
 | `src/ai/predictor.py` | `TFLitePredictor` | TFLite model inference for signal quality scoring |
 | `src/ai/order_book.py` | `OrderBookAnalyzer` | Microstructure analysis: OBI, book score, whale detection |
 | `src/ai/session_analyzer.py` | `SessionAnalyzer` | Per-hour confidence multiplier derived from historical win rates |
@@ -144,7 +153,8 @@ NovaPulse is a Python asyncio cryptocurrency trading bot that runs 9 technical a
 | File | Class/Module | Responsibility |
 |------|-------------|----------------|
 | `src/execution/executor.py` | `TradeExecutor` | Full trade lifecycle: signal validation, order placement, fill monitoring, position management, smart exit |
-| `src/execution/risk_manager.py` | `RiskManager` | Position sizing (Kelly), stop loss management (trailing/breakeven), daily loss limits, cooldowns |
+| `src/execution/risk_manager.py` | `RiskManager` | Position sizing (Kelly + correlation), stop loss management (trailing/breakeven/vol-regime), daily loss limits, cooldowns |
+| `src/execution/global_risk.py` | `GlobalRiskAggregator` | Cross-engine total exposure tracking and cap enforcement (singleton) |
 
 ### Exchange Components
 
@@ -155,6 +165,7 @@ NovaPulse is a Python asyncio cryptocurrency trading bot that runs 9 technical a
 | `src/exchange/coinbase_rest.py` | `CoinbaseRESTClient` | Coinbase Advanced Trade REST API with JWT auth |
 | `src/exchange/coinbase_ws.py` | `CoinbaseWebSocketClient` | Coinbase WebSocket for real-time data |
 | `src/exchange/market_data.py` | `MarketDataCache` | In-memory OHLCV storage using RingBuffers, staleness tracking, spread calculation |
+| `src/exchange/funding_rates.py` | `FundingRateClient` | Kraken Futures public API funding rate fetcher with 5-min TTL cache |
 | `src/exchange/exceptions.py` | Exception hierarchy | `ExchangeError > TransientExchangeError > RateLimitError`, `PermanentExchangeError > AuthenticationError > InsufficientFundsError > InvalidOrderError` |
 
 ---
@@ -170,16 +181,19 @@ NovaPulse is a Python asyncio cryptocurrency trading bot that runs 9 technical a
 4. **ConfluenceDetector.analyze_pair()** runs per timeframe (1/5/15 min):
    - Resamples 1-min OHLCV to higher timeframes
    - Detects regime (trend/range, high/mid/low vol) using ADX + Garman-Klass volatility
-   - Runs all 9 strategies in parallel with 5-second timeout per strategy
-   - Computes weighted confluence: strategy weights x regime multipliers x adaptive performance factor
+   - Fetches funding rates from FundingRateClient (cached, passed via kwargs)
+   - Runs all 12 strategies in parallel with 5-second timeout per strategy
+   - Computes weighted confluence: strategy weights x regime multipliers (capped 2.0x) x adaptive performance factor
+   - Applies opposition penalty (0.07 per opposing, max 0.25)
+   - Applies strategy family diversity bonus/penalty (3+ families: +0.05, same family: -0.05)
    - Applies session-aware multiplier from historical per-hour win rates
    - Combines timeframe results (2/3 agreement required for multi-TF)
 5. **AI verification**: TFLite predictor + continuous online learner blend confidence
 6. **Signal filtering**: minimum confluence count (default 3), minimum confidence (default 0.55), minimum risk-reward ratio, spread check
-7. **RiskManager.calculate_position_size()**: fixed-fractional risk sizing, Kelly cap, drawdown scaling, volatility regime adjustment, exposure limits
+7. **RiskManager.calculate_position_size()**: fixed-fractional risk sizing, Kelly cap, drawdown scaling, volatility regime adjustment, correlation-based reduction (Pearson corr > 0.7 with open positions), global cross-engine exposure check via GlobalRiskAggregator
 8. **TradeExecutor.execute_signal()**: validates signal age, checks gates (quiet hours, rate throttle, duplicate pair, correlation group, cooldown), places limit order
 9. **Order fill**: limit chase with N attempts + market fallback; exchange-native stop-loss placed as crash-proof backstop
-10. **Position management loop** (every 2 seconds): updates trailing stops, checks stop-out/take-profit, runs smart exit tiers
+10. **Position management loop** (every 2 seconds): updates trailing stops (vol-regime-aware step sizing), checks stop-out/take-profit, runs smart exit tiers, applies time-based exit tightening (30/60 min stagnation → TP reduction)
 11. **Trade closure**: market exit order with 3-retry typed exception handling, P&L calculation with entry+exit fees, ML label update, continuous learner feedback
 
 ---
@@ -191,11 +205,11 @@ NovaPulse supports multi-timeframe analysis using 1-minute base candles:
 ```
 1-min candles (base)
     |
-    +-- Resample to 5-min  ---> Run all 9 strategies ---> Per-TF confluence signal
+    +-- Resample to 5-min  ---> Run all 12 strategies ---> Per-TF confluence signal
     |
-    +-- Resample to 15-min ---> Run all 9 strategies ---> Per-TF confluence signal
+    +-- Resample to 15-min ---> Run all 12 strategies ---> Per-TF confluence signal
     |
-    +-- Use 1-min directly ---> Run all 9 strategies ---> Per-TF confluence signal
+    +-- Use 1-min directly ---> Run all 12 strategies ---> Per-TF confluence signal
     |
     v
 Combine timeframes:

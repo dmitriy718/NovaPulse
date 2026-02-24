@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # ==============================================================================
-# NovaPulse v3 — Docker-First Deployment & Operations
+# NovaPulse v4.5 — Docker-First Deployment & Operations
 # ==============================================================================
 #
 # Usage:
@@ -35,7 +35,7 @@ ts() { echo -n "[$(date +%H:%M:%S)] "; }
 banner() {
   echo -e "${CYAN}${BOLD}"
   echo "    ╔══════════════════════════════════════════════╗"
-  echo "    ║         NovaPulse v3.0.0 — Docker Deploy     ║"
+  echo "    ║         NovaPulse v4.5.0 — Docker Deploy     ║"
   echo "    ║       AI Crypto Trading Bot Operations        ║"
   echo "    ╚══════════════════════════════════════════════╝"
   echo -e "${NC}"

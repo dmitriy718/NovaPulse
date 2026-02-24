@@ -1,21 +1,21 @@
 # NovaPulse Trading Engine
 
-**Version:** 4.0.0
-**Last Updated:** 2026-02-22
+**Version:** 4.5.0
+**Last Updated:** 2026-02-24
 
 ---
 
 ## Overview
 
-The NovaPulse trading engine is built around a **multi-strategy confluence model**: nine independent technical analysis strategies run in parallel on every pair, and a trade is only considered when multiple strategies agree on direction. This section covers each strategy in detail, the confluence scoring engine, adaptive weighting, regime detection, multi-timeframe analysis, session-aware trading, the auto-tuner, and strategy guardrails.
+The NovaPulse trading engine is built around a **multi-strategy confluence model**: twelve independent technical analysis strategies run in parallel on every pair, and a trade is only considered when multiple strategies agree on direction. This section covers each strategy in detail, the confluence scoring engine, adaptive weighting, regime detection, multi-timeframe analysis, session-aware trading, the auto-tuner, and strategy guardrails.
 
 ---
 
-## Strategy Lineup (9 Strategies)
+## Strategy Lineup (12 Strategies)
 
 Each strategy has a **base weight** that determines its influence on the final confluence score. Weights are further adjusted by regime multipliers and adaptive performance factors.
 
-### 1. Keltner Channel Rebound (weight: 0.30)
+### 1. Keltner Channel Rebound (weight: 0.25)
 
 **File:** `src/strategies/keltner.py`
 **Class:** `KeltnerStrategy`
@@ -33,7 +33,7 @@ The highest-weighted strategy and historically the most profitable (100% WR in e
 strategies:
   keltner:
     enabled: true
-    weight: 0.30
+    weight: 0.25
     ema_period: 20
     atr_period: 14
     kc_multiplier: 1.5
@@ -45,7 +45,7 @@ strategies:
     rsi_short_min: 60
 ```
 
-### 2. Mean Reversion (weight: 0.25)
+### 2. Mean Reversion (weight: 0.20)
 
 **File:** `src/strategies/mean_reversion.py`
 **Class:** `MeanReversionStrategy`
@@ -63,116 +63,14 @@ Second-highest weight, historically strong (80% WR).
 strategies:
   mean_reversion:
     enabled: true
-    weight: 0.25
+    weight: 0.20
     bb_period: 20
     bb_std: 2.0
     rsi_oversold: 30
     rsi_overbought: 70
 ```
 
-### 3. Ichimoku Cloud (weight: 0.15)
-
-**File:** `src/strategies/ichimoku.py`
-**Class:** `IchimokuStrategy`
-
-Replaced VWAP Momentum Alpha in v4.0.
-
-**Logic:**
-- Computes all 5 Ichimoku lines: Tenkan-sen, Kijun-sen, Senkou Span A/B, Chikou Span
-- LONG signal: Tenkan crosses above Kijun + price above cloud + Chikou above past price
-- SHORT signal: Tenkan crosses below Kijun + price below cloud + Chikou below past price
-- ATR-based SL/TP with percentage floors
-
-**Config keys:**
-```yaml
-strategies:
-  ichimoku:
-    enabled: true
-    weight: 0.15
-    tenkan_period: 9
-    kijun_period: 26
-    senkou_b_period: 52
-    atr_period: 14
-```
-
-### 4. Order Flow (weight: 0.15)
-
-**File:** `src/strategies/order_flow.py`
-**Class:** `OrderFlowStrategy`
-
-New in v4.0. Uses real-time order book microstructure data from WebSocket.
-
-**Logic:**
-- Reads book_score from `OrderBookAnalyzer` (computed in `src/ai/order_book.py`)
-- LONG signal: book_score > threshold + spread tight + price near recent lows
-- SHORT signal: book_score < -threshold + spread tight + price near recent highs
-- Requires fresh book data (max 5 seconds old)
-
-**Config keys:**
-```yaml
-strategies:
-  order_flow:
-    enabled: true
-    weight: 0.15
-    book_score_threshold: 0.3
-    spread_tight_pct: 0.0010
-    hl_lookback: 5
-    max_book_age_seconds: 5
-    atr_period: 14
-```
-
-### 5. Trend (weight: 0.15)
-
-**File:** `src/strategies/trend.py`
-**Class:** `TrendStrategy`
-
-Classic EMA crossover with ADX trend strength filter.
-
-**Logic:**
-- LONG signal: EMA(5) crosses above EMA(13) + ADX > 25 (confirming trend)
-- SHORT signal: EMA(5) crosses below EMA(13) + ADX > 25
-- Only fires in trending markets (ADX threshold)
-
-**Config keys:**
-```yaml
-strategies:
-  trend:
-    enabled: true
-    weight: 0.15
-    ema_fast: 5
-    ema_slow: 13
-    adx_threshold: 25
-```
-
-### 6. Stochastic Divergence (weight: 0.12)
-
-**File:** `src/strategies/stochastic_divergence.py`
-**Class:** `StochasticDivergenceStrategy`
-
-New in v4.0. Replaced RSI Mean Reversion.
-
-**Logic:**
-- Computes Stochastic %K/%D oscillator
-- Detects divergence: price makes new low but stochastic does not (bullish divergence) or vice versa
-- LONG signal: bullish divergence + stochastic in oversold zone (< 20)
-- SHORT signal: bearish divergence + stochastic in overbought zone (> 80)
-
-**Config keys:**
-```yaml
-strategies:
-  stochastic_divergence:
-    enabled: true
-    weight: 0.12
-    k_period: 14
-    d_period: 3
-    smooth: 3
-    oversold: 20.0
-    overbought: 80.0
-    divergence_lookback: 20
-    atr_period: 14
-```
-
-### 7. Volatility Squeeze (weight: 0.12)
+### 3. Volatility Squeeze (weight: 0.18)
 
 **File:** `src/strategies/volatility_squeeze.py`
 **Class:** `VolatilitySqueezeStrategy`
@@ -191,7 +89,7 @@ New in v4.0. Replaced Breakout. Based on the TTM Squeeze concept.
 strategies:
   volatility_squeeze:
     enabled: true
-    weight: 0.12
+    weight: 0.18
     bb_period: 20
     bb_std: 2.0
     kc_ema_period: 20
@@ -202,7 +100,87 @@ strategies:
     min_squeeze_bars: 3
 ```
 
-### 8. Supertrend (weight: 0.10)
+### 4. VWAP Momentum Alpha (weight: 0.15)
+
+**File:** `src/strategies/vwap_momentum_alpha.py`
+**Class:** `VWAPMomentumAlphaStrategy`
+
+Re-introduced in v4.5.0. Uses volume-weighted average price bands and slope analysis to identify high-probability pullback entries.
+
+**Logic:**
+- Computes VWAP and upper/lower bands based on rolling standard deviation
+- LONG signal: price pulls back to lower VWAP band in uptrend + volume above average + VWAP slope positive
+- SHORT signal: price rises to upper VWAP band in downtrend + volume above average + VWAP slope negative
+- SL: 2.0x ATR, TP: 3.0x ATR
+
+**Config keys:**
+```yaml
+strategies:
+  vwap_momentum_alpha:
+    enabled: true
+    weight: 0.15
+    vwap_window: 20
+    band_std: 1.5
+    pullback_z: 0.6
+    slope_period: 5
+    volume_multiplier: 1.0
+    slope_min_pct: 0.0005
+```
+
+### 5. Order Flow (weight: 0.12)
+
+**File:** `src/strategies/order_flow.py`
+**Class:** `OrderFlowStrategy`
+
+New in v4.0. Uses real-time order book microstructure data from WebSocket.
+
+**Logic:**
+- Reads book_score from `OrderBookAnalyzer` (computed in `src/ai/order_book.py`)
+- LONG signal: book_score > threshold + spread tight + price near recent lows
+- SHORT signal: book_score < -threshold + spread tight + price near recent highs
+- Requires fresh book data (max 5 seconds old)
+
+**Config keys:**
+```yaml
+strategies:
+  order_flow:
+    enabled: true
+    weight: 0.12
+    book_score_threshold: 0.3
+    spread_tight_pct: 0.0010
+    hl_lookback: 5
+    max_book_age_seconds: 5
+    atr_period: 14
+```
+
+### 6. Market Structure (weight: 0.12)
+
+**File:** `src/strategies/market_structure.py`
+**Class:** `MarketStructureStrategy`
+
+New in v4.5.0. Identifies market structure shifts by tracking swing highs and swing lows.
+
+**Logic:**
+- Identifies swing highs and swing lows using an N-bar lookback window (default 5)
+- Higher-High + Higher-Low pattern = uptrend; Lower-High + Lower-Low = downtrend (requires a minimum of 2 swing points in each direction to confirm)
+- LONG signal: price pulls back within `pullback_tolerance_pct` of the previous swing low in an uptrend + RSI > `rsi_floor` + volume above average
+- SHORT signal: mirror of LONG conditions in a downtrend (price near prev swing high + RSI < `rsi_ceiling` + volume)
+- SL: 2.0x ATR, TP: 3.5x ATR
+
+**Config keys:**
+```yaml
+strategies:
+  market_structure:
+    enabled: true
+    weight: 0.12
+    swing_lookback: 5
+    pullback_tolerance_pct: 0.005
+    rsi_floor: 35
+    rsi_ceiling: 65
+    atr_period: 14
+```
+
+### 7. Supertrend (weight: 0.12)
 
 **File:** `src/strategies/supertrend.py`
 **Class:** `SupertrendStrategy`
@@ -220,7 +198,7 @@ New in v4.0. ATR-based adaptive trend following with volume confirmation.
 strategies:
   supertrend:
     enabled: true
-    weight: 0.10
+    weight: 0.12
     st_period: 10
     st_multiplier: 3.0
     volume_period: 20
@@ -228,7 +206,111 @@ strategies:
     atr_period: 14
 ```
 
-### 9. Reversal (weight: 0.10)
+### 8. Funding Rate (weight: 0.10)
+
+**File:** `src/strategies/funding_rate.py`
+**Class:** `FundingRateStrategy`
+
+New in v4.5.0. Exploits extreme funding rate imbalances as a contrarian signal.
+
+**Data source:** `src/exchange/funding_rates.py` -- fetches from the Kraken Futures public API with a 5-minute TTL cache.
+
+**Logic:**
+- Receives the current funding rate via `kwargs` passed from the engine
+- Extreme negative funding rate (< -0.01%) + RSI crossing above 50 + momentum turning positive --> LONG (shorts are overcrowded, squeeze likely)
+- Extreme positive funding rate (> 0.01%) + RSI crossing below 50 + momentum turning negative --> SHORT (longs are overcrowded)
+- ADX > 40 gating: the strategy will NOT fire against a strong established trend (ADX above 40), preventing it from fighting momentum
+- SL: 2.0x ATR, TP: 3.0x ATR
+
+**Config keys:**
+```yaml
+strategies:
+  funding_rate:
+    enabled: true
+    weight: 0.10
+    funding_extreme_pct: 0.01
+```
+
+### 9. Trend (weight: 0.08)
+
+**File:** `src/strategies/trend.py`
+**Class:** `TrendStrategy`
+
+Classic EMA crossover with ADX trend strength filter.
+
+**Logic:**
+- LONG signal: EMA(5) crosses above EMA(13) + ADX > 25 (confirming trend)
+- SHORT signal: EMA(5) crosses below EMA(13) + ADX > 25
+- Only fires in trending markets (ADX threshold)
+
+> **Note:** As of v4.5.0, the `require_fresh_cross: true` parameter is enabled by default. This ensures the strategy only fires on the actual bar where the EMA crossover occurs, preventing stale re-fires on subsequent bars where the EMAs remain crossed. This significantly reduces false signals in prolonged trends.
+
+**Config keys:**
+```yaml
+strategies:
+  trend:
+    enabled: true
+    weight: 0.08
+    ema_fast: 5
+    ema_slow: 13
+    adx_threshold: 25
+    require_fresh_cross: true
+```
+
+### 10. Ichimoku Cloud (weight: 0.08)
+
+**File:** `src/strategies/ichimoku.py`
+**Class:** `IchimokuStrategy`
+
+Replaced VWAP Momentum Alpha in v4.0; coexists with the re-introduced VWAP Momentum Alpha as of v4.5.0.
+
+**Logic:**
+- Computes all 5 Ichimoku lines: Tenkan-sen, Kijun-sen, Senkou Span A/B, Chikou Span
+- LONG signal: Tenkan crosses above Kijun + price above cloud + Chikou above past price
+- SHORT signal: Tenkan crosses below Kijun + price below cloud + Chikou below past price
+- ATR-based SL/TP with percentage floors
+
+**Config keys:**
+```yaml
+strategies:
+  ichimoku:
+    enabled: true
+    weight: 0.08
+    tenkan_period: 9
+    kijun_period: 26
+    senkou_b_period: 52
+    atr_period: 14
+```
+
+### 11. Stochastic Divergence (weight: 0.06)
+
+**File:** `src/strategies/stochastic_divergence.py`
+**Class:** `StochasticDivergenceStrategy`
+
+New in v4.0. Replaced RSI Mean Reversion.
+
+**Logic:**
+- Computes Stochastic %K/%D oscillator
+- Detects divergence: price makes new low but stochastic does not (bullish divergence) or vice versa
+- LONG signal: bullish divergence + stochastic in oversold zone (< 20)
+- SHORT signal: bearish divergence + stochastic in overbought zone (> 80)
+
+**Config keys:**
+```yaml
+strategies:
+  stochastic_divergence:
+    enabled: true
+    weight: 0.06
+    k_period: 14
+    d_period: 3
+    smooth: 3
+    oversold: 20.0
+    overbought: 80.0
+    divergence_lookback: 20
+    atr_period: 14
+```
+
+### 12. Reversal (weight: 0.06)
 
 **File:** `src/strategies/reversal.py`
 **Class:** `ReversalStrategy`
@@ -245,7 +327,7 @@ Extreme RSI with candlestick confirmation.
 strategies:
   reversal:
     enabled: true
-    weight: 0.10
+    weight: 0.06
     rsi_extreme_low: 20
     rsi_extreme_high: 80
     confirmation_candles: 3
@@ -267,13 +349,15 @@ Per pair, per timeframe:
   1. Fetch OHLCV data from MarketDataCache
   2. Optionally resample to higher timeframe (5m, 15m)
   3. Detect market regime (trend/range, vol level)
-  4. Run all 9 strategies in parallel (5s timeout each)
-  5. Apply cooldown filtering per strategy
-  6. Compute weighted confluence score
-  7. Add OBI/book_score as synthetic signal (if enabled)
-  8. Apply session-aware multiplier
-  9. Detect "Sure Fire" setup (3+ strategies + OBI agreement)
-  10. Combine timeframe results (2/3 agreement)
+  4. Fetch funding rate from funding_rates module (5-min TTL cache)
+  5. Run all 12 strategies in parallel (5s timeout each)
+     - Funding rate passed to strategies via kwargs
+  6. Apply cooldown filtering per strategy
+  7. Compute weighted confluence score
+  8. Add OBI/book_score as synthetic signal (if enabled)
+  9. Apply session-aware multiplier
+  10. Detect "Sure Fire" setup (3+ strategies + OBI agreement)
+  11. Combine timeframe results (2/3 agreement)
 ```
 
 ### Weighted Confluence Scoring
@@ -295,7 +379,23 @@ weighted_confidence = SUM(signal.confidence * effective_weight) / SUM(effective_
 
 **Confluence bonus:** Each additional agreeing strategy beyond the first adds +0.10 to confidence (capped at +0.30).
 
-**Opposition penalty:** Each strategy actively signaling the opposite direction reduces confidence by 0.04 (capped at -0.12).
+**Opposition penalty:** Each strategy actively signaling the opposite direction reduces confidence by 0.07 (capped at -0.25).
+
+**Regime multiplier cap:** All regime multipliers are clamped via `min(mult, 2.0)` to prevent excessive stacking in favorable regimes.
+
+### Strategy Family Diversity
+
+As of v4.5.0, the confluence engine considers strategy family diversity when computing confidence. Each strategy belongs to one of the following families:
+
+- **mean_reversion**: Keltner, Mean Reversion, Stochastic Divergence, Reversal
+- **trend_following**: Trend, Ichimoku, Supertrend
+- **momentum**: Volatility Squeeze
+- **microstructure**: Order Flow
+- **vwap**: VWAP Momentum Alpha
+- **structure**: Market Structure
+- **sentiment**: Funding Rate
+
+When 3 or more unique families contribute agreeing signals, the confluence score receives a **+0.05 confidence bonus** (diverse agreement is higher conviction). When all agreeing signals come from the same family, a **-0.05 confidence penalty** is applied (single-dimension agreement is lower conviction).
 
 ### "Sure Fire" Detection
 
@@ -314,6 +414,10 @@ When `obi_counts_as_confluence: true` (config), OBI acts as a synthetic strategy
 - The synthetic signal uses weight `obi_weight` (default 0.4)
 
 When `obi_counts_as_confluence: false`, OBI only provides a small confidence bump (+0.05) when it agrees with direction.
+
+### Funding Rate Data Flow
+
+The engine fetches the current funding rate for each pair via `src/exchange/funding_rates.py` before running strategies. The funding rate module queries the Kraken Futures public API and maintains a 5-minute TTL cache to avoid excessive API calls. The rate is passed to all strategies through `kwargs["funding_rate"]`, but only the `FundingRateStrategy` acts on it.
 
 ---
 
@@ -349,12 +453,15 @@ Each regime applies multipliers to strategy weights:
 |----------|-----------|-----------|---------------|-------------|
 | Keltner | 0.9 | 1.2 | -- | 1.1 |
 | Mean Reversion | 0.8 | 1.3 | 0.9 | 1.2 |
-| Ichimoku | 1.2 | 0.8 | -- | 0.9 |
-| Order Flow | 1.1 | 1.1 | 1.1 | -- |
-| Trend | 1.3 | 0.8 | -- | -- |
-| Stoch Divergence | 0.8 | 1.3 | 0.9 | 1.2 |
 | Vol Squeeze | 1.1 | 0.9 | 1.3 | 0.8 |
+| VWAP Momentum Alpha | 1.0 | 1.1 | 0.9 | 1.1 |
+| Order Flow | 1.1 | 1.1 | 1.1 | -- |
+| Market Structure | 1.2 | 0.9 | 1.0 | 1.0 |
 | Supertrend | 1.2 | 0.8 | 1.1 | 0.9 |
+| Funding Rate | 0.8 | 1.2 | 1.2 | 0.9 |
+| Trend | 1.3 | 0.8 | -- | -- |
+| Ichimoku | 1.2 | 0.8 | -- | 0.9 |
+| Stoch Divergence | 0.8 | 1.3 | 0.9 | 1.2 |
 | Reversal | 0.7 | 1.1 | 0.9 | -- |
 
 These are configurable via `ai.regime.*_weight_multipliers` in config.yaml.
@@ -368,11 +475,11 @@ NovaPulse can analyze multiple timeframes using 1-minute candles as the base:
 ```
 1-min candles (base, always present)
     |
-    +-- Resample to 5-min  --> Run 9 strategies --> Per-TF signal
+    +-- Resample to 5-min  --> Run 12 strategies --> Per-TF signal
     |
-    +-- Resample to 15-min --> Run 9 strategies --> Per-TF signal
+    +-- Resample to 15-min --> Run 12 strategies --> Per-TF signal
     |
-    +-- Use 1-min directly --> Run 9 strategies --> Per-TF signal
+    +-- Use 1-min directly --> Run 12 strategies --> Per-TF signal
     |
     v
 Combine timeframes (see below)

@@ -1,6 +1,6 @@
 # NovaPulse Dashboard Walkthrough
 
-**Last updated:** 2026-02-22
+**Last updated:** 2026-02-24
 
 Your NovaPulse dashboard is your command center -- the single place where you can see everything the bot is doing, review its performance, and take control when needed. This guide explains every section in detail.
 

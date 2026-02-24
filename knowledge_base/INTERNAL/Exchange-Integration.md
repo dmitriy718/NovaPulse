@@ -1,17 +1,26 @@
 # NovaPulse Exchange Integration
 
-**Version:** 4.0.0
-**Last Updated:** 2026-02-22
+**Version:** 4.5.0
+**Last Updated:** 2026-02-24
 
 ---
 
 ## Overview
 
-NovaPulse integrates with two cryptocurrency exchanges:
+NovaPulse integrates with three exchanges across two asset classes:
+
+**Crypto:**
 - **Kraken** (primary): WebSocket v2 for real-time data + REST for orders and historical data
 - **Coinbase** (secondary): Advanced Trade REST API with JWT auth + WebSocket for real-time data
 
-Both exchanges are wrapped behind a common interface so the engine, executor, and risk manager are exchange-agnostic.
+**Stocks:**
+- **Alpaca** (stocks): REST API for order execution (`src/stocks/alpaca_client.py`)
+- **Polygon** (market data): REST API for daily OHLCV bars and universe scanning (`src/stocks/polygon_client.py`)
+
+**Supplementary:**
+- **Kraken Futures** (funding rates): Public API for perpetual funding rate data (`src/exchange/funding_rates.py`), 5-min TTL cache, no auth required
+
+Crypto exchanges are wrapped behind a common interface so the engine, executor, and risk manager are exchange-agnostic. The stock engine uses a dedicated `StockSwingEngine` with its own data pipeline.
 
 ---
 

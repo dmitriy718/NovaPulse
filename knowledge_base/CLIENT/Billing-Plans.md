@@ -1,6 +1,6 @@
 # Billing and Plans
 
-**Last updated:** 2026-02-22
+**Last updated:** 2026-02-24
 
 NovaPulse offers two subscription plans to fit your trading needs. Both plans include the core NovaPulse trading engine with all nine strategies and full risk management. The difference is in the number of exchanges, pairs, and support level.
 

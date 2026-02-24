@@ -91,6 +91,7 @@ class BotEngine:
         self.db: Optional[DatabaseManager] = None
         self.rest_client: Optional[Any] = None
         self.ws_client: Optional[Any] = None
+        self.funding_rate_client: Optional[Any] = None
         self.market_data: Optional[MarketDataCache] = None
         self.confluence: Optional[ConfluenceDetector] = None
         self.predictor: Optional[TFLitePredictor] = None
@@ -712,6 +713,27 @@ class BotEngine:
             self.confluence.set_cooldown_checker(
                 self.risk_manager.is_strategy_on_cooldown
             )
+
+        # Funding Rate Client (non-critical: falls back gracefully if fetch fails)
+        try:
+            from src.exchange.funding_rates import FundingRateClient
+            self.funding_rate_client = FundingRateClient()
+            logger.info("Funding rate client initialized")
+        except Exception as e:
+            logger.warning("Funding rate client init failed (non-fatal)", error=repr(e))
+
+        # Global Risk Aggregator (cross-engine exposure cap)
+        try:
+            from src.execution.global_risk import GlobalRiskAggregator
+            aggregator = GlobalRiskAggregator()
+            # Configure global cap as bankroll × exposure_pct (same as local max)
+            aggregator.configure(
+                max_total_exposure_usd=initial_bankroll * float(
+                    getattr(self.config.risk, "max_total_exposure_pct", 0.50)
+                )
+            )
+        except Exception as e:
+            logger.warning("Global risk aggregator init failed (non-fatal)", error=repr(e))
 
         # Trade Executor
         self.executor = TradeExecutor(
@@ -1371,6 +1393,36 @@ class BotEngine:
                     logger.warning("Confluence detector not initialized, skipping scan")
                     await asyncio.sleep(self.scan_interval)
                     continue
+
+                # Fetch funding rates (cheap due to 5-min cache) and update price history
+                if self.funding_rate_client:
+                    try:
+                        rates = await self.funding_rate_client.get_all_rates()
+                        self.confluence.set_funding_rates(rates)
+                    except Exception:
+                        pass
+                # Update price history for correlation-based sizing
+                if self.risk_manager and self.market_data:
+                    for p in pairs_to_scan:
+                        try:
+                            px = self.market_data.get_latest_price(p)
+                            if px and px > 0:
+                                self.risk_manager.update_price(p, px)
+                        except Exception:
+                            pass
+                # Update global risk aggregator with current exposure
+                try:
+                    from src.execution.global_risk import GlobalRiskAggregator
+                    agg = GlobalRiskAggregator()
+                    engine_id = f"{self.exchange_name}:{self.account_id}"
+                    exposure = sum(
+                        pos.get("size_usd", 0)
+                        for pos in self.risk_manager._open_positions.values()
+                    ) if self.risk_manager else 0.0
+                    await agg.register_exposure(engine_id, exposure)
+                except Exception:
+                    pass
+
                 confluence_signals = await self.confluence.scan_all_pairs(
                     pairs_to_scan
                 )
@@ -1606,6 +1658,8 @@ class BotEngine:
         while self._running:
             try:
                 if self.executor:
+                    # Ensure daily counters reset even if no trades are placed
+                    self.executor.risk_manager.check_daily_reset()
                     await self.executor.manage_open_positions()
                 await asyncio.sleep(interval)
             except asyncio.CancelledError:

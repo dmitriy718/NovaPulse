@@ -380,11 +380,16 @@ class KrakenWebSocketClient:
         return self._connected and self._ws is not None
 
     @property
-    def latency_ms(self) -> float:
+    def avg_heartbeat_interval_ms(self) -> float:
         """Get average heartbeat interval in milliseconds (proxy for connection health)."""
         if not self._latency_samples:
             return 0.0
         return sum(self._latency_samples) / len(self._latency_samples)
+
+    @property
+    def latency_ms(self) -> float:
+        """Alias for avg_heartbeat_interval_ms (backward compat)."""
+        return self.avg_heartbeat_interval_ms
 
     @property
     def seconds_since_heartbeat(self) -> float:

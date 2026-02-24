@@ -178,7 +178,7 @@ class VolatilitySqueezeStrategy(BaseStrategy):
                 strength += 0.08
                 confidence += 0.05
 
-            if not mom_accelerating:  # Momentum accelerating to downside
+            if mom_accelerating:  # Momentum accelerating to downside
                 strength += 0.10
                 confidence += 0.08
 
