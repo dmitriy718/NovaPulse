@@ -1,61 +1,69 @@
-# NovaPulse (v4.1.1)
+# NovaPulse (v4.5.0)
 
-Operator-grade AI crypto trading system: multi-strategy signal engine, risk-first execution, hardened control plane, and continuous self-improvement (guardrailed).
+Operator-grade AI trading system: multi-strategy signal engine across crypto and stocks, risk-first execution with adaptive exits, hardened control plane, and continuous self-improvement.
 
-## What You Get (35+ Features)
+## What You Get (55+ Features)
 
 Trading + Intelligence:
-1. Multi-pair market scanning (configurable interval, 8 default crypto pairs)
-2. Multi-exchange support (Kraken WS v2 + REST, Coinbase Advanced Trade)
-3. Nine parallel TA strategies (Keltner, Mean Reversion, Ichimoku, Order Flow, Trend, Stochastic Divergence, Volatility Squeeze, Supertrend, Reversal)
+1. Multi-pair market scanning (configurable interval, 8 default crypto pairs + 96 dynamic stocks)
+2. Multi-exchange support (Kraken WS v2 + REST, Coinbase Advanced Trade, Alpaca stocks)
+3. Twelve parallel TA strategies (Keltner, Mean Reversion, Volatility Squeeze, VWAP Momentum Alpha, Order Flow, Market Structure, Supertrend, Funding Rate, Trend, Ichimoku, Stochastic Divergence, Reversal)
 4. Strategy confluence scoring with adaptive weighting (Sharpe-based sliding window)
-5. Multi-timeframe analysis (1/5/15-min candles, 2/3 agreement required)
-6. Volatility regime detection (Garman-Klass) with regime-specific strategy weight multipliers
-7. Order-book microstructure weighting (imbalance + spoof heuristics)
-8. AI entry gating model (TFLite when available; safe fallback when not)
-9. Continuous learner (online SGD, incremental) for non-blocking improvement over time
-10. Session-aware trading (per-hour confidence multipliers from historical win rates)
-11. Auto Strategy Tuner (weekly performance analysis, auto-disable underperformers)
-12. Paper trading mode (default) and live trading mode (explicit enable)
-13. Backtester (same logic as live path; used for promotion gates)
-14. Feature logging for every decision (for later supervised training)
+5. Strategy family diversity scoring (7 families: mean reversion, trend following, momentum, microstructure, VWAP, structure, sentiment)
+6. Multi-timeframe analysis (1/5/15-min candles, 2/3 agreement required)
+7. Volatility regime detection (Garman-Klass) with regime-specific strategy weight multipliers (capped at 2.0x)
+8. Order-book microstructure weighting (imbalance + spoof heuristics)
+9. Funding rate integration (Kraken Futures perpetual funding rates as sentiment signal)
+10. AI entry gating model (TFLite when available; safe fallback when not)
+11. Continuous learner (online SGD, incremental) for non-blocking improvement over time
+12. Session-aware trading (per-hour confidence multipliers from historical win rates)
+13. Auto Strategy Tuner (weekly performance analysis, auto-disable underperformers)
+14. Dynamic stock universe scanner (96 stocks: 4 pinned + 92 by volume, hourly refresh)
+15. Paper trading mode (default) and live trading mode (explicit enable)
+16. Backtester (same logic as live path; used for promotion gates)
+17. Feature logging for every decision (for later supervised training)
 
 Execution + Risk:
-15. Kelly Criterion position sizing (quarter-Kelly with cap) + fixed-fractional fallback
-16. ATR-based initial stop loss and take profit with percentage-based floors (2.5% SL / 5.0% TP)
-17. Dynamic trailing stops (configurable activation + step size)
-18. Breakeven activation logic (moves SL to entry after configurable profit)
-19. Smart exit system (multi-tier partial position closing at 1x, 1.5x, trailing)
-20. Risk-of-ruin monitoring and exposure throttling
-21. Daily loss limit and drawdown-scaled sizing
-22. Trade cooldowns (global + per-strategy, configurable per strategy)
-23. Max concurrent positions with correlation group limiting (prevents overexposure to similar assets)
-24. Slippage/spread sanity checks (configurable)
-25. Circuit breakers (stale data, WS disconnect, consecutive losses, drawdown) that auto-pause trading
-26. Exchange-native stop orders as crash-proof backstop (survives bot downtime)
-27. Trade rate throttle and quiet hours filtering
-28. Typed exchange exception hierarchy (transient vs permanent errors, smart retry)
-29. Single-instance host lock to prevent double-trading on the same volume
+18. Kelly Criterion position sizing (quarter-Kelly with cap) + fixed-fractional fallback
+19. Correlation-based position sizing (Pearson corr > 0.7 → automatic size reduction)
+20. Cross-engine risk aggregation (GlobalRiskAggregator caps total exposure across all exchanges)
+21. ATR-based initial stop loss and take profit with percentage-based floors (2.5% SL / 5.0% TP)
+22. Dynamic trailing stops (configurable activation + step size)
+23. Volatility-regime-aware trailing stops (wider in high vol, tighter in low vol)
+24. Breakeven activation logic (moves SL to entry after configurable profit)
+25. Smart exit system (multi-tier partial position closing at 1x, 1.5x, trailing)
+26. Time-based exit tightening (stagnant positions get targets reduced)
+27. Risk-of-ruin monitoring and exposure throttling
+28. Daily loss limit and drawdown-scaled sizing
+29. Trade cooldowns (global + per-strategy, configurable per strategy)
+30. Max concurrent positions with correlation group limiting
+31. Slippage/spread sanity checks (configurable)
+32. Circuit breakers (stale data, WS disconnect, consecutive losses, drawdown) that auto-pause trading
+33. Exchange-native stop orders as crash-proof backstop (survives bot downtime)
+34. Trade rate throttle and quiet hours filtering
+35. Typed exchange exception hierarchy (transient vs permanent errors, smart retry)
+36. Single-instance host lock to prevent double-trading on the same volume
 
 Control Plane + Observability:
-30. FastAPI dashboard (40+ REST endpoints + WebSocket live stream)
-31. Secure-by-default auth: web login session (httpOnly cookie) or API keys
-32. Key scoping: separate read key vs admin/control key (admin-only by default)
-33. CSRF protection for cookie-auth control actions (double-submit token)
-34. Rate limiting (token bucket; per-IP with stale eviction) + login brute-force protection
-35. Security headers + `Cache-Control: no-store` for API responses
-36. Audit log stream ("thought log") for all decisions and operator actions
-37. Telegram command center (15+ commands: status, pnl, positions, risk, health, strategies, pause/resume, close_all, kill) + scheduled 30-min check-ins
-38. Discord and Slack bot integrations with slash commands
-39. CSV export of trades for reconciliation
-40. 72-96 hour stress monitor (API/WS/data freshness/activity) with auth support
-41. Signed signal webhook intake (`/api/v1/signals/webhook`) with idempotency tracking
-42. Backtest + optimization API endpoints (`/api/v1/backtest/run`, `/api/v1/backtest/optimize`)
-43. Strategy marketplace templates + apply endpoint
-44. Copy-trading provider registry (tenant-scoped)
-45. Ops heartbeat endpoint + VPS watchdog helper (`scripts/vps_watchdog.py`)
-46. Stripe billing integration (Pro/Premium plans) with multi-tenant isolation
-47. Elasticsearch analytics mirror (trades, candles, orderbook, sentiment, on-chain)
+37. FastAPI dashboard (40+ REST endpoints + WebSocket live stream)
+38. Secure-by-default auth: web login session (httpOnly cookie) or API keys
+39. Key scoping: separate read key vs admin/control key (admin-only by default)
+40. CSRF protection for cookie-auth control actions (double-submit token)
+41. Rate limiting (token bucket; per-IP with stale eviction) + login brute-force protection
+42. Security headers + `Cache-Control: no-store` for API responses
+43. Audit log stream ("thought log") for all decisions and operator actions
+44. Telegram command center (15+ commands: status, pnl, positions, risk, health, strategies, pause/resume, close_all, kill) + scheduled 30-min check-ins
+45. Discord and Slack bot integrations with slash commands
+46. CSV export of trades for reconciliation
+47. 72-96 hour stress monitor (API/WS/data freshness/activity) with auth support
+48. Signed signal webhook intake (`/api/v1/signals/webhook`) with idempotency tracking
+49. Backtest + optimization API endpoints (`/api/v1/backtest/run`, `/api/v1/backtest/optimize`)
+50. Strategy marketplace templates + apply endpoint
+51. Copy-trading provider registry (tenant-scoped)
+52. Ops heartbeat endpoint + VPS watchdog helper (`scripts/vps_watchdog.py`)
+53. Stripe billing integration (Pro/Premium plans) with multi-tenant isolation
+54. Elasticsearch analytics mirror (trades, candles, orderbook, sentiment, on-chain)
+55. Priority scheduler (auto-switches between crypto and stock trading based on market hours)
 
 Resilience:
 - **Graceful Error Handler** ("Trade or Die"): classifies errors as CRITICAL / DEGRADED / TRANSIENT. Only exchange-auth or database failures stop trading. All other subsystem failures (Telegram, Discord, Slack, dashboard, ML, billing) are logged and skipped so the bot keeps trading.
@@ -169,24 +177,49 @@ python scripts/vps_watchdog.py --url "http://127.0.0.1:8090/api/v1/ops/heartbeat
 main.py (lifecycle supervisor with retry + jitter)
   |
   +-- GracefulErrorHandler ("Trade or Die" error classification)
+  +-- PriorityScheduler (crypto vs stocks session routing)
   +-- BotEngine (single-exchange) or MultiEngineHub (multi-exchange)
-       |
-       +-- KrakenRESTClient / CoinbaseRESTClient
-       +-- KrakenWebSocketClient / CoinbaseWebSocketClient
-       +-- MarketDataCache (RingBuffer-backed OHLCV per pair)
-       +-- ConfluenceDetector (9 strategies + regime detection + MTF)
-       +-- TFLitePredictor (optional AI gating)
-       +-- ContinuousLearner (online SGD)
-       +-- OrderBookAnalyzer (microstructure scoring)
-       +-- RiskManager (Kelly, trailing stops, circuit breakers)
-       +-- TradeExecutor (limit orders, paper/live, partial fills)
-       +-- DatabaseManager (SQLite WAL, multi-tenant, canonical ledger)
-       +-- Elasticsearch pipeline (analytics/enrichment mirror, non-canonical)
-       +-- DashboardServer (FastAPI + WebSocket)
-       +-- ControlRouter -> TelegramBot / DiscordBot / SlackBot
-       +-- ModelTrainer + AutoRetrainer (ProcessPoolExecutor)
-       +-- StripeService (billing webhooks)
+  |    |
+  |    +-- KrakenRESTClient / CoinbaseRESTClient
+  |    +-- KrakenWebSocketClient / CoinbaseWebSocketClient
+  |    +-- FundingRateClient (Kraken Futures public API)
+  |    +-- MarketDataCache (RingBuffer-backed OHLCV per pair)
+  |    +-- ConfluenceDetector (12 strategies + regime detection + MTF + family diversity)
+  |    +-- TFLitePredictor (optional AI gating)
+  |    +-- ContinuousLearner (online SGD)
+  |    +-- OrderBookAnalyzer (microstructure scoring)
+  |    +-- RiskManager (Kelly, trailing stops, circuit breakers, correlation sizing)
+  |    +-- GlobalRiskAggregator (cross-engine exposure cap)
+  |    +-- TradeExecutor (limit orders, paper/live, partial fills, adaptive exits)
+  |    +-- DatabaseManager (SQLite WAL, multi-tenant, canonical ledger)
+  |    +-- Elasticsearch pipeline (analytics/enrichment mirror, non-canonical)
+  |    +-- DashboardServer (FastAPI + WebSocket)
+  |    +-- ControlRouter -> TelegramBot / DiscordBot / SlackBot
+  |    +-- ModelTrainer + AutoRetrainer (ProcessPoolExecutor)
+  |    +-- StripeService (billing webhooks)
+  |
+  +-- StockSwingEngine
+       +-- PolygonClient (daily bars)
+       +-- AlpacaClient (order execution)
+       +-- UniverseScanner (96 dynamic stocks)
 ```
+
+## Strategy Portfolio (12 Strategies)
+
+| Strategy | Weight | Family | Signal Basis |
+|----------|--------|--------|--------------|
+| Keltner Channel | 0.25 | Mean Reversion | KC band rebounds + MACD/RSI |
+| Mean Reversion | 0.20 | Mean Reversion | BB extremes + RSI divergence |
+| Volatility Squeeze | 0.18 | Momentum | TTM Squeeze (BB inside KC) + breakout |
+| VWAP Momentum Alpha | 0.15 | VWAP | VWAP pullbacks in trending markets |
+| Order Flow | 0.12 | Microstructure | Order book imbalance + spread |
+| Market Structure | 0.12 | Structure | Swing HH/HL/LH/LL + pullback |
+| Supertrend | 0.12 | Trend Following | ATR-based trend flips + volume |
+| Funding Rate | 0.10 | Sentiment | Perpetual funding rate extremes |
+| Trend | 0.08 | Trend Following | Fresh EMA cross + ADX filter |
+| Ichimoku | 0.08 | Trend Following | Cloud/TK cross system |
+| Stochastic Divergence | 0.06 | Mean Reversion | Stochastic K/D + price divergence |
+| Reversal | 0.06 | Mean Reversion | Extreme RSI + confirmation candles |
 
 ## Persistence Contract and Storage Paths
 
@@ -199,7 +232,7 @@ Where data is saved:
 
 - Crypto engine DB (single account): `data/trading.db`
 - Crypto engine DB (multi-account): `data/trading_<exchange>_<account>.db`
-- Stocks engine DB: `data/stocks.db`
+- Stocks engine DB: `data/trading_stocks_default.db`
 - Model artifacts: `models/trade_predictor.tflite`, `models/normalization.json`, `models/continuous_sgd.joblib`
 - Runtime logs: `logs/trading_bot.log`, `logs/errors.log`
 
@@ -216,61 +249,12 @@ Startup logs now print:
 - explicit persistence contract (`canonical_ledger=sqlite`, `elasticsearch_role=analytics_mirror`)
 - ES sink target (`cloud` or `hosts`) and index prefix
 
-## v4.0.0 Changelog (Strategy Overhaul)
+## Full Changelog
 
-New Strategies:
-- **Ichimoku Cloud**: Replaces VWAP Momentum Alpha — cloud crossovers, Tenkan/Kijun analysis
-- **Order Flow**: Microstructure-based signals from order book data (book score, imbalance, spread)
-- **Stochastic Divergence**: Replaces RSI Mean Reversion — stochastic oscillator + price divergence detection
-- **Volatility Squeeze**: Replaces Breakout — TTM Squeeze concept (BB inside KC + momentum breakout)
-- **Supertrend**: ATR-based adaptive trend identification with volume confirmation
+See [CHANGELOG.md](CHANGELOG.md) for complete version history from v3.0.0 through v4.5.0.
 
-Removed Strategies (poor live performance):
-- Momentum (8% WR), Breakout (0% WR), VWAP Momentum Alpha (33% WR), RSI Mean Reversion
+## Documentation
 
-New Features:
-- Multi-timeframe analysis: 1/5/15-minute candles, 2/3 agreement required for entry
-- Volatility regime detection (Garman-Klass) with regime-specific strategy weight multipliers
-- Session-aware trading: per-hour confidence multipliers from historical win rates
-- Auto Strategy Tuner: weekly DB analysis, auto-disable underperformers (Sharpe < -0.3)
-- Smart exit system: multi-tier partial position closing (50%@1xTP, 30%@1.5xTP, 20% trailing)
-- Exchange-native stop orders as crash-proof backstop
-- Typed exchange exception hierarchy (transient vs permanent, smart retry strategy)
-- Correlation group position limits (prevent overexposure to correlated assets)
-- Trade rate throttle and quiet hours filtering
-- Pydantic validators for all critical financial config values
-- Login brute-force protection (5 failures in 5-min window = lockout)
-- Multi-plan Stripe billing (Pro/Premium)
-
-Performance Improvements:
-- Parallelized position management (`asyncio.gather` for all open positions)
-- O(1) trade lookup via `get_trade_by_id` (replaces full table scans)
-- Consolidated performance stats into 2 SQL queries with 5s TTL cache (was 7 queries)
-- Vectorized OHLCV resampling with NumPy
-- RingBuffer contiguous optimization
-- In-memory favorites cache
-
-Architecture Improvements:
-- Decomposed `execute_signal` into 5 focused methods
-- Decomposed `initialize()` into 5 factory methods
-- Extracted `_exit_live_order` retry helper
-- Extracted `_parse_meta` helper (replaced 8 duplicate parsing sites)
-- Promoted auth helpers from closure scope to class methods
-- `EngineInterface` Protocol for control router decoupling
-- Eliminated runtime `get_config()` from executor (constructor injection)
-- ConfigManager reset fixture for test isolation
-
-## v3.0.0 Changelog
-
-- Graceful Error Handler: "Trade or Die" error classification (CRITICAL / DEGRADED / TRANSIENT)
-- Non-critical subsystem failures no longer prevent bot startup or trading
-- Fixed: Coinbase WS sync callback crash
-- Fixed: Discord bot open authorization (now deny-by-default)
-- Fixed: Stripe global API key thread-safety
-- Fixed: Kraken/Coinbase REST truthiness bugs (`start=0`, `since=0`)
-- Fixed: Rate limiter memory leak (stale IP eviction)
-- Fixed: Slack bot deprecated API + missing await
-- Fixed: Version string consistency (single source of truth)
-- Fixed: Kraken WS latency tracking
-- Docker-first deployment via SuperStart.sh
-- Stress test containerized (runs via docker compose)
+- **Client documentation:** [`knowledge_base/CLIENT/`](knowledge_base/CLIENT/README.md) — user-facing guides
+- **Internal documentation:** [`knowledge_base/INTERNAL/`](knowledge_base/INTERNAL/README.md) — developer/ops reference
+- **Code reviews:** [`preflight/`](preflight/) — deep codebase review reports

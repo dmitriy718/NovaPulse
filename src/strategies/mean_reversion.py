@@ -123,11 +123,10 @@ class MeanReversionStrategy(BaseStrategy):
                     curr_rsi < np.max(rsi_vals[-10:])):
                 rsi_bear_divergence = True
 
-        # Volume exhaustion (selling/buying pressure declining)
+        # Volume exhaustion (selling/buying pressure declining over 3 bars)
         vol_declining = False
         if len(volumes) >= 5:
-            recent_vol_trend = volumes[-1] < volumes[-3]
-            vol_declining = recent_vol_trend
+            vol_declining = volumes[-1] < volumes[-3] and volumes[-2] < volumes[-3]
 
         direction = SignalDirection.NEUTRAL
         strength = 0.0

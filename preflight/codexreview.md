@@ -92,6 +92,14 @@ Entrypoints & processes:
 ## 7. Appendix
 - Commands attempted:  
   - `python -m pytest -q --maxfail=1` (pass, 175 tests in ~4.4s).  
+  - Installed `uvicorn[standard]==0.34.0` into venv (zsh quoting fixed).  
+  - Backed up and reset ledger: `cp data/trading.db data/trading.db.bak-YYYYmmddThhmmssZ`; cleared `trades`, `metrics`, `signals`, `order_book_snapshots`, `ml_features`, `thought_log`, `system_state`, `daily_summary` (now zero rows).  
+  - Installed `elasticsearch[async]>=8.12,<9` into venv; added guard to skip ES pipeline when API key is unresolved `op://` placeholder (prevents 401 spam when 1Password isn’t loaded).  
+  - Restarted bot in paper mode with `timeout 20s python main.py` (and with `INSTANCE_LOCK_PATH=/tmp/novapulse/test.lock` for verification) to reinitialize loops; warmup succeeded; WebSocket connected; shutdown clean on timeout. Background warnings remain: Telegram token rejected (expects 1Password), ES pipeline now cleanly disabled with placeholder warning only.  
+  - Restored ledger from `data/trading.db.bak-20260224T020327Z` (5 open trades + metrics) after prior reset; archived post-reset copy at `data/trading.db.after-reset-<ts>`.  
+  - Added Telegram guard: if token/chat_id are unresolved `op://` placeholders, bot disables itself with a warning (prevents repeated init failures when 1Password isn’t injected yet).  
+  - Re-ran `python -m pytest -q --maxfail=1` after changes (pass, 175 tests).  
+- Log analysis (2026-02-24): `logs/errors.log` shows early restarts from missing `uvicorn`; `logs/trading_bot.log` only shows ES bulk writes and graceful shutdown at 06:08Z on 2026-02-20; no trade lifecycle logs. Previously `data/trading.db` held 5 open short trades (XRP/USD, ADA/USD, SOL/USD, ETH/USD, LINK/USD) from 2026-02-19 with no closes, driving 0% win rate and –$21 unrealized P/L; that ledger has been restored from backup (5 open trades present again).  
 - Assumptions: no live exchange keys available; did not execute live trading; ES cloud host not reachable during review.
 
 ## 8. Strategy & Scan Improvement Suggestions (10)

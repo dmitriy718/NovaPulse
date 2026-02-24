@@ -133,6 +133,9 @@ class RiskManager:
         self.global_cooldown_seconds_on_loss = max(0, int(global_cooldown_seconds_on_loss))
         self.min_risk_reward_ratio = max(0.1, float(min_risk_reward_ratio))
 
+        # Price history for correlation-based sizing
+        self._price_history: Dict[str, Deque[float]] = {}
+
         # State tracking
         self._daily_pnl: float = 0.0
         self._daily_trades: int = 0
@@ -147,6 +150,7 @@ class RiskManager:
         self._global_cooldown_until: float = 0.0
         self._consecutive_wins: int = 0
         self._consecutive_losses: int = 0
+        self._circuit_breaker_active: bool = False
 
     # ------------------------------------------------------------------
     # Position Sizing (Kelly Criterion)
@@ -273,6 +277,10 @@ class RiskManager:
         vol_factor = self._get_volatility_factor(vol_regime, vol_level, vol_expanding)
         position_size_usd *= vol_factor
 
+        # Correlation-based sizing: reduce size when highly correlated with open positions
+        corr_factor = self._get_correlation_factor(pair)
+        position_size_usd *= corr_factor
+
         # Apply maximum position cap
         position_size_usd = min(position_size_usd, self.max_position_usd)
 
@@ -306,6 +314,10 @@ class RiskManager:
 
     def _pre_trade_checks(self, pair: str, result: PositionSizeResult) -> bool:
         """Run pre-trade risk checks."""
+        if self._circuit_breaker_active:
+            result.reason = "Circuit breaker active: bankroll depleted"
+            return False
+
         # Global cooldown check
         now = time.time()
         if now < self._global_cooldown_until:
@@ -377,19 +389,22 @@ class RiskManager:
         current_price: float,
         entry_price: float,
         side: str,
+        vol_regime: str = "",
     ) -> StopLossState:
         """
         Update stop loss with trailing and breakeven logic.
-        
+
         # ENHANCEMENT: Added step-based trailing for smoother execution
         # ENHANCEMENT: Added acceleration on large profit moves
-        
+        # ENHANCEMENT: Added volatility-regime-aware trailing step
+
         Args:
             trade_id: Trade identifier
             current_price: Current market price
             entry_price: Original entry price
             side: "buy" or "sell"
-        
+            vol_regime: Volatility regime ("high_vol", "low_vol", "mid_vol")
+
         Returns:
             Updated StopLossState
         """
@@ -401,9 +416,16 @@ class RiskManager:
             logger.warning("update_stop_loss called with entry_price<=0", trade_id=trade_id)
             return state
 
+        # Volatility-regime-aware trailing step adjustment
+        trailing_step = self.trailing_step_pct
+        if vol_regime == "high_vol":
+            trailing_step *= 1.5  # More room in volatile markets
+        elif vol_regime == "low_vol":
+            trailing_step *= 0.7  # Tighter in calm markets
+
         if side == "buy":
             pnl_pct = (current_price - entry_price) / entry_price
-            
+
             # Update trailing high
             if current_price > state.trailing_high:
                 state.trailing_high = current_price
@@ -421,13 +443,13 @@ class RiskManager:
             if pnl_pct >= self.trailing_activation_pct:
                 state.trailing_activated = True
                 # Trail from the highest price
-                new_sl = state.trailing_high * (1 - self.trailing_step_pct)
+                new_sl = state.trailing_high * (1 - trailing_step)
 
                 # Acceleration: tighter trail on larger profits (smaller multiplier = closer stop)
                 if pnl_pct > 0.05:  # 5%+ profit — lock in gains aggressively
-                    new_sl = state.trailing_high * (1 - self.trailing_step_pct * 0.3)
+                    new_sl = state.trailing_high * (1 - trailing_step * 0.3)
                 elif pnl_pct > 0.03:  # 3%+ profit
-                    new_sl = state.trailing_high * (1 - self.trailing_step_pct * 0.5)
+                    new_sl = state.trailing_high * (1 - trailing_step * 0.5)
 
                 # Only move stop up, never down
                 if new_sl > state.current_sl:
@@ -445,13 +467,13 @@ class RiskManager:
 
             if pnl_pct >= self.trailing_activation_pct:
                 state.trailing_activated = True
-                new_sl = state.trailing_low * (1 + self.trailing_step_pct)
+                new_sl = state.trailing_low * (1 + trailing_step)
 
                 # Acceleration: tighter trail on larger profits (smaller multiplier = closer stop)
                 if pnl_pct > 0.05:  # 5%+ profit — lock in gains aggressively
-                    new_sl = state.trailing_low * (1 + self.trailing_step_pct * 0.3)
+                    new_sl = state.trailing_low * (1 + trailing_step * 0.3)
                 elif pnl_pct > 0.03:
-                    new_sl = state.trailing_low * (1 + self.trailing_step_pct * 0.5)
+                    new_sl = state.trailing_low * (1 + trailing_step * 0.5)
 
                 if new_sl < state.current_sl:
                     state.current_sl = new_sl
@@ -561,20 +583,34 @@ class RiskManager:
             self._last_trade_time[pair] = time.time()
             self._daily_trades += 1
 
+    def check_daily_reset(self) -> None:
+        """Public entry point for daily reset — call from the engine scan loop."""
+        self._check_daily_reset()
+
     def close_position(self, trade_id: str, pnl: float) -> None:
         """Close a position and update risk metrics."""
+        self._check_daily_reset()
         pos = self._open_positions.pop(trade_id, None)
         if pos:
+            pair = pos.get("pair")
             strategy = pos.get("strategy")
             if strategy:
-                key = (pos.get("pair"), strategy, pos.get("side"))
+                key = (pair, strategy, pos.get("side"))
                 self._strategy_cooldowns[key] = time.time()
+            # Update cooldown for this pair on exit (prevents rapid re-entry after loss)
+            if pair:
+                self._last_trade_time[pair] = time.time()
         if trade_id in self._stop_states:
             del self._stop_states[trade_id]
 
         self._daily_pnl += pnl
-        self.current_bankroll += pnl
+        self.current_bankroll = max(self.current_bankroll + pnl, 0.0)
         self._trade_history.append({"pnl": pnl, "time": time.time()})
+
+        # Circuit breaker: block all new trades if bankroll is depleted
+        if self.current_bankroll <= 0:
+            self._circuit_breaker_active = True
+            logger.critical("Circuit breaker activated: bankroll depleted")
 
         # Track win/loss streaks
         if pnl > 0:
@@ -696,12 +732,76 @@ class RiskManager:
         return max(0.30, factor)
 
     def _get_remaining_capacity(self) -> float:
-        """Calculate remaining position capacity in USD."""
+        """Calculate remaining position capacity in USD.
+
+        Checks both local remaining capacity AND global cross-engine
+        remaining capacity, returning the minimum.
+        """
         total_exposure = sum(
             pos["size_usd"] for pos in self._open_positions.values()
         )
         max_total = self.current_bankroll * self.max_total_exposure_pct
-        return max(0, max_total - total_exposure)
+        local_remaining = max(0, max_total - total_exposure)
+
+        # Check global cross-engine cap (non-async, uses snapshot)
+        try:
+            from src.execution.global_risk import GlobalRiskAggregator
+            aggregator = GlobalRiskAggregator()
+            if aggregator.max_total_exposure_usd > 0:
+                global_total = sum(aggregator._exposures.values())
+                global_remaining = max(0.0, aggregator.max_total_exposure_usd - global_total)
+                return min(local_remaining, global_remaining)
+        except Exception:
+            pass
+
+        return local_remaining
+
+    def update_price(self, pair: str, price: float) -> None:
+        """Record a price tick for correlation tracking."""
+        if pair not in self._price_history:
+            self._price_history[pair] = deque(maxlen=100)
+        self._price_history[pair].append(price)
+
+    def _get_correlation_factor(self, pair: str) -> float:
+        """Compute correlation reduction factor for a new pair vs open positions.
+
+        If the new pair is highly correlated (Pearson > 0.7) with any open
+        position's pair, reduce position size to avoid concentrated exposure.
+        """
+        new_prices = self._price_history.get(pair)
+        if not new_prices or len(new_prices) < 20:
+            return 1.0
+
+        max_corr = 0.0
+        new_arr = np.array(new_prices)
+
+        for pos in self._open_positions.values():
+            pos_pair = pos.get("pair", "")
+            if pos_pair == pair:
+                continue
+            pos_prices = self._price_history.get(pos_pair)
+            if not pos_prices or len(pos_prices) < 20:
+                continue
+            pos_arr = np.array(pos_prices)
+            # Align lengths
+            min_len = min(len(new_arr), len(pos_arr))
+            if min_len < 20:
+                continue
+            a = new_arr[-min_len:]
+            b = pos_arr[-min_len:]
+            # Compute Pearson correlation
+            std_a = np.std(a)
+            std_b = np.std(b)
+            if std_a == 0 or std_b == 0:
+                continue
+            corr = float(np.corrcoef(a, b)[0, 1])
+            if not math.isfinite(corr):
+                continue
+            max_corr = max(max_corr, abs(corr))
+
+        if max_corr > 0.7:
+            return max(0.5, 1.0 - (max_corr - 0.7) * 2)
+        return 1.0
 
     def _check_daily_reset(self) -> None:
         """Reset daily counters at midnight UTC."""
@@ -730,6 +830,7 @@ class RiskManager:
         self._global_cooldown_until = 0.0
         self._consecutive_wins = 0
         self._consecutive_losses = 0
+        self._circuit_breaker_active = False
         self._daily_reset_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
     # ------------------------------------------------------------------

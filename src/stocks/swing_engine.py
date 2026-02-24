@@ -7,6 +7,8 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+import random
+
 import numpy as np
 
 from src.core.control_router import ControlRouter
@@ -34,8 +36,9 @@ _OPTION_SYMBOL_RE = re.compile(r"^(?:O:)?[A-Z]{1,6}\d{6}[CP]\d{8}$")
 class _StockMarketDataView:
     """Lightweight market-data adapter for dashboard compatibility."""
 
-    def __init__(self) -> None:
+    def __init__(self, stale_threshold_seconds: int = 3600) -> None:
         self._latest: Dict[str, Dict[str, Any]] = {}
+        self._stale_threshold = max(60, int(stale_threshold_seconds))
 
     def update(self, symbol: str, *, price: float, bars: int) -> None:
         self._latest[symbol] = {
@@ -63,7 +66,7 @@ class _StockMarketDataView:
             sym: {
                 "price": float(v.get("price", 0.0) or 0.0),
                 "bars": int(v.get("bars", 0) or 0),
-                "stale": (time.time() - float(v.get("updated_at", 0) or 0)) > 3600,
+                "stale": (time.time() - float(v.get("updated_at", 0) or 0)) > self._stale_threshold,
             }
             for sym, v in self._latest.items()
         }
@@ -84,6 +87,7 @@ class _StockRiskAdapter:
         self._total_pnl = 0.0
         self._consecutive_wins = 0
         self._consecutive_losses = 0
+        self._max_drawdown_pct = 0.0
         self._daily_reset_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
     def _check_daily_reset(self) -> None:
@@ -104,6 +108,10 @@ class _StockRiskAdapter:
         self.current_bankroll += float(pnl)
         if self.current_bankroll > self._peak_bankroll:
             self._peak_bankroll = self.current_bankroll
+        # Track max drawdown across the session
+        if self._peak_bankroll > 0:
+            dd = (self._peak_bankroll - self.current_bankroll) / self._peak_bankroll * 100.0
+            self._max_drawdown_pct = max(self._max_drawdown_pct, dd)
         if pnl > 0:
             self._wins += 1
             self._consecutive_wins += 1
@@ -155,7 +163,7 @@ class _StockRiskAdapter:
             ),
             "peak_bankroll": round(self._peak_bankroll, 2),
             "current_drawdown": round(drawdown, 2),
-            "max_drawdown_pct": round(drawdown, 2),
+            "max_drawdown_pct": round(max(self._max_drawdown_pct, drawdown), 2),
             "daily_pnl": round(self._daily_pnl, 2),
             "daily_trades": int(self._daily_trades),
             "open_positions": int(open_positions),
@@ -244,7 +252,9 @@ class StockSwingEngine:
         )
 
         self.db = DatabaseManager(self.config.stocks.db_path)
-        self.market_data = _StockMarketDataView()
+        self.market_data = _StockMarketDataView(
+            stale_threshold_seconds=int(self.scan_interval * 10),
+        )
         self.risk_manager = _StockRiskAdapter(self.config.risk.initial_bankroll)
         self.executor = _StockExecutorAdapter(self)
         self.control_router = ControlRouter(self)
@@ -282,6 +292,7 @@ class StockSwingEngine:
         # Bar cache: symbol -> (timestamp, bars)
         self._bar_cache: Dict[str, tuple[float, List[Dict[str, Any]]]] = {}
         self._bar_cache_ttl = max(60.0, self.scan_interval * 0.8)
+        self._bar_cache_max_size = 500
 
         self._execution_stats: Dict[str, Any] = {
             "orders_placed": 0,
@@ -585,6 +596,9 @@ class StockSwingEngine:
                         continue
                     if open_count >= int(self.config.stocks.max_open_positions):
                         continue
+                    # Skip new entries outside market hours
+                    if self._universe_scanner and not self._universe_scanner.is_market_hours():
+                        continue
                     opened = await self._open_trade(symbol, latest_price)
                     if opened:
                         open_count += 1
@@ -691,6 +705,12 @@ class StockSwingEngine:
                 last_ts = time.time()
                 if bars:
                     self._bar_cache[symbol] = (time.time(), bars)
+                    # Evict stale entries if cache exceeds max size
+                    if len(self._bar_cache) > self._bar_cache_max_size:
+                        cutoff = time.time() - self._bar_cache_ttl * 2
+                        stale = [k for k, (ts, _) in self._bar_cache.items() if ts < cutoff]
+                        for k in stale:
+                            del self._bar_cache[k]
                 out[symbol] = bars
             except Exception as e:
                 logger.warning("Stock scan bars fetch failed", symbol=symbol, error=repr(e))
@@ -805,6 +825,11 @@ class StockSwingEngine:
         filled_qty = qty
         self._execution_stats["orders_placed"] += 1
         asset_label = "Option" if is_option else "Stock"
+
+        # Paper mode: apply small adverse slippage for realistic simulation
+        if self.mode != "live":
+            slip_pct = random.uniform(0.0001, 0.0005)
+            fill_price = market_price * (1 + slip_pct)
 
         if self.mode == "live":
             order = await self.alpaca.submit_market_order(
@@ -1024,14 +1049,14 @@ class StockSwingEngine:
                 trade,
                 reason="stop_loss",
                 force=True,
-                market_price=stop_loss,
+                market_price=market_price,
             )
         if take_profit > 0 and market_price >= take_profit:
             return await self._close_trade(
                 trade,
                 reason="take_profit",
                 force=False,
-                market_price=take_profit,
+                market_price=market_price,
             )
 
         entry_time = self._parse_dt(trade.get("entry_time"))
@@ -1072,12 +1097,15 @@ class StockSwingEngine:
             broker_close = await self.alpaca.close_position(symbol)
             if broker_close is None:
                 return False
-            try:
-                bpx = broker_close.get("filled_avg_price")
-                if bpx:
-                    exit_price = float(bpx)
-            except Exception:
-                pass
+            # "no_position" means the broker has no open position for this symbol.
+            # Still proceed with DB close to reconcile (position already gone).
+            if broker_close.get("status") != "no_position":
+                try:
+                    bpx = broker_close.get("filled_avg_price")
+                    if bpx:
+                        exit_price = float(bpx)
+                except Exception:
+                    pass
 
         gross_pnl = (exit_price - entry) * qty * multiplier
         entry_notional = abs(entry * qty * multiplier)

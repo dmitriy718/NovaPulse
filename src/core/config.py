@@ -375,6 +375,7 @@ class TrendConfig(StrategyWeights):
     ema_fast: int = 5
     ema_slow: int = 13
     adx_threshold: int = 25
+    require_fresh_cross: bool = True
 
 
 class MeanReversionConfig(StrategyWeights):
@@ -456,6 +457,30 @@ class KeltnerConfig(StrategyWeights):
     weight: float = 0.30
 
 
+class VWAPMomentumAlphaConfig(StrategyWeights):
+    vwap_window: int = 20
+    band_std: float = 1.5
+    pullback_z: float = 0.6
+    slope_period: int = 5
+    volume_multiplier: float = 1.0
+    slope_min_pct: float = 0.0005
+    weight: float = 0.15
+
+
+class MarketStructureConfig(StrategyWeights):
+    swing_lookback: int = 5
+    pullback_tolerance_pct: float = 0.005
+    rsi_floor: int = 35
+    rsi_ceiling: int = 65
+    atr_period: int = 14
+    weight: float = 0.12
+
+
+class FundingRateConfig(StrategyWeights):
+    funding_extreme_pct: float = 0.01
+    weight: float = 0.10
+
+
 class StrategiesConfig(BaseModel):
     keltner: KeltnerConfig = Field(default_factory=KeltnerConfig)
     trend: TrendConfig = Field(default_factory=TrendConfig)
@@ -466,6 +491,9 @@ class StrategiesConfig(BaseModel):
     order_flow: OrderFlowConfig = Field(default_factory=OrderFlowConfig)
     supertrend: SupertrendConfig = Field(default_factory=SupertrendConfig)
     reversal: ReversalConfig = Field(default_factory=ReversalConfig)
+    vwap_momentum_alpha: VWAPMomentumAlphaConfig = Field(default_factory=VWAPMomentumAlphaConfig)
+    market_structure: MarketStructureConfig = Field(default_factory=MarketStructureConfig)
+    funding_rate: FundingRateConfig = Field(default_factory=FundingRateConfig)
 
 
 class RegimeConfig(BaseModel):
@@ -838,7 +866,7 @@ class SignalWebhookConfig(BaseModel):
 
 class AppConfig(BaseModel):
     name: str = "AI Crypto Trading Bot"
-    version: str = "4.1.1"
+    version: str = "4.5.0"
     mode: str = "paper"
     log_level: str = "INFO"
     db_path: str = "data/trading.db"

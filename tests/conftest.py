@@ -159,7 +159,7 @@ class StubRiskManager:
         self._open_positions: Dict[str, Any] = {}
         self._stop_states: Dict[str, StopLossState] = {}
 
-    def update_stop_loss(self, trade_id, current_price, entry_price, side):
+    def update_stop_loss(self, trade_id, current_price, entry_price, side, vol_regime=""):
         return self.state
 
     def should_stop_out(self, trade_id, current_price, side):

@@ -18,6 +18,7 @@ import asyncio
 import inspect
 import json
 import math
+import random
 import time
 import uuid
 from datetime import datetime, timezone, timedelta
@@ -119,6 +120,11 @@ class TradeExecutor:
         }
         self._max_per_correlation_group = max(1, int(max_per_correlation_group or 1))
 
+        # Per-trade locks to prevent concurrent management of the same position
+        self._position_locks: Dict[str, asyncio.Lock] = {}
+
+        # Note: safe under asyncio single-threaded event loop — increments
+        # are atomic between await points.
         self._execution_stats = {
             "orders_placed": 0,
             "orders_filled": 0,
@@ -324,7 +330,7 @@ class TradeExecutor:
                             "pnl": 0.0,
                             "close_reason": "ghost_reconciliation",
                         })
-                        self.risk_manager.release_position(trade_id)
+                        self.risk_manager.close_position(trade_id, 0.0)
                         auto_closed += 1
                     except Exception as e:
                         logger.error(
@@ -410,25 +416,26 @@ class TradeExecutor:
             return None
         trade_id, fill_price, filled_units, partial_fill, entry_fee, size_result, adjusted_sl, adjusted_tp = fill
 
-        # Stage 4: Record trade
+        # Stage 4: Register with risk manager FIRST (before DB insert) so a
+        # crash between DB write and registration can't leave phantom positions.
         slippage = abs(fill_price - signal.entry_price) / signal.entry_price if signal.entry_price > 0 else 0.0
         filled_size_usd = filled_units * fill_price
 
+        self.risk_manager.initialize_stop_loss(trade_id, fill_price, adjusted_sl, side)
+        self.risk_manager.register_position(
+            trade_id, signal.pair, side,
+            fill_price, filled_size_usd, strategy=primary_strategy,
+        )
+
+        # Stage 5: Record trade in DB
         trade_record = await self._record_trade(
             signal, trade_id, side, primary_strategy,
             fill_price, filled_units, partial_fill, entry_fee,
             size_result, adjusted_sl, adjusted_tp, slippage, filled_size_usd,
         )
 
-        # Stage 5: Entry telemetry (best-effort, non-blocking)
+        # Stage 6: Entry telemetry (best-effort, non-blocking)
         await self._capture_entry_telemetry(signal, trade_id)
-
-        # Initialize stops and register with risk manager
-        self.risk_manager.initialize_stop_loss(trade_id, fill_price, adjusted_sl, side)
-        self.risk_manager.register_position(
-            trade_id, signal.pair, side,
-            fill_price, filled_size_usd, strategy=primary_strategy,
-        )
         if self.mode == "live" and adjusted_sl > 0:
             await self._place_exchange_stop(
                 trade_id, signal.pair, side, adjusted_sl, filled_units,
@@ -960,7 +967,19 @@ class TradeExecutor:
 
             # Place new stop at updated price
             new_txid = await self._place_exchange_stop(trade_id, pair, side, new_stop_price, volume)
-            # _place_exchange_stop already persists the new txid
+            if new_txid is None and old_txid:
+                # Cancel succeeded but new placement failed — no exchange stop active.
+                # Flag this trade for software-only stop management.
+                logger.critical(
+                    "Exchange stop gap: cancel succeeded but replacement failed",
+                    trade_id=trade_id, pair=pair,
+                )
+                try:
+                    meta["software_stop_only"] = True
+                    meta.pop("exchange_stop_txid", None)
+                    await self.db.update_trade(trade_id, {"metadata": meta}, tenant_id=self.tenant_id)
+                except Exception:
+                    pass
         except Exception as e:
             logger.warning("Exchange stop update failed (software stop still active)", trade_id=trade_id, error=repr(e))
 
@@ -984,7 +1003,17 @@ class TradeExecutor:
             logger.debug("Exchange stop cancel lookup failed", trade_id=trade_id, error=repr(e))
 
     async def _manage_position(self, trade: Dict[str, Any]) -> None:
-        """Manage a single open position."""
+        """Manage a single open position (with per-trade lock)."""
+        trade_id = trade["trade_id"]
+        lock = self._position_locks.setdefault(trade_id, asyncio.Lock())
+        async with lock:
+            await self._manage_position_inner(trade)
+        # Clean up lock if position no longer open in risk manager
+        if trade_id not in self.risk_manager._open_positions:
+            self._position_locks.pop(trade_id, None)
+
+    async def _manage_position_inner(self, trade: Dict[str, Any]) -> None:
+        """Inner position management logic (called under per-trade lock)."""
         trade_id = trade["trade_id"]
         pair = trade["pair"]
         side = trade["side"]
@@ -1021,10 +1050,44 @@ class TradeExecutor:
             )
             return
 
-        # Update trailing stop
+        # Update trailing stop (pass vol_regime from trade metadata for regime-aware stops)
+        meta = self._parse_meta(trade.get("metadata"))
+        vol_regime = meta.get("vol_regime", "") if meta else ""
         state = self.risk_manager.update_stop_loss(
-            trade_id, current_price, entry_price, side
+            trade_id, current_price, entry_price, side, vol_regime=vol_regime
         )
+
+        # Time-based exit tightening: reduce TP for stagnant positions
+        take_profit = float(trade.get("take_profit", 0) or 0)
+        if take_profit > 0 and entry_price > 0 and age_hours > 0:
+            age_minutes = age_hours * 60
+            if side == "buy":
+                pnl_pct = (current_price - entry_price) / entry_price
+            else:
+                pnl_pct = (entry_price - current_price) / entry_price
+
+            tp_tightened = False
+            if age_minutes > 60 and pnl_pct < 0.01:
+                # 60+ min with < 1% profit → TP to 40% of original
+                if side == "buy":
+                    new_tp = entry_price + (take_profit - entry_price) * 0.4
+                else:
+                    new_tp = entry_price - (entry_price - take_profit) * 0.4
+                tp_tightened = True
+            elif age_minutes > 30 and pnl_pct < 0.005:
+                # 30+ min with < 0.5% profit → TP to 60% of original
+                if side == "buy":
+                    new_tp = entry_price + (take_profit - entry_price) * 0.6
+                else:
+                    new_tp = entry_price - (entry_price - take_profit) * 0.6
+                tp_tightened = True
+
+            if tp_tightened:
+                await self.db.update_trade(trade_id, {
+                    "take_profit": new_tp,
+                }, tenant_id=self.tenant_id)
+                # Use tightened TP for the rest of this cycle
+                trade["take_profit"] = new_tp
 
         # Hold-duration optimization: if the trade has been open longer than
         # 2x the strategy's average winning hold time, tighten the trailing
@@ -1196,9 +1259,6 @@ class TradeExecutor:
                     await asyncio.sleep(2 ** attempt)
                     continue
                 break
-        else:
-            # All 3 attempts succeeded (shouldn't reach here due to early return)
-            return (actual_exit_price, actual_quantity, exit_fee)
 
         # All retries exhausted — mark trade as error
         await self.db.update_trade(trade_id, {
@@ -1253,10 +1313,13 @@ class TradeExecutor:
                 return  # Exit failed permanently — already logged and marked error
             actual_exit_price, actual_quantity, exit_fee = result
 
-        if actual_quantity <= 0:
+        if actual_quantity <= 0 and self.mode == "live":
+            # In live mode, zero fill means the order genuinely failed.
+            # In paper mode or smart_exit_final, quantity may be 0 because
+            # partial exits already closed the position — still record PnL.
             return
 
-        if actual_quantity != quantity:
+        if actual_quantity != quantity and actual_quantity > 0:
             try:
                 await self.db.update_trade(trade_id, {
                     "quantity": actual_quantity,
@@ -1268,7 +1331,14 @@ class TradeExecutor:
                     trade_id=trade_id, error=repr(e),
                 )
 
-        entry_fee = abs(entry_price * actual_quantity) * entry_fee_rate
+        # Use stored entry_fee from trade metadata when available (avoids
+        # recalculating with a potentially different rate after partial fills).
+        stored_entry_fee = float(meta.get("entry_fee", 0.0) or 0.0) if meta else 0.0
+        if stored_entry_fee > 0 and actual_quantity > 0 and quantity > 0:
+            # Scale stored fee proportionally if this is a partial close
+            entry_fee = stored_entry_fee * (actual_quantity / quantity)
+        else:
+            entry_fee = abs(entry_price * actual_quantity) * entry_fee_rate
         if exit_fee <= 0:
             exit_fee = abs(actual_exit_price * actual_quantity) * self.taker_fee
         fees = entry_fee + exit_fee
@@ -1343,7 +1413,9 @@ class TradeExecutor:
                 trend_regime = meta.get("trend_regime", "") if meta else ""
                 vol_regime = meta.get("vol_regime", "") if meta else ""
                 hold_hours = 0.0
-                _et = meta.get("entry_time", "") if meta else ""
+                # Use canonical entry_time from trade record, not metadata
+                _trade_row = await self.db.get_trade_by_id(trade_id, tenant_id=tid)
+                _et = (_trade_row or {}).get("entry_time", "") or (meta.get("entry_time", "") if meta else "")
                 if _et:
                     try:
                         _entry_dt = datetime.fromisoformat(str(_et).replace("Z", "+00:00"))
@@ -1505,7 +1577,8 @@ class TradeExecutor:
             reduction_fraction=reduction_fraction,
         )
 
-        # If position is fully closed, close it properly
+        # If position is fully closed, finalize via close_position with the
+        # original partial_qty (not 0) so PnL is recorded correctly.
         if remaining < 1e-8:
             await self._close_position(
                 trade_id,
@@ -1513,7 +1586,7 @@ class TradeExecutor:
                 side,
                 entry_price,
                 exit_price,
-                0.0,  # remaining quantity is 0
+                partial_qty,
                 "smart_exit_final",
                 metadata=meta,
                 strategy=trade.get("strategy"),
@@ -1582,13 +1655,20 @@ class TradeExecutor:
         # ENHANCEMENT: Limit order simulation
         """
         spread = self.market_data.get_spread(pair)
-        
-        # For limit orders (target_price is explicit), we fill at that price
-        # assuming the market has crossed it.
-        # Since we use current Ask/Bid as limit, it should fill immediately.
-        # We add a tiny "spread slippage" to mimic crossing the book spread if data is stale.
-        
-        slippage_pct = max(spread / 10, 0.00005)
+
+        # Realistic slippage model: 70% adverse, 20% neutral, 10% favorable.
+        # Magnitude is spread-based with randomness.
+        base_slip = max(spread / 10, 0.00005)
+        roll = random.random()
+        if roll < 0.10:
+            # Favorable: fill slightly better than target
+            slippage_pct = -base_slip * random.uniform(0.2, 0.8)
+        elif roll < 0.30:
+            # Neutral: fill at or very near target
+            slippage_pct = base_slip * random.uniform(-0.1, 0.1)
+        else:
+            # Adverse: fill slightly worse than target
+            slippage_pct = base_slip * random.uniform(0.3, 1.5)
 
         if side == "buy":
             fill_price = target_price * (1 + slippage_pct)
@@ -1869,37 +1949,13 @@ class TradeExecutor:
                 pass
             await asyncio.sleep(1)
 
-        # Timeout: check for partial fill and cancel remainder
+        # Timeout: cancel remainder and check for any partial fill
         try:
-            orders = await self.rest_client.get_open_orders()
-            open_order = orders.get("open", {}).get(txid)
-            if open_order:
-                price, vol_exec, _vol_total, fee = self._extract_order_fill(open_order)
-                if vol_exec > 0:
-                    if price <= 0:
-                        try:
-                            order_info = await self.rest_client.get_order_info(txid)
-                            query = order_info.get(txid)
-                            if query:
-                                price, vol_exec, _vol_total, fee = self._extract_order_fill(query)
-                        except Exception:
-                            pass
-                    price, vol_exec, fee = await self._resolve_fill_data(
-                        txid, price, vol_exec, fee, prefer_fee=True
-                    )
-                    try:
-                        await self.rest_client.cancel_order(txid)
-                    except Exception:
-                        pass
-                    if price > 0:
-                        return price, vol_exec, True, fee
-                try:
-                    await self.rest_client.cancel_order(txid)
-                except Exception:
-                    pass
+            await self.rest_client.cancel_order(txid)
         except Exception:
             pass
 
+        # Check if we got a partial fill before cancellation
         if last_partial:
             price, vol_exec, fee = last_partial
             return price, vol_exec, True, fee

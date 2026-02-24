@@ -25,8 +25,10 @@ import numpy as np
 from src.core.logger import get_logger
 from src.exchange.market_data import MarketDataCache
 from src.strategies.base import BaseStrategy, SignalDirection, StrategySignal
+from src.strategies.funding_rate import FundingRateStrategy
 from src.strategies.ichimoku import IchimokuStrategy
 from src.strategies.keltner import KeltnerStrategy
+from src.strategies.market_structure import MarketStructureStrategy
 from src.strategies.mean_reversion import MeanReversionStrategy
 from src.strategies.order_flow import OrderFlowStrategy
 from src.strategies.reversal import ReversalStrategy
@@ -34,6 +36,7 @@ from src.strategies.stochastic_divergence import StochasticDivergenceStrategy
 from src.strategies.supertrend import SupertrendStrategy
 from src.strategies.trend import TrendStrategy
 from src.strategies.volatility_squeeze import VolatilitySqueezeStrategy
+from src.strategies.vwap_momentum_alpha import VWAPMomentumAlphaStrategy
 from src.utils.indicator_cache import IndicatorCache
 from src.utils.indicators import order_book_imbalance
 
@@ -180,21 +183,26 @@ class ConfluenceDetector:
         # Initialize strategies — Keltner + Mean Reversion are proven winners
         # Weights are relative priorities; _normalize_weights() scales them to sum to 1.0
         self.strategies: List[BaseStrategy] = [
-            KeltnerStrategy(weight=0.30),
-            MeanReversionStrategy(weight=0.25),
-            IchimokuStrategy(weight=0.15),
-            OrderFlowStrategy(weight=0.15),
-            TrendStrategy(weight=0.15),
-            StochasticDivergenceStrategy(weight=0.12),
-            VolatilitySqueezeStrategy(weight=0.12),
-            SupertrendStrategy(weight=0.10),
-            ReversalStrategy(weight=0.10),
+            KeltnerStrategy(weight=0.25),
+            MeanReversionStrategy(weight=0.20),
+            VolatilitySqueezeStrategy(weight=0.18),
+            VWAPMomentumAlphaStrategy(weight=0.15),
+            OrderFlowStrategy(weight=0.12),
+            MarketStructureStrategy(weight=0.12),
+            SupertrendStrategy(weight=0.12),
+            FundingRateStrategy(weight=0.10),
+            IchimokuStrategy(weight=0.08),
+            TrendStrategy(weight=0.08),
+            StochasticDivergenceStrategy(weight=0.06),
+            ReversalStrategy(weight=0.06),
         ]
         self._normalize_weights()
 
         self._last_confluence: Dict[str, ConfluenceSignal] = {}
         self._signal_history: Deque[ConfluenceSignal] = deque(maxlen=1000)
         self._cooldown_checker = None
+        # Funding rate data injected per scan cycle by the engine
+        self._funding_rates: Dict[str, float] = {}
         self.session_analyzer = session_analyzer
         self.strategy_guardrails_enabled = bool(strategy_guardrails_enabled)
         self.strategy_guardrails_min_trades = max(5, int(strategy_guardrails_min_trades))
@@ -213,11 +221,14 @@ class ConfluenceDetector:
             "ichimoku": 1.2,
             "supertrend": 1.2,
             "order_flow": 1.1,
+            "volatility_squeeze": 1.1,
+            "vwap_momentum_alpha": 1.2,
+            "market_structure": 1.1,
+            "funding_rate": 0.9,
             "mean_reversion": 0.8,
             "stochastic_divergence": 0.8,
             "reversal": 0.7,
             "keltner": 0.9,
-            "volatility_squeeze": 1.1,
         }
         self._default_range_weights = {
             "mean_reversion": 1.3,
@@ -225,6 +236,9 @@ class ConfluenceDetector:
             "keltner": 1.2,
             "reversal": 1.1,
             "order_flow": 1.1,
+            "funding_rate": 1.2,
+            "vwap_momentum_alpha": 1.0,
+            "market_structure": 0.9,
             "trend": 0.8,
             "ichimoku": 0.8,
             "supertrend": 0.8,
@@ -234,6 +248,9 @@ class ConfluenceDetector:
             "volatility_squeeze": 1.3,
             "supertrend": 1.1,
             "order_flow": 1.1,
+            "funding_rate": 1.1,
+            "vwap_momentum_alpha": 0.9,
+            "market_structure": 1.0,
             "mean_reversion": 0.9,
             "stochastic_divergence": 0.9,
             "reversal": 0.9,
@@ -242,6 +259,9 @@ class ConfluenceDetector:
             "mean_reversion": 1.2,
             "stochastic_divergence": 1.2,
             "keltner": 1.1,
+            "vwap_momentum_alpha": 1.1,
+            "market_structure": 1.0,
+            "funding_rate": 0.9,
             "volatility_squeeze": 0.8,
             "supertrend": 0.9,
             "ichimoku": 0.9,
@@ -268,6 +288,9 @@ class ConfluenceDetector:
             "volatility_squeeze": VolatilitySqueezeStrategy,
             "supertrend": SupertrendStrategy,
             "reversal": ReversalStrategy,
+            "vwap_momentum_alpha": VWAPMomentumAlphaStrategy,
+            "market_structure": MarketStructureStrategy,
+            "funding_rate": FundingRateStrategy,
         }
 
         self.strategies = []
@@ -292,6 +315,10 @@ class ConfluenceDetector:
     def set_cooldown_checker(self, checker) -> None:
         """Inject a cooldown checker: fn(pair, strategy_name, side) -> bool."""
         self._cooldown_checker = checker
+
+    def set_funding_rates(self, rates: Dict[str, float]) -> None:
+        """Inject funding rate data for the current scan cycle."""
+        self._funding_rates = rates or {}
 
     async def analyze_pair(self, pair: str) -> ConfluenceSignal:
         """
@@ -363,6 +390,16 @@ class ConfluenceDetector:
     _TREND_STRATEGIES = {"trend", "ichimoku", "supertrend"}
     _MEAN_REVERSION_STRATEGIES = {"mean_reversion", "stochastic_divergence", "reversal"}
 
+    # Strategy family classification for diversity scoring
+    _STRATEGY_FAMILIES = {
+        "keltner": "mean_reversion", "mean_reversion": "mean_reversion",
+        "reversal": "mean_reversion", "stochastic_divergence": "mean_reversion",
+        "trend": "trend_following", "ichimoku": "trend_following", "supertrend": "trend_following",
+        "volatility_squeeze": "momentum", "order_flow": "microstructure",
+        "vwap_momentum_alpha": "vwap", "market_structure": "structure",
+        "funding_rate": "sentiment",
+    }
+
     async def _run_strategies(
         self,
         pair: str,
@@ -408,6 +445,7 @@ class ConfluenceDetector:
                         vol_regime=vol_regime,
                         round_trip_fee_pct=self.round_trip_fee_pct,
                         market_data=self.market_data,
+                        funding_rates=self._funding_rates,
                     ),
                     timeout=5.0,
                 )
@@ -880,7 +918,7 @@ class ConfluenceDetector:
         else:
             opposing_count = sum(1 for s in long_signals if s.strategy_name != "order_book")
         if opposing_count > 0:
-            opposition_penalty = min(opposing_count * 0.04, 0.12)
+            opposition_penalty = min(opposing_count * 0.07, 0.25)
             weighted_confidence = max(weighted_confidence - opposition_penalty, 0.0)
 
         # Legacy: when OBI is not counted as confluence, still add small confidence bump when it agrees
@@ -890,6 +928,17 @@ class ConfluenceDetector:
         # Regime alignment bonus (small threshold easing when strategy matches regime)
         if self._is_regime_aligned(trend_regime, directional_signals):
             weighted_confidence = min(weighted_confidence + 0.03, 1.0)
+
+        # Strategy family diversity bonus/penalty
+        families = {
+            self._STRATEGY_FAMILIES.get(s.strategy_name, s.strategy_name)
+            for s in directional_signals
+            if s.strategy_name != "order_book"
+        }
+        if len(families) >= 3:
+            weighted_confidence = min(weighted_confidence + 0.05, 1.0)
+        elif len(families) == 1 and len(directional_signals) > 1:
+            weighted_confidence = max(weighted_confidence - 0.05, 0.0)
 
         # Session-aware multiplier: adjust confidence by hour-of-day performance
         if self.session_analyzer:
@@ -1113,7 +1162,7 @@ class ConfluenceDetector:
         elif vol_regime == "low_vol":
             mult *= float(low_vol_weights.get(strategy_name, 1.0))
 
-        return mult
+        return min(mult, 2.0)
 
     def _get_regime_mapping(self, key: str, default: Dict[str, float]) -> Dict[str, float]:
         """Fetch regime mapping with safe fallback."""

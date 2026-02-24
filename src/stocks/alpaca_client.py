@@ -9,6 +9,9 @@ from src.core.logger import get_logger
 
 logger = get_logger("alpaca_client")
 
+# HTTP status codes that indicate transient errors worth retrying.
+_RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+
 
 class AlpacaClient:
     """Minimal async Alpaca trading client (orders + close position)."""
@@ -19,11 +22,13 @@ class AlpacaClient:
         api_secret: str,
         base_url: str = "https://paper-api.alpaca.markets",
         timeout_seconds: float = 20.0,
+        max_retries: int = 3,
     ):
         self.api_key = (api_key or "").strip()
         self.api_secret = (api_secret or "").strip()
         self.base_url = (base_url or "https://paper-api.alpaca.markets").rstrip("/")
         self.timeout_seconds = float(timeout_seconds)
+        self.max_retries = max(1, int(max_retries))
         self._client: httpx.AsyncClient | None = None
 
     @property
@@ -44,6 +49,47 @@ class AlpacaClient:
             await self._client.aclose()
             self._client = None
 
+    async def _request_with_retry(
+        self,
+        method: str,
+        url: str,
+        *,
+        json: Optional[Dict[str, Any]] = None,
+        label: str = "request",
+    ) -> Optional[httpx.Response]:
+        """Execute an HTTP request with exponential backoff retry on transient errors."""
+        if self._client is None:
+            await self.initialize()
+        last_exc: Optional[Exception] = None
+        for attempt in range(self.max_retries):
+            try:
+                resp = await self._client.request(method, url, json=json)
+                if resp.status_code not in _RETRYABLE_STATUS_CODES:
+                    return resp
+                # Retryable HTTP status — back off and retry
+                logger.warning(
+                    f"Alpaca {label} retryable status",
+                    status_code=resp.status_code,
+                    attempt=attempt + 1,
+                )
+            except (httpx.TimeoutException, httpx.ConnectError, httpx.ReadError) as e:
+                last_exc = e
+                logger.warning(
+                    f"Alpaca {label} transient error",
+                    error=repr(e),
+                    attempt=attempt + 1,
+                )
+            except Exception as e:
+                # Non-transient error — don't retry
+                logger.warning(f"Alpaca {label} failed", error=repr(e))
+                return None
+            if attempt < self.max_retries - 1:
+                await asyncio.sleep(min(2 ** attempt, 8))
+        # All retries exhausted
+        if last_exc:
+            logger.warning(f"Alpaca {label} failed after {self.max_retries} retries", error=repr(last_exc))
+        return None
+
     async def submit_market_order(
         self,
         symbol: str,
@@ -56,8 +102,6 @@ class AlpacaClient:
     ) -> Optional[Dict[str, Any]]:
         if not self.enabled:
             return None
-        if self._client is None:
-            await self.initialize()
         symbol_raw = str(symbol or "").strip().upper()
         if asset_class == "option" and symbol_raw.startswith("O:"):
             symbol_raw = symbol_raw[2:]
@@ -69,95 +113,89 @@ class AlpacaClient:
             "time_in_force": time_in_force,
         }
         orders_path = "/v2/options/orders" if asset_class == "option" else "/v2/orders"
-        try:
-            resp = await self._client.post(f"{self.base_url}{orders_path}", json=payload)
-            resp.raise_for_status()
-            order = resp.json()
-            if self._is_filled(order):
-                return order
-
-            # Market orders are usually quick, but not always synchronous.
-            # Poll briefly so internal state uses filled qty/price when available.
-            oid = str(order.get("id", "")).strip()
-            if oid and wait_fill_seconds > 0:
-                deadline = asyncio.get_running_loop().time() + float(wait_fill_seconds)
-                while asyncio.get_running_loop().time() < deadline:
-                    await asyncio.sleep(0.5)
-                    fresh = await self.get_order(oid)
-                    if fresh:
-                        order = fresh
-                    if self._is_filled(order):
-                        break
-            return order
-        except Exception as e:
+        resp = await self._request_with_retry(
+            "POST", f"{self.base_url}{orders_path}", json=payload,
+            label=f"submit_order({symbol_raw})",
+        )
+        if resp is None or resp.status_code >= 400:
             logger.warning(
                 "Alpaca submit order failed",
-                symbol=symbol_raw,
-                asset_class=asset_class,
-                side=side,
-                qty=qty,
-                error=repr(e),
+                symbol=symbol_raw, asset_class=asset_class, side=side, qty=qty,
+                status=resp.status_code if resp else None,
             )
             return None
+        order = resp.json()
+        if self._is_filled(order):
+            return order
+
+        # Market orders are usually quick, but not always synchronous.
+        # Poll briefly so internal state uses filled qty/price when available.
+        oid = str(order.get("id", "")).strip()
+        if oid and wait_fill_seconds > 0:
+            deadline = asyncio.get_running_loop().time() + float(wait_fill_seconds)
+            while asyncio.get_running_loop().time() < deadline:
+                await asyncio.sleep(0.5)
+                fresh = await self.get_order(oid)
+                if fresh:
+                    order = fresh
+                if self._is_filled(order):
+                    break
+        return order
 
     async def close_position(self, symbol: str) -> Optional[Dict[str, Any]]:
         if not self.enabled:
             return None
-        if self._client is None:
-            await self.initialize()
-        try:
-            resp = await self._client.delete(f"{self.base_url}/v2/positions/{symbol.upper()}")
-            if resp.status_code in (200, 202):
-                return resp.json()
-            if resp.status_code == 404:
-                return {"status": "no_position"}
-            logger.warning(
-                "Alpaca close position rejected",
-                symbol=symbol,
-                status_code=resp.status_code,
-                body=resp.text[:200],
-            )
+        resp = await self._request_with_retry(
+            "DELETE", f"{self.base_url}/v2/positions/{symbol.upper()}",
+            label=f"close_position({symbol})",
+        )
+        if resp is None:
             return None
-        except Exception as e:
-            logger.warning("Alpaca close position failed", symbol=symbol, error=repr(e))
-            return None
+        if resp.status_code in (200, 202):
+            return resp.json()
+        if resp.status_code == 404:
+            return {"status": "no_position"}
+        logger.warning(
+            "Alpaca close position rejected",
+            symbol=symbol,
+            status_code=resp.status_code,
+            body=resp.text[:200],
+        )
+        return None
 
     async def get_order(self, order_id: str) -> Optional[Dict[str, Any]]:
         if not self.enabled:
             return None
-        if self._client is None:
-            await self.initialize()
         oid = (order_id or "").strip()
         if not oid:
             return None
-        try:
-            resp = await self._client.get(f"{self.base_url}/v2/orders/{oid}")
-            if resp.status_code == 200:
-                return resp.json()
-            return None
-        except Exception:
-            return None
+        resp = await self._request_with_retry(
+            "GET", f"{self.base_url}/v2/orders/{oid}",
+            label="get_order",
+        )
+        if resp is not None and resp.status_code == 200:
+            return resp.json()
+        return None
 
     async def list_open_positions(self) -> list[Dict[str, Any]]:
         """Return currently open broker positions."""
         if not self.enabled:
             return []
-        if self._client is None:
-            await self.initialize()
-        try:
-            resp = await self._client.get(f"{self.base_url}/v2/positions")
-            if resp.status_code == 200:
-                payload = resp.json()
-                return payload if isinstance(payload, list) else []
-            logger.warning(
-                "Alpaca list positions failed",
-                status_code=resp.status_code,
-                body=resp.text[:200],
-            )
+        resp = await self._request_with_retry(
+            "GET", f"{self.base_url}/v2/positions",
+            label="list_positions",
+        )
+        if resp is None:
             return []
-        except Exception as e:
-            logger.warning("Alpaca list positions exception", error=repr(e))
-            return []
+        if resp.status_code == 200:
+            payload = resp.json()
+            return payload if isinstance(payload, list) else []
+        logger.warning(
+            "Alpaca list positions failed",
+            status_code=resp.status_code,
+            body=resp.text[:200],
+        )
+        return []
 
     @staticmethod
     def _is_filled(order: Dict[str, Any]) -> bool:

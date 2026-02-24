@@ -1,6 +1,6 @@
 # Contact Support
 
-**Last updated:** 2026-02-22
+**Last updated:** 2026-02-24
 
 We are here to help. Whether you have a question about your dashboard, need help with settings, or are experiencing a problem, our support team is ready to assist.
 

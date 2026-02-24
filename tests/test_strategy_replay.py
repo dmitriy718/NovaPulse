@@ -106,7 +106,7 @@ REPLAY_CASES = [
     ReplayCase("mean_reversion", MeanReversionStrategy, 70, "short", {}),
     ReplayCase("ichimoku", IchimokuStrategy, 83, "short", {}),
     ReplayCase("order_flow", OrderFlowStrategy, 42, "long", {"market_data": _FakeMarketData()}),
-    ReplayCase("trend", TrendStrategy, 1, "long", {}),
+    ReplayCase("trend", lambda: TrendStrategy(require_fresh_cross=False), 1, "long", {}),
     ReplayCase("stochastic_divergence", StochasticDivergenceStrategy, 42, "neutral", {}),
     ReplayCase("volatility_squeeze", VolatilitySqueezeStrategy, 120, "long", {}),
     ReplayCase("supertrend", SupertrendStrategy, 22, "short", {}),

@@ -1,7 +1,7 @@
 # NovaPulse Config Reference
 
-**Version:** 4.0.0
-**Last Updated:** 2026-02-22
+**Version:** 4.5.0
+**Last Updated:** 2026-02-24
 
 ---
 
@@ -22,7 +22,7 @@ NovaPulse configuration is loaded from `config/config.yaml` and overlaid with en
 | Key | Type | Default | Env Override | Description |
 |-----|------|---------|-------------|-------------|
 | `name` | str | "AI Crypto Trading Bot" | -- | Display name |
-| `version` | str | "3.0.0" | -- | Software version |
+| `version` | str | "4.5.0" | -- | Software version |
 | `mode` | str | "paper" | `TRADING_MODE` | Trading mode: `paper` or `live` |
 | `log_level` | str | "INFO" | `LOG_LEVEL` | Logging level: DEBUG/INFO/WARNING/ERROR |
 | `db_path` | str | "data/trading.db" | `DB_PATH` | SQLite database file path |

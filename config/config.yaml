@@ -4,7 +4,7 @@
 
 app:
   name: "AI Crypto Trading Bot"
-  version: "4.1.1"
+  version: "4.5.0"
   mode: "paper"  # paper | live
   log_level: "INFO"
   db_path: "data/trading.db"
@@ -60,6 +60,9 @@ trading:
     volatility_squeeze: 120
     supertrend: 120
     reversal: 120
+    vwap_momentum_alpha: 120
+    market_structure: 120
+    funding_rate: 120
   event_price_move_pct: 0.003
   single_strategy_mode: null    # or "keltner", "trend", "mean_reversion", etc. for testing
   quiet_hours_utc: [0, 1, 2, 3, 4, 5]  # Avoid thin overnight liquidity (UTC)
@@ -96,7 +99,7 @@ strategies:
     rsi_period: 14
     rsi_long_max: 45
     rsi_short_min: 55
-    weight: 0.30
+    weight: 0.25
   # Mean Reversion — proven winner (80% WR, 5 trades)
   mean_reversion:
     enabled: true
@@ -104,44 +107,7 @@ strategies:
     bb_std: 2.5
     rsi_oversold: 25
     rsi_overbought: 75
-    weight: 0.25
-  # Ichimoku Cloud — replaces VWAP Momentum Alpha
-  ichimoku:
-    enabled: true
-    tenkan_period: 9
-    kijun_period: 26
-    senkou_b_period: 52
-    atr_period: 14
-    weight: 0.15
-  # Order Flow — microstructure-based, uses order book data
-  order_flow:
-    enabled: true
-    book_score_threshold: 0.3
-    spread_tight_pct: 0.0010
-    spread_tight_multiplier: 1.0
-    hl_lookback: 5
-    max_book_age_seconds: 5
-    atr_period: 14
-    min_depth_usd: 100000
-    weight: 0.15
-  # Trend — untested, fundamentally sound
-  trend:
-    enabled: true
-    ema_fast: 20
-    ema_slow: 50
-    adx_threshold: 30
-    weight: 0.15
-  # Stochastic Divergence — replaces RSI Mean Reversion
-  stochastic_divergence:
-    enabled: true
-    k_period: 14
-    d_period: 3
-    smooth: 3
-    oversold: 20.0
-    overbought: 80.0
-    divergence_lookback: 20
-    atr_period: 14
-    weight: 0.12
+    weight: 0.20
   # Volatility Squeeze — replaces Breakout (TTM Squeeze concept)
   volatility_squeeze:
     enabled: true
@@ -153,6 +119,36 @@ strategies:
     momentum_period: 12
     atr_period: 14
     min_squeeze_bars: 5
+    weight: 0.18
+  # VWAP Momentum Alpha — volume-weighted pullback entries
+  vwap_momentum_alpha:
+    enabled: true
+    vwap_window: 20
+    band_std: 1.5
+    pullback_z: 0.6
+    slope_period: 5
+    volume_multiplier: 1.0
+    slope_min_pct: 0.0005
+    weight: 0.15
+  # Order Flow — microstructure-based, uses order book data
+  order_flow:
+    enabled: true
+    book_score_threshold: 0.3
+    spread_tight_pct: 0.0010
+    spread_tight_multiplier: 1.0
+    hl_lookback: 5
+    max_book_age_seconds: 5
+    atr_period: 14
+    min_depth_usd: 100000
+    weight: 0.12
+  # Market Structure — swing-based trend structure with pullback entries
+  market_structure:
+    enabled: true
+    swing_lookback: 5
+    pullback_tolerance_pct: 0.005
+    rsi_floor: 35
+    rsi_ceiling: 65
+    atr_period: 14
     weight: 0.12
   # Supertrend — ATR-based adaptive trend with volume confirmation
   supertrend:
@@ -162,15 +158,47 @@ strategies:
     volume_period: 20
     volume_threshold: 1.2
     atr_period: 14
+    weight: 0.12
+  # Funding Rate — sentiment-based from perpetual futures funding rates
+  funding_rate:
+    enabled: true
+    funding_extreme_pct: 0.01
     weight: 0.10
-  # Reversal — untested, fundamentally sound
+  # Ichimoku Cloud
+  ichimoku:
+    enabled: true
+    tenkan_period: 9
+    kijun_period: 26
+    senkou_b_period: 52
+    atr_period: 14
+    weight: 0.08
+  # Trend — requires fresh EMA cross
+  trend:
+    enabled: true
+    ema_fast: 20
+    ema_slow: 50
+    adx_threshold: 30
+    require_fresh_cross: true
+    weight: 0.08
+  # Stochastic Divergence — replaces RSI Mean Reversion
+  stochastic_divergence:
+    enabled: true
+    k_period: 14
+    d_period: 3
+    smooth: 3
+    oversold: 20.0
+    overbought: 80.0
+    divergence_lookback: 20
+    atr_period: 14
+    weight: 0.06
+  # Reversal — fundamentally sound, low weight
   reversal:
     enabled: true
     rsi_extreme_low: 15
     rsi_extreme_high: 85
     confirmation_candles: 5
     min_atr_pct: 0.005
-    weight: 0.10
+    weight: 0.06
 
 ai:
   confluence_threshold: 2  # 2 strategies agreeing = tradable (3 was too strict, rejected most setups)
@@ -212,6 +240,9 @@ ai:
       supertrend: 1.2
       order_flow: 1.1
       volatility_squeeze: 1.1
+      vwap_momentum_alpha: 1.2
+      market_structure: 1.1
+      funding_rate: 0.9
       mean_reversion: 0.8
       stochastic_divergence: 0.8
       reversal: 0.7
@@ -222,6 +253,9 @@ ai:
       keltner: 1.2
       reversal: 1.1
       order_flow: 1.1
+      funding_rate: 1.2
+      vwap_momentum_alpha: 1.0
+      market_structure: 0.9
       trend: 0.8
       ichimoku: 0.8
       supertrend: 0.8
@@ -230,6 +264,9 @@ ai:
       volatility_squeeze: 1.3
       supertrend: 1.1
       order_flow: 1.1
+      funding_rate: 1.1
+      vwap_momentum_alpha: 0.9
+      market_structure: 1.0
       mean_reversion: 0.9
       stochastic_divergence: 0.9
       reversal: 0.9
@@ -237,6 +274,9 @@ ai:
       mean_reversion: 1.2
       stochastic_divergence: 1.2
       keltner: 1.1
+      vwap_momentum_alpha: 1.1
+      market_structure: 1.0
+      funding_rate: 0.9
       volatility_squeeze: 0.8
       supertrend: 0.9
       ichimoku: 0.9
@@ -268,7 +308,7 @@ risk:
   risk_of_ruin_threshold: 0.01    # 1% acceptable risk of ruin
   global_cooldown_seconds_on_loss: 60  # Reduce post-loss freeze to keep trade cadence healthy
   smart_exit:
-    enabled: false   # Off by default — enable after testing
+    enabled: true    # Enabled per deep_4.md recommendation
     tiers:
       - pct: 0.50    # Close 50% of remaining position
         tp_mult: 1.0  # At 1x original TP distance from entry

@@ -1,6 +1,6 @@
 # Controls: Pause, Resume, Close All, and Emergency Kill
 
-**Last updated:** 2026-02-22
+**Last updated:** 2026-02-24
 
 NovaPulse gives you full control over the bot at all times. Whether you want to temporarily pause trading, close all positions, or hit the emergency stop, you can do it instantly from the dashboard, Telegram, Discord, or Slack.
 

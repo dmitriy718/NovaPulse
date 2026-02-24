@@ -1,6 +1,6 @@
 # Security and Privacy
 
-**Last updated:** 2026-02-22
+**Last updated:** 2026-02-24
 
 Your security is a top priority for NovaPulse. This guide explains how your data, API keys, and access are protected.
 

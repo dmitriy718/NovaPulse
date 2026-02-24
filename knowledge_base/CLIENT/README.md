@@ -1,11 +1,11 @@
 # NovaPulse Client Documentation
 
-**Version:** 4.0.0
-**Last updated:** 2026-02-22
+**Version:** 4.5.0
+**Last updated:** 2026-02-24
 
-Welcome to NovaPulse -- your AI-powered cryptocurrency trading assistant.
+Welcome to NovaPulse -- your AI-powered cryptocurrency and stock trading assistant.
 
-NovaPulse monitors the crypto markets 24/7, analyzes price action using nine intelligent trading strategies, and executes trades on your behalf with institutional-grade risk management. Whether you are an experienced trader looking to automate your approach or completely new to crypto trading, NovaPulse is designed to keep you informed, in control, and protected.
+NovaPulse monitors the crypto and stock markets around the clock, analyzes price action using twelve intelligent trading strategies across three exchanges (Kraken, Coinbase, and Alpaca), and executes trades on your behalf with institutional-grade risk management. Whether you are an experienced trader looking to automate your approach or completely new to trading, NovaPulse is designed to keep you informed, in control, and protected.
 
 This documentation covers everything you need to know as a NovaPulse subscriber: from getting started and reading your dashboard, to understanding how the AI makes decisions and how your capital is protected.
 
@@ -19,7 +19,7 @@ This documentation covers everything you need to know as a NovaPulse subscriber:
 | 2 | [Dashboard Walkthrough](Nova-Dashboard-Walkthrough.md) | Every panel, metric, and button on your dashboard |
 | 3 | [Controls: Pause, Resume, Kill](Controls-Pause-Resume-Kill.md) | How to control trading -- pause, resume, close all, emergency stop |
 | 4 | [Understanding Metrics](Understanding-Metrics.md) | Plain-language explanations of every performance metric |
-| 5 | [Trading Strategies](Trading-Strategies.md) | How the nine AI strategies work and why confluence matters |
+| 5 | [Trading Strategies](Trading-Strategies.md) | How the twelve AI strategies work and why confluence matters |
 | 6 | [Risk and Safety](Risk-Safety.md) | Every layer of protection keeping your capital safe |
 | 7 | [Notifications](Notifications.md) | Setting up Telegram, Discord, and Slack alerts and commands |
 | 8 | [Configuration Guide](Configuration-Guide.md) | Adjusting settings, pairs, risk, and strategies |
@@ -28,6 +28,10 @@ This documentation covers everything you need to know as a NovaPulse subscriber:
 | 11 | [FAQ](FAQ.md) | Frequently asked questions |
 | 12 | [Billing and Plans](Billing-Plans.md) | Subscription tiers, billing, upgrades, and cancellations |
 | 13 | [Contact Support](Contact-Support.md) | How to reach us and what to include in your request |
+| 14 | [Multi-Exchange Trading](Multi-Exchange-Trading.md) | How NovaPulse trades across Kraken, Coinbase, and stock markets |
+| 15 | [Stock Trading](Stock-Trading.md) | Swing trading US equities with Polygon data and Alpaca execution |
+| 16 | [AI and ML Features](AI-ML-Features.md) | How artificial intelligence improves your trading |
+| 17 | [Smart Exit System](Smart-Exit-System.md) | Adaptive exits, trailing stops, and time-based management |
 
 ---
 
@@ -48,4 +52,4 @@ Trading cryptocurrency involves risk. NovaPulse is a tool that helps you trade m
 
 ---
 
-*NovaPulse v3.0.0 -- Built for traders who value discipline, transparency, and control.*
+*NovaPulse v4.5.0 -- Built for traders who value discipline, transparency, and control.*

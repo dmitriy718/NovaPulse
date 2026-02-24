@@ -51,6 +51,10 @@ class DatabaseManager:
         self.db_path = db_path
         self._db: Optional[aiosqlite.Connection] = None
         self._lock = asyncio.Lock()
+        # Read semaphore: allows up to 8 concurrent reads while writes still
+        # acquire the exclusive _lock. SQLite WAL supports concurrent reads
+        # natively; this prevents Python-level serialization of reads.
+        self._read_semaphore = asyncio.Semaphore(8)
         self._initialized = False
         # TTL cache for get_performance_stats (keyed by tenant_id)
         self._perf_stats_cache: Dict[str, Any] = {}

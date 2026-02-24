@@ -1,6 +1,6 @@
 # Risk and Safety
 
-**Last updated:** 2026-02-22
+**Last updated:** 2026-02-24
 
 NovaPulse is built with safety as its foundation. Multiple layers of protection work together to guard your capital against large losses. This guide explains every safety feature in detail, so you can trade with confidence knowing how your money is protected.
 

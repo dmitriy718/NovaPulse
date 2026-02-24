@@ -1,6 +1,6 @@
 # Notifications: Telegram, Discord, and Slack
 
-**Last updated:** 2026-02-22
+**Last updated:** 2026-02-24
 
 NovaPulse can send you real-time notifications and accept commands through Telegram, Discord, or Slack. This means you can monitor your bot and control it from your phone, even when you are away from your dashboard.
 
