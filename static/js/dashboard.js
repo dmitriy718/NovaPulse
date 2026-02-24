@@ -339,6 +339,7 @@ function renderPositions(positions) {
             </td>
             <td>
                 ${renderConfidence(conf)}
+                ${renderSLTPBar(pos)}
             </td>
             <td>${formatPrice(pos.stop_loss || 0)}</td>
         </tr>`;
@@ -1897,6 +1898,59 @@ function renderConfidence(conf) {
     return `<div class="conf-wrap">
         <span class="conf-text">${pctLabel}%</span>
         <div class="conf-bar"><div class="conf-fill" style="width:${pctLabel}%"></div></div>
+    </div>`;
+}
+
+function renderSLTPBar(pos) {
+    const sl = Number(pos.stop_loss) || 0;
+    const tp = Number(pos.take_profit) || 0;
+    const entry = Number(pos.entry_price) || 0;
+    const current = Number(pos.current_price || pos.entry_price) || 0;
+    const side = String(pos.side || '').toLowerCase();
+
+    if (!sl || !tp || !entry || Math.abs(tp - sl) < 1e-12) return '';
+
+    // Normalize: 0 = SL (danger), 1 = TP (target)
+    let entryPos, currentPos;
+    if (side === 'buy') {
+        const range = tp - sl;
+        entryPos = (entry - sl) / range;
+        currentPos = (current - sl) / range;
+    } else {
+        const range = sl - tp;
+        entryPos = (sl - entry) / range;
+        currentPos = (sl - current) / range;
+    }
+
+    // Clamp visual positions to [0, 1]
+    const entryPct = Math.max(0, Math.min(1, entryPos)) * 100;
+    const curPct = Math.max(0, Math.min(1, currentPos)) * 100;
+
+    // Fill from entry to current
+    const inProfit = currentPos >= entryPos;
+    const fillLeft = inProfit ? entryPct : curPct;
+    const fillWidth = Math.abs(curPct - entryPct);
+    const fillClass = inProfit ? 'sltp-fill-green' : 'sltp-fill-red';
+
+    // Cursor color: interpolate red → green based on position
+    // 0 = pure red (at SL), 1 = pure green (at TP)
+    const t = Math.max(0, Math.min(1, currentPos));
+    const r = Math.round(239 - t * 205);
+    const g = Math.round(68 + t * 129);
+    const b = Math.round(68 + t * 26);
+    const cursorColor = `rgb(${r},${g},${b})`;
+
+    return `<div class="sltp-wrap">
+        <div class="sltp-bar">
+            <div class="sltp-bg">
+                <div class="sltp-zone-sl" style="width:${entryPct.toFixed(1)}%"></div>
+                <div class="sltp-zone-tp" style="width:${(100 - entryPct).toFixed(1)}%"></div>
+            </div>
+            <div class="sltp-fill ${fillClass}" style="left:${fillLeft.toFixed(1)}%;width:${fillWidth.toFixed(1)}%"></div>
+            <div class="sltp-entry" style="left:${entryPct.toFixed(1)}%"></div>
+            <div class="sltp-cursor" style="left:${curPct.toFixed(1)}%;background:${cursorColor}"></div>
+        </div>
+        <div class="sltp-labels"><span class="sltp-sl">SL</span><span class="sltp-tp">TP</span></div>
     </div>`;
 }
 
