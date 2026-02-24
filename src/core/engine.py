@@ -137,6 +137,12 @@ class BotEngine:
         self._ws_disconnected_since: Optional[float] = None
         self._auto_pause_reason: str = ""
         self._invalid_pairs: set = set()  # pairs permanently rejected by exchange
+        # Pre-exclude stablecoins / pegged assets — no tradeable volatility
+        self._untradeable_pairs: frozenset = frozenset({
+            "USDT/USD", "USDC/USD", "DAI/USD", "BUSD/USD", "TUSD/USD",
+            "USDP/USD", "FRAX/USD", "GUSD/USD", "LUSD/USD", "PYUSD/USD",
+            "FDUSD/USD", "EURC/USD", "XAUT/USD", "PAXG/USD", "USD1/USD",
+        })
         # In multi-engine mode, only one engine should run ES retention cleanup.
         self._es_cleanup_leader: bool = True
         # Adaptive scan interval: tracks recent event frequency
@@ -1055,6 +1061,8 @@ class BotEngine:
 
     async def _apply_universe_update(self, new_pairs: List[str]) -> None:
         """Apply a universe update: manage WS subscriptions, warmup, PAIR_MAP."""
+        # Strip untradeable pairs (stablecoins, pegged assets)
+        new_pairs = [p for p in new_pairs if p not in self._untradeable_pairs]
         old_set = set(self.pairs)
         new_set = set(new_pairs)
 
@@ -1389,6 +1397,11 @@ class BotEngine:
 
                 # Step 3: Run confluence analysis on event-driven pairs
                 pairs_to_scan, from_event = await self._collect_scan_pairs()
+                # Filter out stablecoins/pegged assets and invalid pairs
+                pairs_to_scan = [
+                    p for p in pairs_to_scan
+                    if p not in self._untradeable_pairs and p not in self._invalid_pairs
+                ]
                 if not self.confluence:
                     logger.warning("Confluence detector not initialized, skipping scan")
                     await asyncio.sleep(self.scan_interval)
