@@ -21,6 +21,13 @@ logger = get_logger("crypto_universe")
 class CryptoUniverseScanner:
     """Build and cache a dynamic crypto trading pair universe."""
 
+    # Stablecoins and pegged assets — no meaningful price action, untradeable.
+    _EXCLUDED_PAIRS: frozenset = frozenset({
+        "USDT/USD", "USDC/USD", "DAI/USD", "BUSD/USD", "TUSD/USD",
+        "USDP/USD", "FRAX/USD", "GUSD/USD", "LUSD/USD", "PYUSD/USD",
+        "FDUSD/USD", "EURC/USD", "XAUT/USD", "PAXG/USD", "USD1/USD",
+    })
+
     def __init__(
         self,
         rest_client: Any,
@@ -116,6 +123,10 @@ class CryptoUniverseScanner:
                 continue
 
             canonical = f"{symbol}/USD"
+
+            # Skip stablecoins and pegged assets
+            if canonical in self._EXCLUDED_PAIRS:
+                continue
 
             # Cross-reference: only include if exchange supports this pair
             if self._exchange_pair_catalog and canonical not in self._exchange_pair_catalog:
