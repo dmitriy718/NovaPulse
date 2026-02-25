@@ -11,6 +11,7 @@ MultiEngineHub, or each engine has its own loop — the Lock is per-process).
 from __future__ import annotations
 
 import asyncio
+import threading
 from typing import Dict, Optional
 
 from src.core.logger import get_logger
@@ -22,11 +23,14 @@ class GlobalRiskAggregator:
     """Singleton cross-engine risk aggregator."""
 
     _instance: Optional[GlobalRiskAggregator] = None
+    _cls_lock: threading.Lock = threading.Lock()
 
     def __new__(cls) -> GlobalRiskAggregator:
         if cls._instance is None:
-            cls._instance = super().__new__(cls)
-            cls._instance._initialized = False
+            with cls._cls_lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+                    cls._instance._initialized = False
         return cls._instance
 
     def __init__(self, max_total_exposure_usd: float = 0.0):

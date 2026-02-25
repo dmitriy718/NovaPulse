@@ -381,6 +381,8 @@ class ConfluenceDetector:
             tf_signal = self._compute_confluence(
                 pair, signals, trend_regime, vol_regime, vol_level, vol_expanding
             )
+            if tf_signal is None:
+                continue
             tf_signal.core_indicators = self._extract_core_indicators(indicator_cache, closes)
             timeframe_results[tf] = tf_signal
 
@@ -746,11 +748,13 @@ class ConfluenceDetector:
         signals: List[StrategySignal],
         trend_regime: Optional[str] = None,
         vol_regime: Optional[str] = None,
+        # Returns None when no directional signals are present
         vol_level: float = 0.5,
         vol_expanding: bool = False,
-    ) -> ConfluenceSignal:
+    ) -> Optional[ConfluenceSignal]:
         """
         Compute confluence from multiple strategy signals.
+        Returns None if no directional signals are present.
         
         # ENHANCEMENT: Added weighted scoring and performance-based adjustments
         """

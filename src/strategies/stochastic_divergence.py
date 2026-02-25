@@ -185,6 +185,8 @@ class StochasticDivergenceStrategy(BaseStrategy):
 
         window_lows = lows[-lookback:]
         window_k = pct_k[-lookback:]
+        if len(window_lows) < 3:
+            return False
 
         # Find the two most recent local lows in price
         price_low_indices = []
@@ -221,6 +223,8 @@ class StochasticDivergenceStrategy(BaseStrategy):
 
         window_highs = highs[-lookback:]
         window_k = pct_k[-lookback:]
+        if len(window_highs) < 3:
+            return False
 
         price_high_indices = []
         for i in range(1, len(window_highs) - 1):
