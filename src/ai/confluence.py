@@ -918,7 +918,7 @@ class ConfluenceDetector:
         else:
             opposing_count = sum(1 for s in long_signals if s.strategy_name != "order_book")
         if opposing_count > 0:
-            opposition_penalty = min(opposing_count * 0.07, 0.25)
+            opposition_penalty = min(opposing_count * 0.05, 0.20)
             weighted_confidence = max(weighted_confidence - opposition_penalty, 0.0)
 
         # Legacy: when OBI is not counted as confluence, still add small confidence bump when it agrees
