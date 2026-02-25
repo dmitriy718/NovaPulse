@@ -711,3 +711,45 @@ def ichimoku(
         chikou[:n - kijun] = closes[kijun:]
 
     return tenkan_sen, kijun_sen, senkou_a, senkou_b_arr, chikou
+
+
+def choppiness_index(
+    highs: np.ndarray, lows: np.ndarray, closes: np.ndarray, period: int = 14
+) -> np.ndarray:
+    """Choppiness Index (CI) — measures whether the market is trending or choppy.
+
+    CI = 100 * LOG10(SUM(ATR(1), period) / (HH - LL)) / LOG10(period)
+
+    Values > 61.8 indicate choppy/ranging markets.
+    Values < 38.2 indicate trending markets.
+    """
+    n = len(closes)
+    result = np.full(n, np.nan)
+
+    if n < period + 1:
+        return np.nan_to_num(result, nan=50.0)
+
+    # True Range (1-period)
+    tr = np.maximum(
+        highs[1:] - lows[1:],
+        np.maximum(
+            np.abs(highs[1:] - closes[:-1]),
+            np.abs(lows[1:] - closes[:-1]),
+        ),
+    )
+    # Prepend a NaN so tr aligns with closes (index 0 has no prev close)
+    tr_full = np.concatenate(([np.nan], tr))
+
+    log10_period = np.log10(period)
+    if log10_period == 0:
+        return np.nan_to_num(result, nan=50.0)
+
+    for i in range(period, n):
+        atr_sum = np.nansum(tr_full[i - period + 1 : i + 1])
+        hh = np.max(highs[i - period + 1 : i + 1])
+        ll = np.min(lows[i - period + 1 : i + 1])
+        hl_range = hh - ll
+        if hl_range > 0 and atr_sum > 0:
+            result[i] = 100.0 * np.log10(atr_sum / hl_range) / log10_period
+
+    return np.nan_to_num(result, nan=50.0)

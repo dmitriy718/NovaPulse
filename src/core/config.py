@@ -541,6 +541,53 @@ class RegimeConfig(BaseModel):
     })
 
 
+class LeadLagConfig(BaseModel):
+    enabled: bool = False
+    leader_pairs: List[str] = Field(default_factory=lambda: ["BTC/USD", "ETH/USD"])
+    atr_multiplier: float = 1.0
+    lookback_minutes: int = 5
+    boost_confidence: float = 0.15
+    penalize_confidence: float = 0.10
+    min_correlation: float = 0.5
+
+
+class RegimePredictorConfig(BaseModel):
+    enabled: bool = False
+    squeeze_duration_threshold: int = 8
+    adx_slope_period: int = 5
+    adx_emerging_threshold: float = 20.0
+    volume_ratio_threshold: float = 1.3
+    emerging_trend_boost: float = 0.10
+
+
+class EnsembleMLConfig(BaseModel):
+    enabled: bool = False
+    lgbm_weight: float = 0.4
+    tflite_weight: float = 0.6
+    min_training_samples: int = 100
+    retrain_interval_hours: float = 24.0
+    feature_names: List[str] = Field(default_factory=lambda: [
+        "rsi_14", "atr_pct", "bb_position", "volume_ratio",
+        "momentum_5", "adx", "obv_slope", "spread_pct",
+        "confidence", "confluence_count",
+    ])
+
+
+class BayesianOptimizerConfig(BaseModel):
+    enabled: bool = False
+    n_trials: int = 50
+    optimization_interval_hours: float = 48.0
+    min_trades_for_optimization: int = 200
+    metric: str = "sharpe_ratio"  # sharpe_ratio, profit_factor, calmar_ratio
+
+
+class OnChainConfig(BaseModel):
+    enabled: bool = False
+    cache_ttl_seconds: int = 900
+    weight: float = 0.08
+    min_abs_score: float = 0.3
+
+
 class SessionConfig(BaseModel):
     enabled: bool = True
     min_trades_per_hour: int = 5
@@ -576,6 +623,11 @@ class AIConfig(BaseModel):
     strategy_guardrails_disable_minutes: int = 120
     session: SessionConfig = Field(default_factory=SessionConfig)
     regime: RegimeConfig = Field(default_factory=RegimeConfig)
+    lead_lag: LeadLagConfig = Field(default_factory=LeadLagConfig)
+    regime_predictor: RegimePredictorConfig = Field(default_factory=RegimePredictorConfig)
+    onchain: OnChainConfig = Field(default_factory=OnChainConfig)
+    ensemble_ml: EnsembleMLConfig = Field(default_factory=EnsembleMLConfig)
+    bayesian_optimizer: BayesianOptimizerConfig = Field(default_factory=BayesianOptimizerConfig)
 
 
 class SmartExitTier(BaseModel):
@@ -589,6 +641,21 @@ class SmartExitConfig(BaseModel):
         SmartExitTier(pct=0.6, tp_mult=1.5),
         SmartExitTier(pct=1.0, tp_mult=0),  # 0 = trailing stop only
     ])
+
+
+class StructuralStopConfig(BaseModel):
+    """Place stops behind recent swing structure instead of fixed ATR multiples."""
+    enabled: bool = False
+    lookback: int = 5
+    buffer_atr_mult: float = 0.5
+    max_distance_atr: float = 4.0
+
+
+class LiquiditySizingConfig(BaseModel):
+    """Reduce position size when order book depth is thin."""
+    enabled: bool = False
+    max_impact_pct: float = 0.10
+    min_depth_ratio: float = 3.0
 
 
 class RiskConfig(BaseModel):
@@ -608,6 +675,8 @@ class RiskConfig(BaseModel):
     max_total_exposure_pct: float = 0.50  # max sum(size_usd) as % of bankroll
     global_cooldown_seconds_on_loss: int = 1800
     smart_exit: SmartExitConfig = Field(default_factory=SmartExitConfig)
+    structural_stop: StructuralStopConfig = Field(default_factory=StructuralStopConfig)
+    liquidity_sizing: LiquiditySizingConfig = Field(default_factory=LiquiditySizingConfig)
     correlation_groups: Dict[str, str] = Field(
         default_factory=lambda: {
             "BTC/USD": "btc",
@@ -747,6 +816,24 @@ class ElasticsearchConfig(BaseModel):
     cryptopanic_api_key: str = ""
 
 
+class EventCalendarConfig(BaseModel):
+    enabled: bool = False
+    blackout_minutes: int = 30
+    events_file: str = "data/events/macro_events.json"
+    fetch_earnings: bool = False
+    earnings_refresh_hours: int = 24
+
+
+class AnomalyDetectorConfig(BaseModel):
+    enabled: bool = False
+    spread_threshold_mult: float = 3.0
+    volume_threshold_mult: float = 5.0
+    correlation_threshold: float = 0.60
+    depth_drop_threshold: float = 0.50
+    pause_seconds: int = 300
+    min_history_samples: int = 20
+
+
 class MonitoringConfig(BaseModel):
     health_check_interval: int = 30
     auto_restart: bool = True
@@ -762,6 +849,7 @@ class MonitoringConfig(BaseModel):
     auto_pause_on_drawdown: bool = True
     drawdown_pause_pct: float = 8.0
     emergency_close_on_auto_pause: bool = False
+    anomaly_detector: AnomalyDetectorConfig = Field(default_factory=AnomalyDetectorConfig)
 
 
 class UniverseConfig(BaseModel):
@@ -957,6 +1045,7 @@ class BotConfig(BaseModel):
     stocks: StocksConfig = Field(default_factory=StocksConfig)
     elasticsearch: ElasticsearchConfig = Field(default_factory=ElasticsearchConfig)
     webhooks: SignalWebhookConfig = Field(default_factory=SignalWebhookConfig)
+    event_calendar: EventCalendarConfig = Field(default_factory=EventCalendarConfig)
 
 
 # ---------------------------------------------------------------------------

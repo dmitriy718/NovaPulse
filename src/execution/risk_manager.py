@@ -170,6 +170,11 @@ class RiskManager:
         vol_level: float = 0.5,
         vol_expanding: bool = False,
         session_multiplier: float = 1.0,
+        bid_depth_usd: float = 0.0,
+        ask_depth_usd: float = 0.0,
+        liquidity_sizing_enabled: bool = False,
+        liquidity_max_impact_pct: float = 0.10,
+        liquidity_min_depth_ratio: float = 3.0,
     ) -> PositionSizeResult:
         """
         Calculate optimal position size using Kelly Criterion.
@@ -287,6 +292,18 @@ class RiskManager:
         # Apply portfolio heat limit (total exposure)
         remaining_capacity = self._get_remaining_capacity()
         position_size_usd = min(position_size_usd, remaining_capacity)
+
+        # Liquidity-aware sizing: reduce when order book depth is thin
+        if liquidity_sizing_enabled and (bid_depth_usd > 0 or ask_depth_usd > 0):
+            side = "buy" if stop_loss < entry_price else "sell"
+            position_size_usd = self.apply_liquidity_adjustment(
+                position_size_usd,
+                bid_depth_usd,
+                ask_depth_usd,
+                side,
+                max_impact_pct=liquidity_max_impact_pct,
+                min_depth_ratio=liquidity_min_depth_ratio,
+            )
 
         if position_size_usd < 10:  # Minimum $10 position
             result.reason = (
@@ -423,6 +440,17 @@ class RiskManager:
         elif vol_regime == "low_vol":
             trailing_step *= 0.7  # Tighter in calm markets
 
+        # Adaptive trailing activation threshold by volatility regime
+        trailing_activation = self.trailing_activation_pct
+        breakeven_activation = self.breakeven_activation_pct
+        if vol_regime == "low_vol":
+            trailing_activation = 0.025  # 2.5% — activate sooner in calm markets
+            breakeven_activation = 0.02
+        elif vol_regime == "high_vol":
+            trailing_activation = 0.06   # 6% — let winners run further in volatile markets
+            breakeven_activation = 0.04
+        # mid_vol uses config defaults (4% trailing, 3% breakeven)
+
         if side == "buy":
             pnl_pct = (current_price - entry_price) / entry_price
 
@@ -431,7 +459,7 @@ class RiskManager:
                 state.trailing_high = current_price
 
             # Breakeven activation
-            if not state.breakeven_activated and pnl_pct >= self.breakeven_activation_pct:
+            if not state.breakeven_activated and pnl_pct >= breakeven_activation:
                 state.breakeven_activated = True
                 state.current_sl = max(state.current_sl, entry_price)
                 logger.debug(
@@ -440,7 +468,7 @@ class RiskManager:
                 )
 
             # Trailing stop activation
-            if pnl_pct >= self.trailing_activation_pct:
+            if pnl_pct >= trailing_activation:
                 state.trailing_activated = True
                 # Trail from the highest price
                 new_sl = state.trailing_high * (1 - trailing_step)
@@ -461,11 +489,11 @@ class RiskManager:
             if current_price < state.trailing_low:
                 state.trailing_low = current_price
 
-            if not state.breakeven_activated and pnl_pct >= self.breakeven_activation_pct:
+            if not state.breakeven_activated and pnl_pct >= breakeven_activation:
                 state.breakeven_activated = True
                 state.current_sl = min(state.current_sl, entry_price)
 
-            if pnl_pct >= self.trailing_activation_pct:
+            if pnl_pct >= trailing_activation:
                 state.trailing_activated = True
                 new_sl = state.trailing_low * (1 + trailing_step)
 
@@ -493,6 +521,125 @@ class RiskManager:
             return current_price <= state.current_sl
         else:
             return current_price >= state.current_sl
+
+    # ------------------------------------------------------------------
+    # Structural Stop Loss
+    # ------------------------------------------------------------------
+
+    def compute_structural_stop(
+        self,
+        pair: str,
+        side: str,
+        entry_price: float,
+        highs: np.ndarray,
+        lows: np.ndarray,
+        atr_value: float,
+        lookback: int = 5,
+        buffer_atr_mult: float = 0.5,
+        max_distance_atr: float = 4.0,
+    ) -> float:
+        """Compute a stop loss behind the nearest swing structure.
+
+        For buy: find the nearest swing low below entry, place SL = swing_low - buffer.
+        For sell: find the nearest swing high above entry, place SL = swing_high + buffer.
+
+        Buffer = buffer_atr_mult * atr_value.
+
+        If no suitable swing found within max_distance_atr * ATR from entry,
+        fall back to standard ATR-based stop (entry -/+ atr_multiplier_sl * ATR).
+
+        Returns: stop loss price.
+        """
+        from src.strategies.market_structure import MarketStructureStrategy
+
+        if entry_price <= 0 or atr_value <= 0:
+            return entry_price - self.atr_multiplier_sl * max(atr_value, 0.01) if side == "buy" \
+                else entry_price + self.atr_multiplier_sl * max(atr_value, 0.01)
+
+        buffer = buffer_atr_mult * atr_value
+        max_distance = max_distance_atr * atr_value
+
+        swing_highs, swing_lows = MarketStructureStrategy._find_swings(
+            highs, lows, lookback
+        )
+
+        if side == "buy":
+            candidates = [
+                (idx, price) for idx, price in swing_lows
+                if price < entry_price and (entry_price - price) <= max_distance
+            ]
+            if candidates:
+                nearest = max(candidates, key=lambda x: x[1])
+                sl = nearest[1] - buffer
+                logger.debug(
+                    "Structural SL (buy)",
+                    pair=pair, swing_low=nearest[1], buffer=buffer, sl=sl,
+                )
+                return sl
+            return entry_price - self.atr_multiplier_sl * atr_value
+        else:
+            candidates = [
+                (idx, price) for idx, price in swing_highs
+                if price > entry_price and (price - entry_price) <= max_distance
+            ]
+            if candidates:
+                nearest = min(candidates, key=lambda x: x[1])
+                sl = nearest[1] + buffer
+                logger.debug(
+                    "Structural SL (sell)",
+                    pair=pair, swing_high=nearest[1], buffer=buffer, sl=sl,
+                )
+                return sl
+            return entry_price + self.atr_multiplier_sl * atr_value
+
+    # ------------------------------------------------------------------
+    # Liquidity-Aware Position Sizing
+    # ------------------------------------------------------------------
+
+    def apply_liquidity_adjustment(
+        self,
+        position_size_usd: float,
+        bid_depth_usd: float,
+        ask_depth_usd: float,
+        side: str,
+        max_impact_pct: float = 0.10,
+        min_depth_ratio: float = 3.0,
+    ) -> float:
+        """Adjust position size based on order book depth.
+
+        For buy: check ask_depth_usd.
+        For sell: check bid_depth_usd.
+
+        If depth / position_size < min_depth_ratio, scale down:
+        adjusted = min(position_size, depth * max_impact_pct).
+
+        Returns: adjusted position size (never increases, only decreases).
+        Never returns less than $10 minimum.
+        """
+        relevant_depth = ask_depth_usd if side == "buy" else bid_depth_usd
+
+        if relevant_depth <= 0:
+            # Zero depth: return minimum viable position
+            return max(10.0, position_size_usd * 0.1)
+
+        ratio = relevant_depth / position_size_usd if position_size_usd > 0 else float("inf")
+
+        if ratio >= min_depth_ratio:
+            return position_size_usd
+
+        # Depth is thin relative to our size: cap at max_impact_pct of depth
+        adjusted = min(position_size_usd, relevant_depth * max_impact_pct)
+
+        logger.info(
+            "Liquidity adjustment applied",
+            original=round(position_size_usd, 2),
+            adjusted=round(adjusted, 2),
+            depth=round(relevant_depth, 2),
+            ratio=round(ratio, 2),
+            side=side,
+        )
+
+        return max(10.0, adjusted)
 
     # ------------------------------------------------------------------
     # Risk of Ruin Calculation

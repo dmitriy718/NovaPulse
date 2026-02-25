@@ -292,7 +292,41 @@ class DatabaseManager:
             UNIQUE(date, tenant_id)
         );
 
+        -- Strategy P&L attribution
+        CREATE TABLE IF NOT EXISTS strategy_attribution (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trade_id TEXT NOT NULL,
+            strategy TEXT NOT NULL,
+            regime TEXT,
+            volatility_regime TEXT,
+            pair TEXT NOT NULL,
+            direction TEXT NOT NULL,
+            pnl REAL DEFAULT 0.0,
+            pnl_pct REAL DEFAULT 0.0,
+            entry_time TEXT,
+            exit_time TEXT,
+            duration_seconds REAL,
+            session_hour INTEGER,
+            confluence_count INTEGER,
+            confidence REAL,
+            metadata TEXT,
+            tenant_id TEXT DEFAULT 'default',
+            created_at TEXT DEFAULT (datetime('now'))
+        );
+
+        -- Anomaly events log
+        CREATE TABLE IF NOT EXISTS anomaly_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT NOT NULL,
+            anomaly_type TEXT NOT NULL,
+            description TEXT,
+            pairs_affected TEXT,
+            metadata TEXT,
+            tenant_id TEXT DEFAULT 'default'
+        );
+
         -- Indexes for performance
+        CREATE INDEX IF NOT EXISTS idx_anomaly_events_timestamp ON anomaly_events(timestamp);
         CREATE INDEX IF NOT EXISTS idx_trades_pair ON trades(pair);
         CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status);
         CREATE INDEX IF NOT EXISTS idx_trades_entry_time ON trades(entry_time);
@@ -309,6 +343,9 @@ class DatabaseManager:
         CREATE INDEX IF NOT EXISTS idx_backtest_runs_tenant_created ON backtest_runs(tenant_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_backtest_runs_pair ON backtest_runs(pair);
         CREATE INDEX IF NOT EXISTS idx_copy_trading_providers_tenant ON copy_trading_providers(tenant_id, updated_at);
+        CREATE INDEX IF NOT EXISTS idx_attribution_strategy ON strategy_attribution(strategy);
+        CREATE INDEX IF NOT EXISTS idx_attribution_tenant ON strategy_attribution(tenant_id);
+        CREATE INDEX IF NOT EXISTS idx_attribution_pair ON strategy_attribution(pair);
         """
         await self._db.executescript(schema_sql)
         await self._db.commit()
@@ -1650,6 +1687,153 @@ class DatabaseManager:
             )
             await self._db.commit()
             return bool(cursor.rowcount and cursor.rowcount > 0)
+
+    # ------------------------------------------------------------------
+    # Strategy P&L Attribution
+    # ------------------------------------------------------------------
+
+    async def insert_attribution(self, record: Dict[str, Any], tenant_id: str = "default") -> None:
+        """Insert a strategy attribution record."""
+        if not self._db:
+            return
+        async with self._timed_lock():
+            await self._db.execute(
+                """INSERT INTO strategy_attribution
+                   (trade_id, strategy, regime, volatility_regime, pair, direction,
+                    pnl, pnl_pct, entry_time, exit_time, duration_seconds,
+                    session_hour, confluence_count, confidence, metadata, tenant_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    record.get("trade_id", ""),
+                    record.get("strategy", ""),
+                    record.get("regime"),
+                    record.get("volatility_regime"),
+                    record.get("pair", ""),
+                    record.get("direction", ""),
+                    record.get("pnl", 0.0),
+                    record.get("pnl_pct", 0.0),
+                    record.get("entry_time"),
+                    record.get("exit_time"),
+                    record.get("duration_seconds"),
+                    record.get("session_hour"),
+                    record.get("confluence_count"),
+                    record.get("confidence"),
+                    json.dumps(record.get("metadata", {})) if isinstance(record.get("metadata"), dict) else record.get("metadata"),
+                    tenant_id,
+                ),
+            )
+            await self._db.commit()
+
+    async def get_attribution_stats(
+        self,
+        tenant_id: str = "default",
+        strategy: Optional[str] = None,
+        regime: Optional[str] = None,
+        pair: Optional[str] = None,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        group_by: str = "strategy",
+    ) -> List[Dict[str, Any]]:
+        """Get attribution stats grouped by the specified field."""
+        if not self._db:
+            return []
+        valid_groups = {"strategy", "regime", "volatility_regime", "pair", "direction", "session_hour"}
+        if group_by not in valid_groups:
+            group_by = "strategy"
+
+        conditions = ["tenant_id = ?"]
+        params: list = [tenant_id]
+        if strategy:
+            conditions.append("strategy = ?")
+            params.append(strategy)
+        if regime:
+            conditions.append("regime = ?")
+            params.append(regime)
+        if pair:
+            conditions.append("pair = ?")
+            params.append(pair)
+        if start_date:
+            conditions.append("entry_time >= ?")
+            params.append(start_date)
+        if end_date:
+            conditions.append("entry_time <= ?")
+            params.append(end_date)
+
+        where = " AND ".join(conditions)
+        async with self._read_semaphore:
+            cursor = await self._db.execute(
+                f"""SELECT {group_by},
+                           COUNT(*) as trade_count,
+                           SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
+                           SUM(CASE WHEN pnl <= 0 THEN 1 ELSE 0 END) as losses,
+                           SUM(pnl) as total_pnl,
+                           AVG(pnl) as avg_pnl,
+                           AVG(pnl_pct) as avg_pnl_pct,
+                           AVG(duration_seconds) as avg_duration,
+                           AVG(confidence) as avg_confidence
+                    FROM strategy_attribution
+                    WHERE {where}
+                    GROUP BY {group_by}
+                    ORDER BY total_pnl DESC""",
+                params,
+            )
+            rows = await cursor.fetchall()
+            cols = [d[0] for d in cursor.description] if cursor.description else []
+            return [dict(zip(cols, row)) for row in rows]
+
+    async def get_attribution_summary(self, tenant_id: str = "default") -> Dict[str, Any]:
+        """Get a high-level attribution summary."""
+        if not self._db:
+            return {}
+        async with self._read_semaphore:
+            cursor = await self._db.execute(
+                """SELECT COUNT(*) as total,
+                          SUM(pnl) as total_pnl,
+                          AVG(pnl) as avg_pnl,
+                          SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins
+                   FROM strategy_attribution WHERE tenant_id = ?""",
+                (tenant_id,),
+            )
+            row = await cursor.fetchone()
+            if not row:
+                return {}
+            return {
+                "total_trades": row[0] or 0,
+                "total_pnl": round(row[1] or 0, 4),
+                "avg_pnl": round(row[2] or 0, 4),
+                "win_rate": round((row[3] or 0) / row[0], 4) if row[0] else 0,
+            }
+
+    # ------------------------------------------------------------------
+    # Anomaly Events
+    # ------------------------------------------------------------------
+
+    async def insert_anomaly_event(
+        self,
+        anomaly_type: str,
+        description: str,
+        pairs_affected: Optional[List[str]] = None,
+        metadata: Optional[Dict] = None,
+        tenant_id: str = "default",
+    ) -> None:
+        """Record an anomaly event."""
+        if not self._db:
+            return
+        async with self._timed_lock():
+            await self._db.execute(
+                """INSERT INTO anomaly_events
+                   (timestamp, anomaly_type, description, pairs_affected, metadata, tenant_id)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (
+                    datetime.now(timezone.utc).isoformat(),
+                    anomaly_type,
+                    description,
+                    json.dumps(pairs_affected) if pairs_affected else None,
+                    json.dumps(metadata) if metadata else None,
+                    tenant_id,
+                ),
+            )
+            await self._db.commit()
 
     # ------------------------------------------------------------------
     # Cleanup & Close

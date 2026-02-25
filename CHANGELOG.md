@@ -4,6 +4,64 @@ All notable changes to NovaPulse are documented in this file.
 
 ---
 
+## v5.0.0 (2026-02-25) — Advanced Intelligence Suite
+
+Major release adding 10 new advanced features: macro event calendar, cross-pair lead-lag intelligence, regime transition prediction, on-chain data integration, structural stop loss placement, liquidity-aware position sizing, anomaly detection circuit breaker, P&L attribution dashboard, ensemble ML model, and Bayesian hyperparameter optimization. All features default to `enabled: false` for backward compatibility.
+
+### New Features
+
+**Signal Intelligence**
+- **Macro Event Calendar** — auto-pauses trading during FOMC/CPI/NFP blackout windows; static JSON schedule + optional Polygon earnings fetch; `GET /api/v1/events` endpoint
+- **Cross-Pair Lead-Lag Intelligence** — monitors BTC/ETH leader moves and adjusts follower altcoin confidence by -0.10 to +0.15 based on correlation and move magnitude; `GET /api/v1/lead-lag` endpoint
+- **Regime Transition Prediction** — anticipates range-to-trend and trend-to-range transitions using squeeze duration, ADX slope, volume trend, and choppiness analysis; boosts trend strategy confidence during "emerging_trend"; `GET /api/v1/regime` endpoint
+- **On-Chain Data Integration** — fetches blockchain sentiment signals (exchange flows, stablecoin supply, large txns); applies +/- 0.08 confidence adjustment for aligned/opposing signals; `GET /api/v1/onchain` endpoint
+
+**Risk Management**
+- **Structural Stop Loss Placement** — places stops behind recent swing highs/lows instead of fixed ATR multiples; reuses MarketStructureStrategy swing detection; min 0.5x ATR buffer, max 4x ATR distance; `GET /api/v1/structural-stops` endpoint
+- **Liquidity-Aware Position Sizing** — reduces position size when order book depth is thin relative to trade size; configurable max impact % and min depth ratio; `GET /api/v1/liquidity` endpoint
+
+**Monitoring & Analytics**
+- **Anomaly Detection Circuit Breaker** — detects spread spikes (3x), volume anomalies (5x), correlation anomalies (>60% same direction), and depth drops (>50%); auto-pauses trading for configurable cooldown; `GET /api/v1/anomalies` endpoint
+- **P&L Attribution Dashboard** — records strategy, regime, volatility, session, and confluence metadata per trade; query by strategy/regime/pair/date with `GET /api/v1/attribution`
+
+**Machine Learning**
+- **Ensemble ML Model** — combines existing TFLite predictor with LightGBM binary classifier; weighted average (configurable 40/60 split); graceful fallback when either model unavailable; `GET /api/v1/ensemble` endpoint
+- **Bayesian Hyperparameter Optimization** — Optuna-based TPE optimization of confluence_threshold, min_confidence, trailing_activation, risk params; supports sharpe_ratio/profit_factor/calmar_ratio metrics; `GET /api/v1/optimizer` + `/optimizer/history` endpoints
+
+### Dashboard
+- New **Advanced Features** panel showing real-time status of all 10 features (enabled/disabled, blackout state, regime, training status, etc.)
+- 5 new REST API endpoints: `/api/v1/lead-lag`, `/api/v1/regime`, `/api/v1/onchain`, `/api/v1/structural-stops`, `/api/v1/liquidity`
+- Feature status streamed via WebSocket for real-time dashboard updates
+- Settings modal now includes feature toggle visibility
+- Version bumped to v5.0 in header
+
+### New Files (17)
+- `src/utils/event_calendar.py`, `data/events/macro_events.json`
+- `src/ai/lead_lag.py`, `src/ai/regime_predictor.py`, `src/ai/ensemble_model.py`, `src/ai/bayesian_optimizer.py`
+- `src/exchange/onchain_data.py`
+- `src/execution/anomaly_detector.py`
+- Tests: `test_event_calendar.py`, `test_lead_lag.py`, `test_regime_predictor.py`, `test_onchain_data.py`, `test_structural_stop.py`, `test_liquidity_sizing.py`, `test_anomaly_detector.py`, `test_ensemble_model.py`, `test_bayesian_optimizer.py`, `test_strategy_attribution.py`, `test_feature_integration.py`
+
+### New DB Tables
+- `strategy_attribution` — per-trade P&L attribution records with strategy/regime/session metadata
+- `anomaly_events` — anomaly detection event log
+
+### New Dependencies
+- `lightgbm>=4.0.0,<5` (optional — ensemble ML)
+- `optuna>=3.5.0,<4` (optional — Bayesian optimization)
+
+### Config
+- 10 new config models: `EventCalendarConfig`, `LeadLagConfig`, `RegimePredictorConfig`, `OnChainConfig`, `StructuralStopConfig`, `LiquiditySizingConfig`, `AnomalyDetectorConfig`, `EnsembleMLConfig`, `BayesianOptimizerConfig`
+- All nested under existing sections (ai, risk, monitoring, event_calendar)
+- All default to `enabled: false` — zero behavior change when upgrading
+
+### Testing
+- Test suite: 319 passed, 20 skipped (up from 175)
+- 20 skips are for optional dependency tests (lightgbm: 9, optuna: 11)
+- 11 cross-feature integration tests validating feature interactions
+
+---
+
 ## v4.5.0 (2026-02-24) — Strategy Expansion & Adaptive Intelligence
 
 The largest single release since v4.0. Implements all recommendations from Deep Review #4: three new strategies expanding the portfolio to 12, adaptive exit intelligence, correlation-aware sizing, and cross-engine risk aggregation. Jumped from v4.1.1 directly to v4.5.0 to reflect the scope.

@@ -123,6 +123,7 @@ function renderUpdate(data) {
     renderScanner(data.scanner);
     renderStockScanner(data.scanner);
     renderRisk(data.risk);
+    if (data.features) renderFeatures(data.features);
     if (data.strategies) renderStrategies(data.strategies);
     updateFavoriteButtonsState();
 }
@@ -1360,6 +1361,68 @@ function setGauge(barId, valId, pct, fmt) {
     const val = document.getElementById(valId);
     if (bar) bar.style.width = Math.min(pct, 100) + '%';
     if (val) val.textContent = fmt(pct);
+}
+
+// ---- Advanced Features ----
+
+function renderFeatures(features) {
+    if (!features) return;
+    const featureMap = {
+        'event_calendar': { dot: 'feat-event-calendar', status: 'featEventStatus', label: function(f) {
+            if (f.blackout) return 'BLACKOUT' + (f.event ? ': ' + f.event : '');
+            return 'ACTIVE';
+        }, alertOn: 'blackout' },
+        'anomaly_detector': { dot: 'feat-anomaly-detector', status: 'featAnomalyStatus', label: function(f) {
+            if (f.paused) return 'PAUSED';
+            return 'MONITORING';
+        }, alertOn: 'paused' },
+        'lead_lag': { dot: 'feat-lead-lag', status: 'featLeadLagStatus', label: function(f) {
+            const pairs = f.leader_pairs || [];
+            return pairs.length + ' LEADERS';
+        }},
+        'regime': { dot: 'feat-regime', status: 'featRegimeStatus', label: function(f) {
+            return (f.state || 'unknown').toUpperCase().replace('_', ' ');
+        }},
+        'onchain': { dot: 'feat-onchain', status: 'featOnchainStatus', label: function(f) {
+            const count = Object.keys(f.sentiments || {}).length;
+            return count > 0 ? count + ' PAIRS' : 'NO DATA';
+        }},
+        'structural_stop': { dot: 'feat-structural-stop', status: 'featStructuralStatus' },
+        'liquidity_sizing': { dot: 'feat-liquidity', status: 'featLiquidityStatus' },
+        'ensemble_ml': { dot: 'feat-ensemble', status: 'featEnsembleStatus', label: function(f) {
+            return f.trained ? 'TRAINED' : 'UNTRAINED';
+        }},
+        'optimizer': { dot: 'feat-optimizer', status: 'featOptimizerStatus', label: function(f) {
+            return f.is_running ? 'RUNNING' : 'IDLE';
+        }},
+        'attribution': { dot: 'feat-attribution', status: 'featAttributionStatus' },
+    };
+
+    for (const [key, cfg] of Object.entries(featureMap)) {
+        const feat = features[key];
+        if (!feat) continue;
+        const enabled = feat.enabled;
+        const container = document.getElementById(cfg.dot);
+        const statusEl = document.getElementById(cfg.status);
+        if (container) {
+            const dot = container.querySelector('.feature-dot');
+            if (dot) {
+                dot.className = 'feature-dot ' + (
+                    !enabled ? 'off' :
+                    (cfg.alertOn && feat[cfg.alertOn]) ? 'alert' : 'on'
+                );
+            }
+        }
+        if (statusEl) {
+            if (!enabled) {
+                statusEl.textContent = 'OFF';
+            } else if (cfg.label) {
+                statusEl.textContent = cfg.label(feat);
+            } else {
+                statusEl.textContent = 'ON';
+            }
+        }
+    }
 }
 
 // ---- Sparkline ----

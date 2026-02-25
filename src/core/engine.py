@@ -105,6 +105,12 @@ class BotEngine:
         self.discord_bot: Optional[DiscordBot] = None
         self.slack_bot: Optional[SlackBot] = None
         self.error_handler: GracefulErrorHandler = GracefulErrorHandler()
+        self._event_calendar = None
+        self._anomaly_detector = None
+        self._lead_lag_tracker = None
+        self._onchain_client = None
+        self._ensemble_model = None
+        self._bayesian_optimizer = None
 
         # Elasticsearch data pipeline (initialized in initialize() if enabled)
         self.es_client = None
@@ -615,6 +621,18 @@ class BotEngine:
                     self.config.trading, "single_strategy_mode", None
                 ),
             )
+            # Structural stop loss config injection
+            structural_cfg = getattr(self.config.risk, "structural_stop", None)
+            if structural_cfg and getattr(structural_cfg, "enabled", False):
+                self.confluence.set_structural_stop_config(
+                    {
+                        "enabled": True,
+                        "lookback": getattr(structural_cfg, "lookback", 5),
+                        "buffer_atr_mult": getattr(structural_cfg, "buffer_atr_mult", 0.5),
+                        "max_distance_atr": getattr(structural_cfg, "max_distance_atr", 4.0),
+                    },
+                    atr_multiplier_sl=self.config.risk.atr_multiplier_sl,
+                )
         except Exception as e:
             await self.error_handler.handle(e, component="confluence", context="init")
 
@@ -653,6 +671,88 @@ class BotEngine:
             )
         except Exception as e:
             await self.error_handler.handle(e, component="order_book_analyzer", context="init")
+
+        # Lead-Lag Tracker (non-critical)
+        try:
+            ll_cfg = getattr(self.config.ai, "lead_lag", None)
+            if ll_cfg and getattr(ll_cfg, "enabled", False):
+                from src.ai.lead_lag import LeadLagTracker
+                self._lead_lag_tracker = LeadLagTracker(
+                    leader_pairs=list(ll_cfg.leader_pairs),
+                    atr_multiplier=ll_cfg.atr_multiplier,
+                    lookback_minutes=ll_cfg.lookback_minutes,
+                    boost_confidence=ll_cfg.boost_confidence,
+                    penalize_confidence=ll_cfg.penalize_confidence,
+                    min_correlation=ll_cfg.min_correlation,
+                )
+                if self.confluence:
+                    self.confluence.set_lead_lag_tracker(self._lead_lag_tracker)
+                logger.info("Lead-lag tracker initialized", leaders=ll_cfg.leader_pairs)
+        except Exception as e:
+            logger.warning("Lead-lag tracker init failed (non-fatal)", error=repr(e))
+
+        # Regime Transition Predictor (non-critical)
+        try:
+            rp_cfg = getattr(self.config.ai, "regime_predictor", None)
+            if rp_cfg and getattr(rp_cfg, "enabled", False):
+                from src.ai.regime_predictor import RegimeTransitionPredictor
+                _regime_predictor = RegimeTransitionPredictor(
+                    squeeze_duration_threshold=rp_cfg.squeeze_duration_threshold,
+                    adx_slope_period=rp_cfg.adx_slope_period,
+                    adx_emerging_threshold=rp_cfg.adx_emerging_threshold,
+                    volume_ratio_threshold=rp_cfg.volume_ratio_threshold,
+                    emerging_trend_boost=rp_cfg.emerging_trend_boost,
+                )
+                if self.confluence:
+                    self.confluence.set_regime_predictor(_regime_predictor)
+                logger.info("Regime transition predictor initialized")
+        except Exception as e:
+            logger.warning("Regime predictor init failed (non-fatal)", error=repr(e))
+
+        # On-Chain Data Client (non-critical)
+        try:
+            oc_cfg = getattr(self.config.ai, "onchain", None)
+            if oc_cfg and getattr(oc_cfg, "enabled", False):
+                from src.exchange.onchain_data import OnChainDataClient
+                self._onchain_client = OnChainDataClient(
+                    cache_ttl_seconds=oc_cfg.cache_ttl_seconds,
+                    weight=oc_cfg.weight,
+                    min_abs_score=oc_cfg.min_abs_score,
+                )
+                logger.info("On-chain data client initialized")
+        except Exception as e:
+            logger.warning("On-chain data client init failed (non-fatal)", error=repr(e))
+
+        # Ensemble ML Model (non-critical)
+        try:
+            em_cfg = getattr(self.config.ai, "ensemble_ml", None)
+            if em_cfg and getattr(em_cfg, "enabled", False):
+                from src.ai.ensemble_model import EnsembleModel
+                self._ensemble_model = EnsembleModel(
+                    lgbm_weight=em_cfg.lgbm_weight,
+                    tflite_weight=em_cfg.tflite_weight,
+                    min_training_samples=em_cfg.min_training_samples,
+                    retrain_interval_hours=em_cfg.retrain_interval_hours,
+                    feature_names=list(em_cfg.feature_names),
+                )
+                logger.info("Ensemble ML model initialized (untrained)")
+        except Exception as e:
+            logger.warning("Ensemble ML model init failed (non-fatal)", error=repr(e))
+
+        # Bayesian Optimizer (non-critical)
+        try:
+            bo_cfg = getattr(self.config.ai, "bayesian_optimizer", None)
+            if bo_cfg and getattr(bo_cfg, "enabled", False):
+                from src.ai.bayesian_optimizer import BayesianOptimizer
+                self._bayesian_optimizer = BayesianOptimizer(
+                    n_trials=bo_cfg.n_trials,
+                    optimization_interval_hours=bo_cfg.optimization_interval_hours,
+                    min_trades_for_optimization=bo_cfg.min_trades_for_optimization,
+                    metric=bo_cfg.metric,
+                )
+                logger.info("Bayesian optimizer initialized", metric=bo_cfg.metric, n_trials=bo_cfg.n_trials)
+        except Exception as e:
+            logger.warning("Bayesian optimizer init failed (non-fatal)", error=repr(e))
 
     async def _init_risk_and_execution(self) -> None:
         """Initialize RiskManager, TradeExecutor, and restore positions."""
@@ -763,6 +863,15 @@ class BotEngine:
             smart_exit_tiers=self.config.risk.smart_exit.tiers if self.config.risk.smart_exit.enabled else [],
             correlation_groups=getattr(self.config.risk, "correlation_groups", None),
             max_per_correlation_group=getattr(self.config.risk, "max_positions_per_correlation_group", 2),
+            liquidity_sizing_enabled=getattr(
+                getattr(self.config.risk, "liquidity_sizing", None), "enabled", False
+            ),
+            liquidity_max_impact_pct=getattr(
+                getattr(self.config.risk, "liquidity_sizing", None), "max_impact_pct", 0.10
+            ),
+            liquidity_min_depth_ratio=getattr(
+                getattr(self.config.risk, "liquidity_sizing", None), "min_depth_ratio", 3.0
+            ),
         )
         if self.continuous_learner:
             self.executor.set_continuous_learner(self.continuous_learner)
@@ -770,6 +879,40 @@ class BotEngine:
             self.executor._confluence = self.confluence
         if self.session_analyzer:
             self.executor.session_analyzer = self.session_analyzer
+
+        # Event Calendar (non-critical)
+        try:
+            ev_cfg = getattr(self.config, "event_calendar", None)
+            if ev_cfg and getattr(ev_cfg, "enabled", False):
+                from src.utils.event_calendar import EventCalendar
+                self._event_calendar = EventCalendar(
+                    events_file=getattr(ev_cfg, "events_file", "data/events/macro_events.json"),
+                    blackout_minutes=getattr(ev_cfg, "blackout_minutes", 30),
+                    fetch_earnings=getattr(ev_cfg, "fetch_earnings", False),
+                    earnings_refresh_hours=getattr(ev_cfg, "earnings_refresh_hours", 24),
+                )
+                self.executor.set_event_calendar(self._event_calendar)
+                logger.info("Event calendar initialized", events=len(self._event_calendar._events))
+        except Exception as e:
+            logger.warning("Event calendar init failed (non-fatal)", error=repr(e))
+
+        # Anomaly Detector (non-critical)
+        try:
+            mon_cfg = getattr(self.config, "monitoring", None)
+            ad_cfg = getattr(mon_cfg, "anomaly_detector", None) if mon_cfg else None
+            if ad_cfg and getattr(ad_cfg, "enabled", False):
+                from src.execution.anomaly_detector import AnomalyDetector
+                self._anomaly_detector = AnomalyDetector(
+                    spread_threshold_mult=getattr(ad_cfg, "spread_threshold_mult", 3.0),
+                    volume_threshold_mult=getattr(ad_cfg, "volume_threshold_mult", 5.0),
+                    correlation_threshold=getattr(ad_cfg, "correlation_threshold", 0.60),
+                    depth_drop_threshold=getattr(ad_cfg, "depth_drop_threshold", 0.50),
+                    pause_seconds=getattr(ad_cfg, "pause_seconds", 300),
+                    min_history_samples=getattr(ad_cfg, "min_history_samples", 20),
+                )
+                logger.info("Anomaly detector initialized")
+        except Exception as e:
+            logger.warning("Anomaly detector init failed (non-fatal)", error=repr(e))
 
         # Restore open positions state
         await self.executor.reinitialize_positions()
@@ -1407,6 +1550,16 @@ class BotEngine:
                     await asyncio.sleep(self.scan_interval)
                     continue
 
+                # Update leader prices for lead-lag tracker
+                if getattr(self, "_lead_lag_tracker", None) and self.market_data:
+                    try:
+                        for lp in self._lead_lag_tracker._leader_pairs:
+                            px = self.market_data.get_latest_price(lp)
+                            if px and px > 0:
+                                self._lead_lag_tracker.update_leader_price(lp, px)
+                    except Exception:
+                        pass
+
                 # Fetch funding rates (cheap due to 5-min cache) and update price history
                 if self.funding_rate_client:
                     try:
@@ -1435,6 +1588,71 @@ class BotEngine:
                     await agg.register_exposure(engine_id, exposure)
                 except Exception:
                     pass
+
+                # Fetch on-chain sentiments (cached) and inject into confluence
+                if getattr(self, "_onchain_client", None) and self.confluence:
+                    try:
+                        sentiments = await self._onchain_client.fetch_sentiments()
+                        self.confluence.set_onchain_sentiments(
+                            sentiments,
+                            weight=self._onchain_client.weight,
+                            min_abs_score=self._onchain_client.min_abs_score,
+                        )
+                    except Exception:
+                        pass
+
+                # Ensemble ML: periodic retrain from DB features
+                if getattr(self, "_ensemble_model", None) and self._ensemble_model.needs_retrain():
+                    try:
+                        if self.db:
+                            raw_data = await self.db.get_ml_training_data(
+                                min_samples=self._ensemble_model._min_training_samples,
+                                tenant_id=self.tenant_id,
+                            )
+                            if raw_data:
+                                features = [r["features"] for r in raw_data]
+                                labels = [float(r["label"]) for r in raw_data]
+                                await self._ensemble_model.train(features, labels)
+                    except Exception as e:
+                        logger.debug("Ensemble ML retrain skipped", error=repr(e))
+
+                # Bayesian optimizer: periodic parameter suggestions (never auto-applied)
+                if getattr(self, "_bayesian_optimizer", None) and self._bayesian_optimizer.needs_optimization():
+                    try:
+                        if self.db:
+                            all_trades = await self.db.get_trade_history(
+                                limit=5000,
+                                tenant_id=self.tenant_id,
+                            )
+                            if all_trades:
+                                # Fire and forget: run in background to avoid blocking scan
+                                asyncio.create_task(self._bayesian_optimizer.optimize(all_trades))
+                    except Exception as e:
+                        logger.debug("Bayesian optimization trigger skipped", error=repr(e))
+
+                # Anomaly detection gate
+                if getattr(self, "_anomaly_detector", None):
+                    try:
+                        anomalies = self._anomaly_detector.run_all_checks(self.market_data, pairs_to_scan)
+                        if anomalies and self.db:
+                            for desc in anomalies[:3]:  # Cap DB writes
+                                atype = desc.split(" ")[0] if desc else "unknown"
+                                await self.db.insert_anomaly_event(
+                                    anomaly_type=atype,
+                                    description=desc,
+                                    pairs_affected=pairs_to_scan[:10],
+                                    tenant_id=self.tenant_id,
+                                )
+                        if self._anomaly_detector.is_paused():
+                            await self.db.log_thought(
+                                "system",
+                                f"Scan skipped: anomaly detector cooldown active",
+                                severity="warning",
+                                tenant_id=self.tenant_id,
+                            )
+                            continue
+                    except Exception as e:
+                        logger.warning("Anomaly check failed", error=repr(e))
 
                 confluence_signals = await self.confluence.scan_all_pairs(
                     pairs_to_scan
@@ -1521,6 +1739,15 @@ class BotEngine:
                     else:
                         ai_confidence = base_ai
 
+                    # Ensemble ML: blend LightGBM prediction with ai_confidence
+                    if getattr(self, "_ensemble_model", None) and self._ensemble_model.is_trained:
+                        try:
+                            ai_confidence = self._ensemble_model.ensemble_predict(
+                                prediction_features, tflite_score=ai_confidence,
+                            )
+                        except Exception:
+                            pass  # Fall back to existing ai_confidence
+
                     # Blend: for solo signals let strategy dominate so we still collect data.
                     pre_blend = signal.confidence
                     if directional_real_votes <= 1:
@@ -1581,7 +1808,7 @@ class BotEngine:
                     if sl_dist > 0 and tp_dist > 0 and (tp_dist / sl_dist) < min_rr:
                         continue
 
-                    # Skip if spread too wide
+                    # Skip if spread too wide (absolute max_spread_pct gate)
                     max_spread = getattr(self.config.trading, "max_spread_pct", 0.0) or 0.0
                     if max_spread > 0:
                         book = self.market_data.get_order_book(signal.pair) if self.market_data else {}
@@ -1592,6 +1819,15 @@ class BotEngine:
                         )
                         spread = self.market_data.get_spread(signal.pair)
                         if spread <= 0 or book_age > max_book_age or spread > max_spread:
+                            continue
+
+                    # Spread-to-ATR hard gate: reject when spread eats too much of
+                    # expected move (spread > 15% of ATR-based expected move)
+                    _core = getattr(signal, "core_indicators", None) or {}
+                    _atr_pct_val = float(_core.get("atr_pct", 0) or 0)
+                    _spread_val = self.market_data.get_spread(signal.pair) if self.market_data else 0.0
+                    if _atr_pct_val > 0 and _spread_val > 0:
+                        if _spread_val > _atr_pct_val * 0.15:
                             continue
 
                     # Spread-relative TP adjustment: widen TP to cover
@@ -2088,6 +2324,8 @@ class BotEngine:
             trend_regime=getattr(signal, "regime", "") or "",
             vol_regime=getattr(signal, "volatility_regime", "") or "",
         )
+        # Pass signal direction so heuristic fallback can score directionally
+        features["signal_direction"] = signal.direction.value if signal.direction else ""
         return features
 
     def get_algorithm_stats(self) -> List[Dict[str, Any]]:

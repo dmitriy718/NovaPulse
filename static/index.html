@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>NovaPulse - Command Center</title>
-    <link rel="stylesheet" href="/static/css/dashboard.css?v=20260221a">
+    <link rel="stylesheet" href="/static/css/dashboard.css?v=20260225a">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@300;400;500;600;700&family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
@@ -20,7 +20,7 @@
             <div class="logo">
                 <span class="logo-icon">◆</span>
                 <span class="logo-text">NOVA|PULSE</span>
-                <span class="logo-version">v4.5</span>
+                <span class="logo-version">v5.0</span>
             </div>
             <div class="status-indicator" id="statusIndicator">
                 <span class="pulse"></span>
@@ -186,6 +186,65 @@
             <div class="stock-scanner-overlay" id="stockScannerOverlay">MARKET CLOSED</div>
         </section>
 
+        <!-- Advanced Features Monitor -->
+        <section class="glass-card features-card">
+            <div class="card-header">
+                <h2>ADVANCED FEATURES</h2>
+            </div>
+            <div class="features-grid" id="featuresGrid">
+                <div class="feature-item" id="feat-event-calendar">
+                    <span class="feature-dot off"></span>
+                    <span class="feature-name">Event Calendar</span>
+                    <span class="feature-status" id="featEventStatus">OFF</span>
+                </div>
+                <div class="feature-item" id="feat-anomaly-detector">
+                    <span class="feature-dot off"></span>
+                    <span class="feature-name">Anomaly Detector</span>
+                    <span class="feature-status" id="featAnomalyStatus">OFF</span>
+                </div>
+                <div class="feature-item" id="feat-lead-lag">
+                    <span class="feature-dot off"></span>
+                    <span class="feature-name">Lead-Lag</span>
+                    <span class="feature-status" id="featLeadLagStatus">OFF</span>
+                </div>
+                <div class="feature-item" id="feat-regime">
+                    <span class="feature-dot off"></span>
+                    <span class="feature-name">Regime Predictor</span>
+                    <span class="feature-status" id="featRegimeStatus">OFF</span>
+                </div>
+                <div class="feature-item" id="feat-onchain">
+                    <span class="feature-dot off"></span>
+                    <span class="feature-name">On-Chain Data</span>
+                    <span class="feature-status" id="featOnchainStatus">OFF</span>
+                </div>
+                <div class="feature-item" id="feat-structural-stop">
+                    <span class="feature-dot off"></span>
+                    <span class="feature-name">Structural Stops</span>
+                    <span class="feature-status" id="featStructuralStatus">OFF</span>
+                </div>
+                <div class="feature-item" id="feat-liquidity">
+                    <span class="feature-dot off"></span>
+                    <span class="feature-name">Liquidity Sizing</span>
+                    <span class="feature-status" id="featLiquidityStatus">OFF</span>
+                </div>
+                <div class="feature-item" id="feat-ensemble">
+                    <span class="feature-dot off"></span>
+                    <span class="feature-name">Ensemble ML</span>
+                    <span class="feature-status" id="featEnsembleStatus">OFF</span>
+                </div>
+                <div class="feature-item" id="feat-optimizer">
+                    <span class="feature-dot off"></span>
+                    <span class="feature-name">Bayesian Optimizer</span>
+                    <span class="feature-status" id="featOptimizerStatus">OFF</span>
+                </div>
+                <div class="feature-item" id="feat-attribution">
+                    <span class="feature-dot on"></span>
+                    <span class="feature-name">P&L Attribution</span>
+                    <span class="feature-status" id="featAttributionStatus">ON</span>
+                </div>
+            </div>
+        </section>
+
         <!-- Risk Monitor -->
         <section class="glass-card risk-card">
             <div class="card-header">
@@ -297,6 +356,6 @@
     <!-- Settings Toast -->
     <div id="settingsToast" class="settings-toast hidden"></div>
 
-    <script src="/static/js/dashboard.js?v=20260221a"></script>
+    <script src="/static/js/dashboard.js?v=20260225a"></script>
 </body>
 </html>
