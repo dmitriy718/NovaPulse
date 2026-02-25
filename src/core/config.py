@@ -803,7 +803,7 @@ class StocksConfig(BaseModel):
     polygon_base_url: str = "https://api.polygon.io"
     alpaca_api_key: str = ""
     alpaca_api_secret: str = ""
-    alpaca_base_url: str = "https://paper-api.alpaca.markets"
+    alpaca_base_url: str = "[REDACTED]"
     universe: UniverseConfig = Field(default_factory=UniverseConfig)
 
     @field_validator("min_hold_days")
@@ -869,9 +869,9 @@ class AppConfig(BaseModel):
     version: str = "4.5.0"
     mode: str = "paper"
     log_level: str = "INFO"
-    db_path: str = "data/trading.db"
+    db_path: str = "[REDACTED]"
     # Optional explicit exchange list for multi-exchange mode.
-    # Example: "kraken,coinbase"
+    # Example: "[REDACTED]"
     trading_exchanges: str = ""
     # Optional account id label (used for multi-account orchestrations).
     account_id: str = "default"
@@ -987,8 +987,9 @@ class ConfigManager:
         return cls._instance
 
     def __init__(self):
-        if self._config is None:
-            self.load()
+        with self._lock:
+            if self._config is None:
+                self.load()
 
     def load(self, config_path: str = "config/config.yaml") -> BotConfig:
         """Load configuration from YAML + environment variables."""

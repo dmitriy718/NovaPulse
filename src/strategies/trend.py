@@ -107,8 +107,8 @@ class TrendStrategy(BaseStrategy):
         price_above_emas = curr_price > curr_ema_f and curr_price > curr_ema_s
         price_below_emas = curr_price < curr_ema_f and curr_price < curr_ema_s
 
-        # EMA spread strength
-        ema_spread = abs(curr_ema_f - curr_ema_s) / curr_ema_s if curr_ema_s > 0 else 0
+        # EMA spread strength (guard division by zero)
+        ema_spread = abs(curr_ema_f - curr_ema_s) / curr_ema_s if abs(curr_ema_s) > 1e-12 else 0
 
         # Trend slope (acceleration) — per-bar average change over 2 bars
         if len(ts) >= 3:
@@ -116,9 +116,9 @@ class TrendStrategy(BaseStrategy):
         else:
             slope = 0.0
 
-        # Volume confirmation
-        avg_vol = np.mean(volumes[-20:]) if len(volumes) >= 20 else np.mean(volumes)
-        vol_ratio = volumes[-1] / avg_vol if avg_vol > 0 else 1.0
+        # Volume confirmation (guard division by zero)
+        avg_vol = float(np.mean(volumes[-20:])) if len(volumes) >= 20 else float(np.mean(volumes))
+        vol_ratio = float(volumes[-1]) / avg_vol if avg_vol > 1e-12 else 1.0
 
         # Fresh cross gate: if enabled, require a crossover on the current bar
         if self.require_fresh_cross and not bullish_cross and not bearish_cross:

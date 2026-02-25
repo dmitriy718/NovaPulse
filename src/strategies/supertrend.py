@@ -72,7 +72,7 @@ class SupertrendStrategy(BaseStrategy):
         curr_vol_ratio = vol_ratio[-1]
         curr_atr = atr_vals[-1]
 
-        if np.isnan(curr_st) or curr_dir == 0 or prev_dir == 0:
+        if np.isnan(curr_st) or np.isnan(curr_dir) or np.isnan(prev_dir):
             return self._neutral_signal(pair, "Indicators not converged")
         if curr_atr <= 0:
             return self._neutral_signal(pair, "ATR is zero")

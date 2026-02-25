@@ -141,7 +141,7 @@ class MarketStructureStrategy(BaseStrategy):
                 confidence = 0.40
 
                 # Distance bonus: closer to swing low = stronger signal
-                dist_pct = abs(curr_price - prev_swing_low) / prev_swing_low if prev_swing_low > 0 else 0
+                dist_pct = abs(curr_price - prev_swing_low) / prev_swing_low if abs(prev_swing_low) > 1e-12 else 0
                 if dist_pct < tol * 0.5:
                     strength += 0.10
                     confidence += 0.08
