@@ -1,0 +1,280 @@
+# HA-SentinelAI Configuration
+# Production-ready autonomous AI agent for high-availability monitoring
+# =====================================================================
+
+agent:
+  name: HA-SentinelAI
+  log_level: INFO
+  data_dir: ./data/ha_sentinel
+  check_jitter_seconds: 5
+
+  api:
+    enabled: true
+    host: 0.0.0.0
+    port: 8089
+    secret: ""  # Set via HA_SENTINEL_API_SECRET env var for production
+
+  notification_cooldown_seconds: 300
+  escalation_after_minutes: 15
+  metrics_retention_days: 90
+  incident_retention_days: 365
+  remediation_enabled: true
+  max_remediation_per_hour: 10
+
+  # External heartbeat URL (e.g. Healthchecks.io, BetterUptime)
+  heartbeat_url: ""
+  heartbeat_interval_seconds: 60
+
+# =============================================================================
+# Monitored Targets
+# =============================================================================
+# Supported probe types: http, tcp, dns, ssl, icmp, docker, process, custom
+# Each target is checked independently on its own schedule.
+
+targets:
+  # --- SaaS / Web Application Monitoring ---
+  - name: Production API
+    id: prod_api
+    type: http
+    endpoint: https://api.example.com/health
+    interval_seconds: 30
+    timeout_seconds: 10
+    retries: 3
+    expected_status_codes: [200]
+    method: GET
+    group: saas
+    tags: [api, production, critical]
+    response_time_warn_ms: 500
+    response_time_crit_ms: 2000
+    consecutive_failures_warn: 2
+    consecutive_failures_crit: 3
+    notification_channels: [slack-ops, pagerduty-critical]
+    remediation_enabled: true
+    remediation_actions:
+      - type: http_webhook
+        url: https://deploy.example.com/api/restart
+        method: POST
+        timeout: 30
+
+  - name: Marketing Website
+    id: marketing_site
+    type: http
+    endpoint: https://www.example.com
+    interval_seconds: 60
+    timeout_seconds: 15
+    retries: 2
+    expected_status_codes: [200]
+    group: saas
+    tags: [website, marketing]
+    response_time_warn_ms: 2000
+    response_time_crit_ms: 5000
+    consecutive_failures_warn: 3
+    consecutive_failures_crit: 5
+
+  - name: Customer Dashboard
+    id: customer_dashboard
+    type: http
+    endpoint: https://app.example.com/login
+    interval_seconds: 30
+    timeout_seconds: 10
+    retries: 2
+    expected_status_codes: [200]
+    group: saas
+    tags: [dashboard, production]
+
+  # --- SSL Certificate Monitoring ---
+  - name: API SSL Certificate
+    id: api_ssl
+    type: ssl
+    endpoint: api.example.com
+    interval_seconds: 3600  # Check hourly
+    timeout_seconds: 15
+    group: certificates
+    tags: [ssl, production]
+    ssl_warn_days: 30
+    ssl_crit_days: 7
+
+  - name: Website SSL Certificate
+    id: website_ssl
+    type: ssl
+    endpoint: www.example.com
+    interval_seconds: 3600
+    timeout_seconds: 15
+    group: certificates
+    tags: [ssl, marketing]
+    ssl_warn_days: 30
+    ssl_crit_days: 7
+
+  # --- VPS / Infrastructure Monitoring ---
+  - name: App Server 1
+    id: vps_app1
+    type: icmp
+    endpoint: 10.0.1.10
+    interval_seconds: 15
+    timeout_seconds: 5
+    retries: 3
+    group: infrastructure
+    tags: [vps, app-server]
+    consecutive_failures_warn: 3
+    consecutive_failures_crit: 5
+    remediation_enabled: true
+    remediation_actions:
+      - type: ssh_command
+        host: 10.0.1.10
+        user: deploy
+        command: "sudo systemctl restart app-server"
+        timeout: 30
+
+  - name: Database Server
+    id: vps_db
+    type: tcp
+    endpoint: 10.0.1.20:5432
+    interval_seconds: 15
+    timeout_seconds: 5
+    retries: 3
+    group: infrastructure
+    tags: [vps, database, critical]
+    consecutive_failures_warn: 2
+    consecutive_failures_crit: 3
+
+  - name: Redis Cache
+    id: redis_cache
+    type: tcp
+    endpoint: 10.0.1.30:6379
+    interval_seconds: 15
+    timeout_seconds: 3
+    retries: 2
+    group: infrastructure
+    tags: [cache, redis]
+
+  # --- DNS Monitoring ---
+  - name: API DNS Record
+    id: dns_api
+    type: dns
+    endpoint: api.example.com
+    interval_seconds: 300
+    timeout_seconds: 10
+    group: dns
+    tags: [dns, production]
+    dns_record_type: A
+    dns_expected_values: ["93.184.216.34"]
+
+  # --- Docker Container Monitoring ---
+  - name: Nginx Proxy
+    id: docker_nginx
+    type: docker
+    endpoint: docker://nginx-proxy
+    interval_seconds: 30
+    timeout_seconds: 10
+    group: containers
+    tags: [docker, proxy]
+    remediation_enabled: true
+    remediation_actions:
+      - type: restart_docker
+        container: nginx-proxy
+        timeout: 30
+
+  - name: PostgreSQL Container
+    id: docker_postgres
+    type: docker
+    endpoint: docker://postgres-main
+    interval_seconds: 30
+    timeout_seconds: 10
+    group: containers
+    tags: [docker, database, critical]
+    remediation_enabled: true
+    remediation_actions:
+      - type: restart_docker
+        container: postgres-main
+        timeout: 60
+
+  # --- Process Monitoring ---
+  - name: Nginx Process
+    id: proc_nginx
+    type: process
+    endpoint: process://nginx
+    interval_seconds: 30
+    timeout_seconds: 5
+    group: processes
+    tags: [process, webserver]
+    remediation_enabled: true
+    remediation_actions:
+      - type: restart_service
+        service: nginx
+        timeout: 15
+
+  # --- Custom Script Checks ---
+  - name: Disk Space Check
+    id: disk_space
+    type: custom
+    endpoint: "df -h / | awk 'NR==2 {print $5}' | tr -d '%' | awk '{if ($1 > 90) exit 2; else if ($1 > 80) exit 1; else exit 0}'"
+    interval_seconds: 300
+    timeout_seconds: 10
+    group: system
+    tags: [disk, system]
+
+  - name: Memory Usage Check
+    id: memory_usage
+    type: custom
+    endpoint: "free | awk '/Mem:/ {pct=$3/$2*100; if (pct > 95) exit 2; else if (pct > 85) exit 1; else exit 0}'"
+    interval_seconds: 60
+    timeout_seconds: 5
+    group: system
+    tags: [memory, system]
+
+# =============================================================================
+# Notification Channels
+# =============================================================================
+
+notifications:
+  - name: slack-ops
+    type: slack
+    enabled: true
+    config:
+      webhook_url: "${HA_SENTINEL_SLACK_WEBHOOK_URL}"
+      channel: "#ops-alerts"
+      username: HA-SentinelAI
+
+  - name: slack-engineering
+    type: slack
+    enabled: true
+    config:
+      webhook_url: "${HA_SENTINEL_SLACK_ENG_WEBHOOK_URL}"
+      channel: "#engineering"
+
+  - name: pagerduty-critical
+    type: pagerduty
+    enabled: true
+    config:
+      routing_key: "${HA_SENTINEL_PAGERDUTY_KEY}"
+
+  - name: email-oncall
+    type: email
+    enabled: true
+    config:
+      smtp_host: smtp.example.com
+      smtp_port: 587
+      use_tls: true
+      username: "${HA_SENTINEL_SMTP_USER}"
+      password: "${HA_SENTINEL_SMTP_PASS}"
+      from: "ha-sentinel@example.com"
+      to:
+        - oncall@example.com
+        - sre-team@example.com
+
+  - name: discord-alerts
+    type: discord
+    enabled: true
+    config:
+      webhook_url: "${HA_SENTINEL_DISCORD_WEBHOOK_URL}"
+      username: HA-SentinelAI
+
+  - name: webhook-statuspage
+    type: webhook
+    enabled: true
+    config:
+      url: "${HA_SENTINEL_STATUSPAGE_WEBHOOK_URL}"
+      method: POST
+      headers:
+        Content-Type: application/json
+        Authorization: "Bearer ${HA_SENTINEL_STATUSPAGE_TOKEN}"
