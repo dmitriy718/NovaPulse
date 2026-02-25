@@ -360,9 +360,12 @@ class ExternalDataCollector:
                     }
                     self.es.enqueue("sentiment", doc, timestamp=now)
 
-                # Keep seen_ids bounded
+                # Keep seen_ids bounded using an ordered approach
                 if len(seen_ids) > 5000:
-                    seen_ids = set(list(seen_ids)[-2500:])
+                    overflow = len(seen_ids) - 2500
+                    it = iter(seen_ids)
+                    to_remove = [next(it) for _ in range(overflow)]
+                    seen_ids -= set(to_remove)
 
                 if new_count:
                     logger.debug("CryptoPanic indexed", new_posts=new_count)

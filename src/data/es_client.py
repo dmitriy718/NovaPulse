@@ -424,14 +424,34 @@ class ESClient:
                 self._es,
                 actions,
                 raise_on_error=False,
-                stats_only=True,
+                stats_only=False,
             )
-            if errors:
-                logger.warning("ES bulk indexing errors", success=success, errors=errors)
+            failed_count = 0
+            if isinstance(errors, list):
+                failed_count = len(errors)
+                if failed_count > 0:
+                    logger.warning(
+                        "ES bulk indexing partial failures",
+                        success=success,
+                        failed=failed_count,
+                        first_error=repr(errors[0]) if errors else "",
+                    )
+            elif errors:
+                failed_count = errors if isinstance(errors, int) else 1
+                logger.warning("ES bulk indexing errors", success=success, errors=failed_count)
             else:
                 logger.debug("ES bulk flush", docs=success)
         except Exception as e:
-            logger.warning("ES bulk flush failed", error=repr(e), batch_size=len(batch))
+            logger.warning(
+                "ES bulk flush failed, re-queuing batch",
+                error=repr(e),
+                batch_size=len(batch),
+            )
+            for action in batch:
+                if len(self._buffer) < self._buffer_maxlen:
+                    self._buffer.appendleft(action)
+                else:
+                    break
 
     # ------------------------------------------------------------------
     # Index templates

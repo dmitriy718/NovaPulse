@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 import time
 from collections import defaultdict
 from typing import Any, Callable, Dict, List, Optional
@@ -46,8 +47,9 @@ class CoinbaseWebSocketClient:
         self._subscriptions: Dict[str, Dict[str, Any]] = {}
         self._callbacks: Dict[str, List[Callable]] = defaultdict(list)
 
-        # Order book state per product
+        # Order book state per product (protected by _book_lock)
         self._books: Dict[str, Dict[str, Dict[float, float]]] = {}
+        self._book_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # Connection Management
@@ -302,8 +304,9 @@ class CoinbaseWebSocketClient:
             if not product_id:
                 continue
             pair = self._product_id_to_pair(product_id)
-            if product_id not in self._books:
-                self._books[product_id] = {"bids": {}, "asks": {}}
+            with self._book_lock:
+                if product_id not in self._books:
+                    self._books[product_id] = {"bids": {}, "asks": {}}
             book = self._books[product_id]
             event_type = str(ev.get("event_type") or ev.get("type") or "").lower()
             is_snapshot = event_type == "snapshot"

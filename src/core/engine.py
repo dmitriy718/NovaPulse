@@ -136,7 +136,8 @@ class BotEngine:
         self._stale_check_count = 0
         self._ws_disconnected_since: Optional[float] = None
         self._auto_pause_reason: str = ""
-        self._invalid_pairs: set = set()  # pairs permanently rejected by exchange
+        self._invalid_pairs: set = set()  # pairs permanently rejected by exchange (bounded to 500)
+        self._invalid_pairs_max = 500
         # Pre-exclude stablecoins / pegged assets — no tradeable volatility
         self._untradeable_pairs: frozenset = frozenset({
             "USDT/USD", "USDC/USD", "DAI/USD", "BUSD/USD", "TUSD/USD",
@@ -1728,7 +1729,8 @@ class BotEngine:
                     try:
                         ohlc = await self.rest_client.get_ohlc(pair, interval=1, limit=5)
                     except (InvalidOrderError, PermanentExchangeError) as e:
-                        self._invalid_pairs.add(pair)
+                        if len(self._invalid_pairs) < self._invalid_pairs_max:
+                            self._invalid_pairs.add(pair)
                         logger.warning(
                             "Pair permanently excluded from REST polling",
                             pair=pair,
