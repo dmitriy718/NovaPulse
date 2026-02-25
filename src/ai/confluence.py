@@ -965,8 +965,10 @@ class ConfluenceDetector:
 
         # Aggregate stop loss and take profit (use strongest signal when possible)
         primary_signal = max(directional_signals, key=lambda s: s.strength, default=None)
-        entry_price = primary_signal.entry_price if primary_signal else 0
-        if primary_signal and primary_signal.stop_loss > 0 and primary_signal.take_profit > 0:
+        if primary_signal is None:
+            return None
+        entry_price = primary_signal.entry_price
+        if primary_signal.stop_loss > 0 and primary_signal.take_profit > 0:
             stop_loss = primary_signal.stop_loss
             take_profit = primary_signal.take_profit
         elif directional_signals:

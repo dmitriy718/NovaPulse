@@ -203,7 +203,7 @@ async def run_bot():
     if not account_specs:
         account_specs = [{"account_id": "default", "exchange": (default_exchange or "kraken")}]
     multi = len(account_specs) > 1
-    base_db_path = os.getenv("DB_PATH", root_cfg.app.db_path or "data/trading.db")
+    base_db_path = os.getenv("DB_PATH", root_cfg.app.db_path or "[REDACTED]")
 
     def _storage_targets(specs, *, multi_mode: bool):
         targets = []
@@ -254,12 +254,22 @@ async def run_bot():
             started = time.time()
             try:
                 await coro_factory()
-                if engine._running:
+                if not engine._running:
+                    break
+                ran_duration = time.time() - started
+                if ran_duration < 5.0:
                     failures += 1
                     logger.warning(
-                        "Background task exited unexpectedly",
+                        "Background task exited unexpectedly (too quickly)",
                         task=name,
                         failures=failures,
+                        ran_seconds=round(ran_duration, 2),
+                    )
+                else:
+                    logger.info(
+                        "Background task completed normally, restarting",
+                        task=name,
+                        ran_seconds=round(ran_duration, 2),
                     )
             except asyncio.CancelledError:
                 break
