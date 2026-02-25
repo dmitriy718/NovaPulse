@@ -45,7 +45,7 @@ trading:
   warmup_bars: 900     # 15 hours of 1-min data — ensures 60 fifteen-min candles for MTF
   warmup_timeframe: "1m"
   timeframes: [1, 5, 15]   # Multi-timeframe: run strategies on all 3, require 2/3 agreement
-  max_concurrent_positions: 10  # Was 8 — more capacity for a 20-pair universe
+  max_concurrent_positions: 8
   cooldown_seconds: 30
   max_spread_pct: 0.0030
   use_closed_candles_only: true
@@ -203,7 +203,7 @@ strategies:
 ai:
   confluence_threshold: 2  # 2 strategies agreeing = tradable (3 was too strict, rejected most setups)
   high_vol_confluence_threshold: 2  # Was 3 — too restrictive, blocked nearly all high-vol setups
-  min_confidence: 0.50     # Lowered from 0.55 — let AI blending decide; this is a floor not a filter
+  min_confidence: 0.55     # Restored — 0.50 let too many marginal signals through
   min_risk_reward_ratio: 1.0  # Lowered from 1.2 — crypto setups often have 1.0-1.3 R:R
   tflite_model_path: "models/trade_predictor.tflite"
   order_book_depth: 25
@@ -215,9 +215,9 @@ ai:
   obi_counts_as_confluence: true  # OBI as confluence vote — adds 1 extra vote when book agrees (OBI+1 strat = 2 = tradable)
   obi_weight: 0.4
   allow_keltner_solo: true
-  allow_any_solo: true    # Was false — blocked all non-Keltner solo signals; now any strategy can trade solo with high confidence
+  allow_any_solo: false   # Reverted — solo trades were too noisy, cc=1 signals went red across the board
   keltner_solo_min_confidence: 0.60
-  solo_min_confidence: 0.62  # Lowered from 0.67 — still elevated vs normal threshold, but reachable
+  solo_min_confidence: 0.67
   whale_threshold_usd: 50000
   strategy_guardrails_enabled: true
   strategy_guardrails_min_trades: 20
@@ -286,7 +286,7 @@ risk:
   max_daily_loss: 0.05      # 5% max daily drawdown
   max_daily_trades: 0       # 0 = disabled, set e.g. 40 to hard-cap daily churn
   max_position_usd: 350.0   # Increased from 200 — was too small to compound
-  max_total_exposure_pct: 0.65  # Was 0.50 — allow more bankroll deployed across 10 positions
+  max_total_exposure_pct: 0.50
   correlation_groups:
     BTC/USD: btc
     ETH/USD: major
