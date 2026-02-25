@@ -1,0 +1,4 @@
+# HA-SentinelAI Dependencies
+aiohttp>=3.9.0
+pyyaml>=6.0
+dnspython>=2.4.0
