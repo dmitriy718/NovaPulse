@@ -90,9 +90,11 @@ class OrderFlowStrategy(BaseStrategy):
             return self._neutral_signal(pair, "Bad book timestamp")
 
         book_score = float(book_analysis.get("book_score", 0.0))
-        spread_pct = float(book_analysis.get("spread_pct", 999.0))
+        spread_pct = float(book_analysis.get("spread_pct", 0.0))
         obi = float(book_analysis.get("obi", 0.0))
         whale_bias = float(book_analysis.get("whale_bias", 0.0))
+        if spread_pct <= 0 or spread_pct > 1.0:
+            return self._neutral_signal(pair, "Invalid spread")
         prev_avg = self._avg_spread_pct.get(pair, spread_pct)
         avg_spread = (prev_avg * 0.9) + (spread_pct * 0.1)
         self._avg_spread_pct[pair] = avg_spread

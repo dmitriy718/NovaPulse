@@ -167,7 +167,7 @@ class VWAPMomentumAlphaStrategy(BaseStrategy):
 
         if pullback_long:
             direction = SignalDirection.LONG
-            strength = 0.35 + min(abs(zscore) / max(self.band_std, 1e-6), 0.3)
+            strength = 0.35 + min(abs(zscore) / max(curr_std, 1e-6), 0.3)
             if curr_vol_ratio >= self.volume_multiplier:
                 strength += 0.1
             if mom_improving:
@@ -185,7 +185,7 @@ class VWAPMomentumAlphaStrategy(BaseStrategy):
 
         elif pullback_short:
             direction = SignalDirection.SHORT
-            strength = 0.35 + min(abs(zscore) / max(self.band_std, 1e-6), 0.3)
+            strength = 0.35 + min(abs(zscore) / max(curr_std, 1e-6), 0.3)
             if curr_vol_ratio >= self.volume_multiplier:
                 strength += 0.1
             if mom_weakening:

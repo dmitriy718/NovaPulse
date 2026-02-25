@@ -167,7 +167,7 @@ class IchimokuStrategy(BaseStrategy):
         take_profit = 0.0
         if direction == SignalDirection.LONG:
             # SL at opposite cloud edge (cloud_bottom = support)
-            sl_at_cloud = price - cloud_bottom
+            sl_at_cloud = max(price - cloud_bottom, 0.0)
             sl_dist = max(sl_at_cloud, curr_atr * 2.0)
             stop_loss = price - sl_dist
             # TP: 3.0x ATR or Kijun, whichever is further
@@ -178,7 +178,7 @@ class IchimokuStrategy(BaseStrategy):
             sl_floor, _ = compute_sl_tp(price, curr_atr, "long", 2.0, 3.0, round_trip_fee_pct=fee_pct)
             stop_loss = min(stop_loss, sl_floor)
         elif direction == SignalDirection.SHORT:
-            sl_at_cloud = cloud_top - price
+            sl_at_cloud = max(cloud_top - price, 0.0)
             sl_dist = max(sl_at_cloud, curr_atr * 2.0)
             stop_loss = price + sl_dist
             tp_base = price - curr_atr * 3.0
