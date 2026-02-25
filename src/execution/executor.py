@@ -80,6 +80,9 @@ class TradeExecutor:
         max_trade_duration_hours: int = 24,
         correlation_groups: Optional[Dict[str, str]] = None,
         max_per_correlation_group: int = 2,
+        liquidity_sizing_enabled: bool = False,
+        liquidity_max_impact_pct: float = 0.10,
+        liquidity_min_depth_ratio: float = 3.0,
     ):
         self.rest_client = rest_client
         self.market_data = market_data
@@ -120,6 +123,11 @@ class TradeExecutor:
         }
         self._max_per_correlation_group = max(1, int(max_per_correlation_group or 1))
 
+        # Liquidity-aware sizing config
+        self._liquidity_sizing_enabled = bool(liquidity_sizing_enabled)
+        self._liquidity_max_impact_pct = float(liquidity_max_impact_pct)
+        self._liquidity_min_depth_ratio = float(liquidity_min_depth_ratio)
+
         # Per-trade locks to prevent concurrent management of the same position
         self._position_locks: Dict[str, asyncio.Lock] = {}
 
@@ -142,10 +150,15 @@ class TradeExecutor:
         self._smart_exit_enabled: Optional[bool] = None
         self._smart_exit_tiers: Optional[list] = None
         self.session_analyzer = None
+        self._event_calendar = None
 
     def set_continuous_learner(self, learner: ContinuousLearner) -> None:
         """Attach the continuous learner for online ML updates."""
         self.continuous_learner = learner
+
+    def set_event_calendar(self, calendar) -> None:
+        """Attach event calendar for blackout gating."""
+        self._event_calendar = calendar
 
     def set_es_client(self, es_client: Any) -> None:
         """Attach Elasticsearch client for trade event mirroring."""
@@ -508,6 +521,19 @@ class TradeExecutor:
 
         Returns True if all gates pass, False if the trade is blocked.
         """
+        # Event calendar blackout
+        if self._event_calendar:
+            is_blackout, event_name = self._event_calendar.is_blackout()
+            if is_blackout:
+                await self.db.log_thought(
+                    "risk",
+                    f"Trade blocked: macro event blackout ({event_name})",
+                    severity="warning",
+                    metadata={"pair": signal.pair, "event": event_name},
+                    tenant_id=self.tenant_id,
+                )
+                return False
+
         # Quiet hours filter
         if self.quiet_hours_utc:
             if datetime.now(timezone.utc).hour in self.quiet_hours_utc:
@@ -585,10 +611,37 @@ class TradeExecutor:
             session_multiplier = float(
                 self.session_analyzer.get_multiplier(datetime.now(timezone.utc).hour)
             )
+
+        # Structural stop loss: use swing-based SL if computed by confluence
+        effective_sl = signal.stop_loss
+        if getattr(signal, "structural_sl", None) and signal.structural_sl > 0:
+            effective_sl = signal.structural_sl
+
+        # Liquidity depth data for liquidity-aware sizing
+        bid_depth_usd = 0.0
+        ask_depth_usd = 0.0
+        liquidity_enabled = getattr(self, "_liquidity_sizing_enabled", False)
+        liquidity_max_impact = getattr(self, "_liquidity_max_impact_pct", 0.10)
+        liquidity_min_ratio = getattr(self, "_liquidity_min_depth_ratio", 3.0)
+        if liquidity_enabled and self.market_data:
+            order_book = self.market_data.get_order_book(signal.pair)
+            if order_book:
+                bids = order_book.get("bids", [])
+                asks = order_book.get("asks", [])
+                try:
+                    for b in bids[:10]:
+                        if isinstance(b, (list, tuple)) and len(b) >= 2:
+                            bid_depth_usd += float(b[0]) * float(b[1])
+                    for a in asks[:10]:
+                        if isinstance(a, (list, tuple)) and len(a) >= 2:
+                            ask_depth_usd += float(a[0]) * float(a[1])
+                except (ValueError, TypeError, IndexError):
+                    pass
+
         size_result = self.risk_manager.calculate_position_size(
             pair=signal.pair,
             entry_price=signal.entry_price,
-            stop_loss=signal.stop_loss,
+            stop_loss=effective_sl,
             take_profit=signal.take_profit,
             win_rate=win_rate,
             avg_win_loss_ratio=win_loss_ratio,
@@ -598,6 +651,11 @@ class TradeExecutor:
             vol_level=getattr(signal, "vol_level", 0.5),
             vol_expanding=getattr(signal, "vol_expanding", False),
             session_multiplier=session_multiplier,
+            bid_depth_usd=bid_depth_usd,
+            ask_depth_usd=ask_depth_usd,
+            liquidity_sizing_enabled=liquidity_enabled,
+            liquidity_max_impact_pct=liquidity_max_impact,
+            liquidity_min_depth_ratio=liquidity_min_ratio,
         )
 
         if not size_result.allowed:
@@ -648,7 +706,7 @@ class TradeExecutor:
         adjusted_sl, adjusted_tp = self._shift_levels_to_fill(
             planned_entry=signal.entry_price,
             fill_price=fill_price,
-            stop_loss=signal.stop_loss,
+            stop_loss=effective_sl,
             take_profit=signal.take_profit,
         )
 
@@ -720,6 +778,7 @@ class TradeExecutor:
                 "vol_regime": getattr(signal, "volatility_regime", "") or "",
                 "vol_level": round(getattr(signal, "vol_level", 0.5), 4),
                 "vol_expanding": getattr(signal, "vol_expanding", False),
+                "atr_pct": round(float((getattr(signal, "core_indicators", None) or {}).get("atr_pct", 0) or 0), 6),
             },
         }
 
@@ -1057,7 +1116,8 @@ class TradeExecutor:
             trade_id, current_price, entry_price, side, vol_regime=vol_regime
         )
 
-        # Time-based exit tightening: reduce TP for stagnant positions
+        # ATR-based stagnation detection: tighten TP when price fails to
+        # make expected progress relative to ATR.  Replaces time-only logic.
         take_profit = float(trade.get("take_profit", 0) or 0)
         if take_profit > 0 and entry_price > 0 and age_hours > 0:
             age_minutes = age_hours * 60
@@ -1067,20 +1127,48 @@ class TradeExecutor:
                 pnl_pct = (entry_price - current_price) / entry_price
 
             tp_tightened = False
-            if age_minutes > 60 and pnl_pct < 0.01:
-                # 60+ min with < 1% profit → TP to 40% of original
-                if side == "buy":
-                    new_tp = entry_price + (take_profit - entry_price) * 0.4
-                else:
-                    new_tp = entry_price - (entry_price - take_profit) * 0.4
-                tp_tightened = True
-            elif age_minutes > 30 and pnl_pct < 0.005:
-                # 30+ min with < 0.5% profit → TP to 60% of original
-                if side == "buy":
-                    new_tp = entry_price + (take_profit - entry_price) * 0.6
-                else:
-                    new_tp = entry_price - (entry_price - take_profit) * 0.6
-                tp_tightened = True
+
+            # Try ATR-based stagnation (preferred method)
+            atr_pct = float(meta.get("atr_pct", 0) or 0) if meta else 0
+            if atr_pct > 0 and age_minutes > 15:
+                import math as _math
+                # Expected move scales with sqrt of time (random walk model)
+                # bars_held ≈ age_minutes (1-min candles) / atr_period(14)
+                bars_held = age_minutes  # 1-min candle count
+                expected_move_pct = atr_pct * _math.sqrt(bars_held / 14.0)
+                actual_move_pct = abs(pnl_pct)
+
+                # Stagnation ratio: how much of expected move was realized
+                stagnation_ratio = actual_move_pct / expected_move_pct if expected_move_pct > 0 else 1.0
+
+                if stagnation_ratio < 0.2 and age_minutes > 45:
+                    # Severe stagnation: barely moved despite expected vol → TP to 40%
+                    if side == "buy":
+                        new_tp = entry_price + (take_profit - entry_price) * 0.4
+                    else:
+                        new_tp = entry_price - (entry_price - take_profit) * 0.4
+                    tp_tightened = True
+                elif stagnation_ratio < 0.3 and age_minutes > 30:
+                    # Moderate stagnation → TP to 60%
+                    if side == "buy":
+                        new_tp = entry_price + (take_profit - entry_price) * 0.6
+                    else:
+                        new_tp = entry_price - (entry_price - take_profit) * 0.6
+                    tp_tightened = True
+            else:
+                # Fallback: time-based tightening when ATR data is unavailable
+                if age_minutes > 60 and pnl_pct < 0.01:
+                    if side == "buy":
+                        new_tp = entry_price + (take_profit - entry_price) * 0.4
+                    else:
+                        new_tp = entry_price - (entry_price - take_profit) * 0.4
+                    tp_tightened = True
+                elif age_minutes > 30 and pnl_pct < 0.005:
+                    if side == "buy":
+                        new_tp = entry_price + (take_profit - entry_price) * 0.6
+                    else:
+                        new_tp = entry_price - (entry_price - take_profit) * 0.6
+                    tp_tightened = True
 
             if tp_tightened:
                 await self.db.update_trade(trade_id, {
@@ -1391,6 +1479,48 @@ class TradeExecutor:
         except Exception as e:
             logger.debug("ML label update failed (non-fatal)", trade_id=trade_id, error=repr(e))
 
+        # Record strategy attribution
+        try:
+            entry_time = None
+            strategy_name = strategy or ""
+            conf_count = 0
+            confidence_val = 0.0
+            regime_val = None
+            vol_regime_val = None
+            if meta:
+                entry_time = meta.get("entry_time")
+                conf_count = int(meta.get("confluence_count", 0) or 0)
+                confidence_val = float(meta.get("confidence", 0.0) or 0.0)
+                regime_val = meta.get("regime")
+                vol_regime_val = meta.get("volatility_regime")
+            exit_time_str = datetime.now(timezone.utc).isoformat()
+            duration = 0.0
+            if entry_time:
+                try:
+                    entry_dt = datetime.fromisoformat(str(entry_time).replace("Z", "+00:00"))
+                    duration = (datetime.now(timezone.utc) - entry_dt).total_seconds()
+                except Exception:
+                    pass
+            session_hour = datetime.now(timezone.utc).hour
+            await self.db.insert_attribution({
+                "trade_id": trade_id,
+                "strategy": strategy_name,
+                "regime": regime_val,
+                "volatility_regime": vol_regime_val,
+                "pair": pair,
+                "direction": side,
+                "pnl": round(pnl, 6),
+                "pnl_pct": round(pnl_pct, 6),
+                "entry_time": entry_time,
+                "exit_time": exit_time_str,
+                "duration_seconds": duration,
+                "session_hour": session_hour,
+                "confluence_count": conf_count,
+                "confidence": confidence_val,
+            }, tenant_id=tid)
+        except Exception as e:
+            logger.warning("Attribution record failed", trade_id=trade_id, error=repr(e))
+
         # Feed the closed trade to the continuous learner for online ML updates.
         if self.continuous_learner:
             try:
@@ -1466,7 +1596,12 @@ class TradeExecutor:
         return self._smart_exit_enabled
 
     async def _check_smart_exit(self, trade: Dict[str, Any], current_price: float) -> bool:
-        """Check if a smart exit tier should trigger. Returns True if a partial close happened."""
+        """Check if a smart exit tier should trigger. Returns True if a partial close happened.
+
+        Regime-aware: adjusts tier targets based on volatility regime.
+        - high_vol: widen targets (1.5x/2.5x) to let winners run in volatile markets
+        - low_vol: tighten targets (0.8x/1.2x) to capture profits before reversal
+        """
         tiers = self._smart_exit_tiers or []
         if not tiers:
             return False
@@ -1483,6 +1618,13 @@ class TradeExecutor:
 
         if tp_mult <= 0:
             return False  # This tier = trailing stop only, handled by normal SL logic
+
+        # Regime-aware tier adjustment
+        vol_regime = meta.get("vol_regime", "") if meta else ""
+        if vol_regime == "high_vol":
+            tp_mult *= 1.5   # Wider targets in volatile markets
+        elif vol_regime == "low_vol":
+            tp_mult *= 0.8   # Tighter targets in calm markets
 
         entry = trade["entry_price"]
         original_tp = trade.get("take_profit", 0)

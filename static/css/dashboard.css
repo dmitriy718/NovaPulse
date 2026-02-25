@@ -331,8 +331,9 @@ body {
     grid-template-areas:
         "pnl pnl strategy"
         "favorites favorites strategy"
-        "positions positions risk"
-        "thought thought scanner"
+        "positions positions features"
+        "thought thought risk"
+        "scanner scanner scanner"
         "stock stock stock";
     gap: var(--gap);
     padding: var(--gap) 24px 24px;
@@ -368,8 +369,9 @@ body {
 .positions-card { animation-delay: 0.16s; }
 .scanner-card { animation-delay: 0.20s; }
 .thought-card { animation-delay: 0.24s; }
-.risk-card { animation-delay: 0.28s; }
-.stock-scanner-card { animation-delay: 0.32s; }
+.features-card { animation-delay: 0.28s; }
+.risk-card { animation-delay: 0.32s; }
+.stock-scanner-card { animation-delay: 0.36s; }
 
 @keyframes cardReveal {
     from { opacity: 0; transform: translateY(10px); }
@@ -1220,6 +1222,69 @@ body {
 }
 
 /* === RISK SHIELD === */
+/* === FEATURES CARD === */
+
+.features-card {
+    grid-area: features;
+    min-height: 250px;
+}
+
+.features-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.feature-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 8px;
+    border-radius: 4px;
+    background: rgba(255, 255, 255, 0.015);
+}
+
+.feature-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+
+.feature-dot.on {
+    background: var(--green);
+    box-shadow: 0 0 6px var(--green);
+}
+
+.feature-dot.off {
+    background: rgba(255, 255, 255, 0.12);
+}
+
+.feature-dot.alert {
+    background: var(--yellow);
+    box-shadow: 0 0 6px var(--yellow);
+}
+
+.feature-name {
+    font-family: var(--font-mono);
+    font-size: 9px;
+    color: var(--text-2);
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    flex: 1;
+}
+
+.feature-status {
+    font-family: var(--font-mono);
+    font-size: 9px;
+    color: var(--text-3);
+    letter-spacing: 0.5px;
+    text-align: right;
+    min-width: 80px;
+}
+
+/* === RISK CARD === */
+
 .risk-card {
     grid-area: risk;
     min-height: 250px;
@@ -1917,6 +1982,7 @@ body {
             "favorites favorites"
             "strategy strategy"
             "positions positions"
+            "features features"
             "thought thought"
             "risk scanner"
             "stock stock";
@@ -1941,6 +2007,7 @@ body {
             "favorites"
             "strategy"
             "positions"
+            "features"
             "thought"
             "scanner"
             "stock"
@@ -1949,7 +2016,7 @@ body {
     }
 
     .pnl-card, .favorites-card, .strategy-card, .positions-card,
-    .scanner-card, .thought-card, .risk-card, .stock-scanner-card {
+    .features-card, .scanner-card, .thought-card, .risk-card, .stock-scanner-card {
         grid-column: 1 / -1;
         grid-row: auto;
     }

@@ -16,6 +16,7 @@ from src.utils.indicators import (
     atr,
     bb_position,
     bollinger_bands,
+    choppiness_index,
     ema,
     garman_klass_volatility,
     ichimoku,
@@ -66,6 +67,7 @@ class IndicatorCache:
         self._stochastic: Dict[Tuple[int, int, int], Tuple[np.ndarray, np.ndarray]] = {}
         self._supertrend: Dict[Tuple[int, float], Tuple[np.ndarray, np.ndarray]] = {}
         self._ichimoku: Dict[Tuple[int, int, int], Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = {}
+        self._choppiness: Dict[int, np.ndarray] = {}
 
     def ema(self, period: int) -> np.ndarray:
         if period not in self._ema:
@@ -192,3 +194,10 @@ class IndicatorCache:
                 self.highs, self.lows, self.closes, tenkan, kijun, senkou_b
             )
         return self._ichimoku[key]
+
+    def choppiness(self, period: int = 14) -> np.ndarray:
+        if period not in self._choppiness:
+            self._choppiness[period] = choppiness_index(
+                self.highs, self.lows, self.closes, period
+            )
+        return self._choppiness[period]

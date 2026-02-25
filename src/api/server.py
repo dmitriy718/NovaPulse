@@ -469,6 +469,84 @@ class DashboardServer:
             "trade_count": trade_count,
         }
 
+    def _collect_feature_status(self, engine: Any) -> Dict[str, Any]:
+        """Collect status of all 10 advanced features for the dashboard."""
+        if not engine:
+            return {}
+        cfg = getattr(engine, "config", None)
+        result: Dict[str, Any] = {}
+
+        # Event Calendar
+        cal = getattr(engine, "_event_calendar", None)
+        if cal:
+            is_blackout, event_name = cal.is_blackout()
+            result["event_calendar"] = {
+                "enabled": True, "blackout": is_blackout, "event": event_name,
+            }
+        else:
+            result["event_calendar"] = {"enabled": False}
+
+        # Anomaly Detector
+        det = getattr(engine, "_anomaly_detector", None)
+        if det:
+            result["anomaly_detector"] = {"enabled": True, **det.get_status()}
+        else:
+            result["anomaly_detector"] = {"enabled": False}
+
+        # Lead-Lag
+        tracker = getattr(engine, "_lead_lag_tracker", None)
+        if tracker:
+            result["lead_lag"] = {"enabled": True, **tracker.get_status()}
+        else:
+            result["lead_lag"] = {"enabled": False}
+
+        # Regime Predictor
+        rp = getattr(engine, "_regime_predictor", None)
+        if rp:
+            result["regime"] = {"enabled": True, **rp.get_status()}
+        else:
+            result["regime"] = {"enabled": False}
+
+        # On-Chain
+        oc = getattr(engine, "_onchain_client", None)
+        if oc:
+            result["onchain"] = {
+                "enabled": True,
+                "sentiments": oc.get_all_sentiments(),
+                "weight": oc.weight,
+            }
+        else:
+            result["onchain"] = {"enabled": False}
+
+        # Ensemble ML
+        em = getattr(engine, "_ensemble_model", None)
+        if em:
+            result["ensemble_ml"] = {"enabled": True, **em.get_status()}
+        else:
+            result["ensemble_ml"] = {"enabled": False}
+
+        # Bayesian Optimizer
+        bo = getattr(engine, "_bayesian_optimizer", None)
+        if bo:
+            result["optimizer"] = {"enabled": True, **bo.get_status()}
+        else:
+            result["optimizer"] = {"enabled": False}
+
+        # Config-based features (structural stops, liquidity sizing)
+        if cfg and hasattr(cfg, "risk"):
+            ss = getattr(cfg.risk, "structural_stop", None)
+            result["structural_stop"] = {"enabled": ss.enabled if ss else False}
+            ls = getattr(cfg.risk, "liquidity_sizing", None)
+            result["liquidity_sizing"] = {"enabled": ls.enabled if ls else False}
+        else:
+            result["structural_stop"] = {"enabled": False}
+            result["liquidity_sizing"] = {"enabled": False}
+
+        # P&L Attribution (always available via DB)
+        result["attribution"] = {"enabled": True}
+
+        return result
+
     @staticmethod
     def _normalize_chart_timeframe(value: str) -> str:
         raw = (value or "").strip().lower()
@@ -1738,6 +1816,33 @@ class DashboardServer:
                     return await eng.db.get_strategy_stats(tenant_id=tenant_id)
             return {}
 
+        @self.app.get("/api/v1/attribution")
+        async def get_attribution(
+            strategy: Optional[str] = Query(default=None),
+            regime: Optional[str] = Query(default=None),
+            pair: Optional[str] = Query(default=None),
+            start_date: Optional[str] = Query(default=None),
+            end_date: Optional[str] = Query(default=None),
+            group_by: str = Query(default="strategy"),
+            tenant_id: str = Depends(_resolve_tid_read),
+        ):
+            """Get strategy P&L attribution with filters."""
+            engines = self._get_engines()
+            for eng in engines:
+                if getattr(eng, "db", None):
+                    stats = await eng.db.get_attribution_stats(
+                        tenant_id=tenant_id,
+                        strategy=strategy,
+                        regime=regime,
+                        pair=pair,
+                        start_date=start_date,
+                        end_date=end_date,
+                        group_by=group_by,
+                    )
+                    summary = await eng.db.get_attribution_summary(tenant_id=tenant_id)
+                    return {"stats": stats, "summary": summary}
+            return {"stats": [], "summary": {}}
+
         @self.app.get("/api/v1/risk")
         async def get_risk(
             request: Request,
@@ -1763,6 +1868,150 @@ class DashboardServer:
             await self._require_read_access(request, x_api_key=x_api_key)
             recent = list(reversed(self._alerts[-limit:]))
             return {"alerts": recent}
+
+        @self.app.get("/api/v1/events")
+        async def get_events(
+            request: Request,
+            x_api_key: str = Header(default="", alias="X-API-Key"),
+            hours_ahead: float = Query(default=24.0, ge=1, le=168),
+        ):
+            """Get upcoming macro events and current blackout status."""
+            await self._require_read_access(request, x_api_key=x_api_key)
+            primary = self._get_primary_engine()
+            calendar = getattr(primary, "_event_calendar", None) if primary else None
+            if not calendar:
+                return {"blackout": False, "blackout_event": None, "upcoming": []}
+            is_blackout, event_name = calendar.is_blackout()
+            upcoming = calendar.get_upcoming_events(hours_ahead=hours_ahead)
+            return {
+                "blackout": is_blackout,
+                "blackout_event": event_name,
+                "upcoming": upcoming,
+            }
+
+        @self.app.get("/api/v1/anomalies")
+        async def get_anomalies(
+            request: Request,
+            x_api_key: str = Header(default="", alias="X-API-Key"),
+            limit: int = Query(default=50, ge=1, le=200),
+        ):
+            """Get anomaly detection status and recent events."""
+            await self._require_read_access(request, x_api_key=x_api_key)
+            primary = self._get_primary_engine()
+            detector = getattr(primary, "_anomaly_detector", None) if primary else None
+            status = detector.get_status() if detector else {"paused": False, "total_anomalies": 0}
+            log = detector.get_anomaly_log(limit=limit) if detector else []
+            return {"status": status, "events": log}
+
+        @self.app.get("/api/v1/ensemble")
+        async def get_ensemble_status(
+            request: Request,
+            x_api_key: str = Header(default="", alias="X-API-Key"),
+        ):
+            """Get ensemble ML model status."""
+            await self._require_read_access(request, x_api_key=x_api_key)
+            primary = self._get_primary_engine()
+            model = getattr(primary, "_ensemble_model", None) if primary else None
+            return model.get_status() if model else {"trained": False}
+
+        @self.app.get("/api/v1/optimizer")
+        async def get_optimizer_status(
+            request: Request,
+            x_api_key: str = Header(default="", alias="X-API-Key"),
+        ):
+            """Get Bayesian optimizer status."""
+            await self._require_read_access(request, x_api_key=x_api_key)
+            primary = self._get_primary_engine()
+            optimizer = getattr(primary, "_bayesian_optimizer", None) if primary else None
+            return optimizer.get_status() if optimizer else {"is_running": False}
+
+        @self.app.get("/api/v1/optimizer/history")
+        async def get_optimizer_history(
+            request: Request,
+            x_api_key: str = Header(default="", alias="X-API-Key"),
+            limit: int = Query(default=10, ge=1, le=100),
+        ):
+            """Get Bayesian optimizer optimization history."""
+            await self._require_read_access(request, x_api_key=x_api_key)
+            primary = self._get_primary_engine()
+            optimizer = getattr(primary, "_bayesian_optimizer", None) if primary else None
+            return optimizer.get_optimization_history(limit=limit) if optimizer else []
+
+        @self.app.get("/api/v1/lead-lag")
+        async def get_lead_lag_status(
+            request: Request,
+            x_api_key: str = Header(default="", alias="X-API-Key"),
+        ):
+            """Get lead-lag tracker status and leader observations."""
+            await self._require_read_access(request, x_api_key=x_api_key)
+            primary = self._get_primary_engine()
+            tracker = getattr(primary, "_lead_lag_tracker", None) if primary else None
+            return tracker.get_status() if tracker else {"leader_pairs": [], "leaders": {}}
+
+        @self.app.get("/api/v1/regime")
+        async def get_regime_status(
+            request: Request,
+            x_api_key: str = Header(default="", alias="X-API-Key"),
+        ):
+            """Get current regime transition prediction state."""
+            await self._require_read_access(request, x_api_key=x_api_key)
+            primary = self._get_primary_engine()
+            predictor = getattr(primary, "_regime_predictor", None) if primary else None
+            return predictor.get_status() if predictor else {"state": "unknown", "confidence": 0.0}
+
+        @self.app.get("/api/v1/onchain")
+        async def get_onchain_sentiments(
+            request: Request,
+            x_api_key: str = Header(default="", alias="X-API-Key"),
+        ):
+            """Get on-chain sentiment scores for all tracked pairs."""
+            await self._require_read_access(request, x_api_key=x_api_key)
+            primary = self._get_primary_engine()
+            client = getattr(primary, "_onchain_client", None) if primary else None
+            if not client:
+                return {"sentiments": {}, "weight": 0.0}
+            return {
+                "sentiments": client.get_all_sentiments(),
+                "weight": client.weight,
+                "min_abs_score": client.min_abs_score,
+            }
+
+        @self.app.get("/api/v1/structural-stops")
+        async def get_structural_stop_config(
+            request: Request,
+            x_api_key: str = Header(default="", alias="X-API-Key"),
+        ):
+            """Get structural stop loss configuration and status."""
+            await self._require_read_access(request, x_api_key=x_api_key)
+            primary = self._get_primary_engine()
+            cfg = getattr(primary, "config", None) if primary else None
+            if not cfg or not hasattr(cfg, "risk"):
+                return {"enabled": False}
+            ss = getattr(cfg.risk, "structural_stop", None)
+            return {
+                "enabled": ss.enabled if ss else False,
+                "lookback": ss.lookback if ss else 5,
+                "buffer_atr_mult": ss.buffer_atr_mult if ss else 0.5,
+                "max_distance_atr": ss.max_distance_atr if ss else 4.0,
+            }
+
+        @self.app.get("/api/v1/liquidity")
+        async def get_liquidity_config(
+            request: Request,
+            x_api_key: str = Header(default="", alias="X-API-Key"),
+        ):
+            """Get liquidity-aware position sizing configuration."""
+            await self._require_read_access(request, x_api_key=x_api_key)
+            primary = self._get_primary_engine()
+            cfg = getattr(primary, "config", None) if primary else None
+            if not cfg or not hasattr(cfg, "risk"):
+                return {"enabled": False}
+            ls = getattr(cfg.risk, "liquidity_sizing", None)
+            return {
+                "enabled": ls.enabled if ls else False,
+                "max_impact_pct": ls.max_impact_pct if ls else 0.10,
+                "min_depth_ratio": ls.min_depth_ratio if ls else 3.0,
+            }
 
         @self.app.get("/api/v1/thoughts")
         async def get_thoughts(
@@ -2748,6 +2997,17 @@ class DashboardServer:
                 "ml": {
                     "retrain_interval_hours": cfg.ml.retrain_interval_hours,
                     "min_samples": cfg.ml.min_samples,
+                    "ensemble_ml_enabled": cfg.ai.ensemble_ml.enabled,
+                    "bayesian_optimizer_enabled": cfg.ai.bayesian_optimizer.enabled,
+                },
+                "features": {
+                    "event_calendar_enabled": cfg.event_calendar.enabled,
+                    "lead_lag_enabled": cfg.ai.lead_lag.enabled,
+                    "regime_predictor_enabled": cfg.ai.regime_predictor.enabled,
+                    "onchain_enabled": cfg.ai.onchain.enabled,
+                    "structural_stop_enabled": cfg.risk.structural_stop.enabled,
+                    "liquidity_sizing_enabled": cfg.risk.liquidity_sizing.enabled,
+                    "anomaly_detector_enabled": cfg.monitoring.anomaly_detector.enabled,
                 },
             }
 
@@ -3453,6 +3713,7 @@ class DashboardServer:
                     "risk": risk,
                     "strategies": strategies,
                     "alerts": list(reversed(self._alerts[-20:])),
+                    "features": self._collect_feature_status(primary),
                     "status": {
                         "running": any(getattr(e, "_running", False) for e in engines),
                         "paused": all(self._is_engine_paused(e) for e in engines),

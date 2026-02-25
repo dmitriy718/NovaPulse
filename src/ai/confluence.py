@@ -94,6 +94,7 @@ class ConfluenceSignal:
         self.timeframes = timeframes or {}
         self.timestamp = datetime.now(timezone.utc).isoformat()
         self.core_indicators: Dict[str, float] = {}
+        self.structural_sl: Optional[float] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -116,6 +117,7 @@ class ConfluenceSignal:
             "timeframe_agreement": int(self.timeframe_agreement),
             "timeframes": dict(self.timeframes),
             "timestamp": self.timestamp,
+            "structural_sl": self.structural_sl,
             "strategy_signals": [s.to_dict() for s in self.signals],
         }
 
@@ -174,11 +176,9 @@ class ConfluenceDetector:
             else max(self.confluence_threshold, self.confluence_threshold + 1)
         )
         self.regime_config = regime_config or {}
-        self.timeframes = sorted(timeframes or [1])
-        if 1 not in self.timeframes:
-            self.timeframes.insert(0, 1)
+        self.timeframes = sorted(timeframes or [5])
         self.multi_timeframe_min_agreement = max(1, int(multi_timeframe_min_agreement))
-        self.primary_timeframe = primary_timeframe if primary_timeframe in self.timeframes else 1
+        self.primary_timeframe = primary_timeframe if primary_timeframe in self.timeframes else min(self.timeframes)
 
         # Initialize strategies — Keltner + Mean Reversion are proven winners
         # Weights are relative priorities; _normalize_weights() scales them to sum to 1.0
@@ -203,6 +203,10 @@ class ConfluenceDetector:
         self._cooldown_checker = None
         # Funding rate data injected per scan cycle by the engine
         self._funding_rates: Dict[str, float] = {}
+        # Optional components injected via set_*() methods
+        self._lead_lag_tracker = None
+        self._regime_predictor = None
+        self._onchain_sentiments: Dict[str, float] = {}
         self.session_analyzer = session_analyzer
         self.strategy_guardrails_enabled = bool(strategy_guardrails_enabled)
         self.strategy_guardrails_min_trades = max(5, int(strategy_guardrails_min_trades))
@@ -320,6 +324,20 @@ class ConfluenceDetector:
         """Inject funding rate data for the current scan cycle."""
         self._funding_rates = rates or {}
 
+    def set_lead_lag_tracker(self, tracker) -> None:
+        """Inject a LeadLagTracker for cross-pair signal intelligence."""
+        self._lead_lag_tracker = tracker
+
+    def set_regime_predictor(self, predictor) -> None:
+        """Inject a RegimeTransitionPredictor for anticipating regime shifts."""
+        self._regime_predictor = predictor
+
+    def set_onchain_sentiments(self, sentiments: Dict[str, float], weight: float = 0.08, min_abs_score: float = 0.3) -> None:
+        """Inject on-chain sentiment data for the current scan cycle."""
+        self._onchain_sentiments = sentiments or {}
+        self._onchain_weight = weight
+        self._onchain_min_abs_score = min_abs_score
+
     async def analyze_pair(self, pair: str) -> ConfluenceSignal:
         """
         Run all strategies in parallel on a single pair and detect confluence.
@@ -373,13 +391,26 @@ class ConfluenceDetector:
 
             indicator_cache = IndicatorCache(closes, highs, lows, volumes, opens)
             trend_regime, vol_regime, vol_level, vol_expanding = self._detect_regime(indicator_cache, closes)
+
+            # Regime transition prediction (if available)
+            regime_transition = None
+            if getattr(self, "_regime_predictor", None):
+                try:
+                    regime_transition = self._regime_predictor.predict_transition(indicator_cache, closes)
+                except Exception:
+                    regime_transition = None
+
             signals = await self._run_strategies(
                 pair, closes, highs, lows, volumes, opens, indicator_cache,
                 trend_regime=trend_regime,
                 vol_regime=vol_regime,
             )
             tf_signal = self._compute_confluence(
-                pair, signals, trend_regime, vol_regime, vol_level, vol_expanding
+                pair, signals, trend_regime, vol_regime, vol_level, vol_expanding,
+                regime_transition=regime_transition,
+                highs=highs,
+                lows=lows,
+                indicator_cache=indicator_cache,
             )
             tf_signal.core_indicators = self._extract_core_indicators(indicator_cache, closes)
             timeframe_results[tf] = tf_signal
@@ -424,7 +455,8 @@ class ConfluenceDetector:
         gated_out: set = set()
         if trend_regime == "range" and adx_val < 20:
             gated_out = self._TREND_STRATEGIES
-        elif trend_regime == "trend" and adx_val > 40:
+        elif trend_regime == "trend" and adx_val > 35:
+            # Stricter: disable mean reversion family at ADX>35 (was >40)
             gated_out = self._MEAN_REVERSION_STRATEGIES
 
         signals: List[StrategySignal] = []
@@ -460,6 +492,14 @@ class ConfluenceDetector:
                             confidence=0.0,
                             metadata={"reason": "strategy_cooldown"},
                         )
+                # Inject Choppiness Index into signal metadata for downstream use
+                if signal.direction != SignalDirection.NEUTRAL:
+                    try:
+                        ci_vals = indicator_cache.choppiness(14)
+                        if len(ci_vals) > 0:
+                            signal.metadata["choppiness_index"] = float(ci_vals[-1])
+                    except Exception:
+                        pass
                 signals.append(signal)
             except asyncio.TimeoutError:
                 logger.warning(
@@ -748,6 +788,10 @@ class ConfluenceDetector:
         vol_regime: Optional[str] = None,
         vol_level: float = 0.5,
         vol_expanding: bool = False,
+        regime_transition: Optional[str] = None,
+        highs: Optional[np.ndarray] = None,
+        lows: Optional[np.ndarray] = None,
+        indicator_cache: Optional[IndicatorCache] = None,
     ) -> ConfluenceSignal:
         """
         Compute confluence from multiple strategy signals.
@@ -948,10 +992,82 @@ class ConfluenceDetector:
             weighted_confidence *= session_mult
             weighted_confidence = max(0.0, min(1.0, weighted_confidence))
 
+        # Lead-Lag adjustment: boost/penalize based on leader pair moves
+        if getattr(self, "_lead_lag_tracker", None):
+            try:
+                dir_str = "long" if direction == SignalDirection.LONG else "short"
+                ll_adj = self._lead_lag_tracker.get_confidence_adjustment(
+                    pair, dir_str, self.market_data
+                )
+                if ll_adj != 0.0:
+                    weighted_confidence = max(0.0, min(1.0, weighted_confidence + ll_adj))
+            except Exception:
+                pass
+
+        # Regime transition prediction: boost trend strategies during emerging_trend
+        if regime_transition and getattr(self, "_regime_predictor", None):
+            try:
+                _trend_strats = {"trend", "ichimoku", "supertrend", "volatility_squeeze",
+                                 "vwap_momentum_alpha", "market_structure"}
+                _range_strats = {"mean_reversion", "stochastic_divergence", "reversal", "keltner"}
+                strat_names = {s.strategy_name for s in directional_signals if s.strategy_name != "order_book"}
+                predictor_confidence = self._regime_predictor.get_transition_confidence()
+                boost_val = self._regime_predictor.emerging_trend_boost * predictor_confidence
+
+                if regime_transition == "emerging_trend" and strat_names & _trend_strats:
+                    weighted_confidence = min(1.0, weighted_confidence + boost_val)
+                elif regime_transition == "emerging_range" and strat_names & _range_strats:
+                    weighted_confidence = min(1.0, weighted_confidence + boost_val)
+            except Exception:
+                pass
+
+        # On-Chain sentiment adjustment
+        if getattr(self, "_onchain_sentiments", None):
+            try:
+                _oc_cfg_weight = 0.08
+                _oc_cfg_min_abs = 0.3
+                if getattr(self, "_onchain_weight", None) is not None:
+                    _oc_cfg_weight = self._onchain_weight
+                if getattr(self, "_onchain_min_abs_score", None) is not None:
+                    _oc_cfg_min_abs = self._onchain_min_abs_score
+                sentiment = self._onchain_sentiments.get(pair)
+                if sentiment is not None and abs(sentiment) >= _oc_cfg_min_abs:
+                    signal_long = direction == SignalDirection.LONG
+                    sentiment_bullish = sentiment > 0
+                    if signal_long == sentiment_bullish:
+                        weighted_confidence = min(1.0, weighted_confidence + _oc_cfg_weight)
+                    else:
+                        weighted_confidence = max(0.0, weighted_confidence - _oc_cfg_weight)
+            except Exception:
+                pass
+
+        # Choppiness Index filter: when CI > 61.8 the market is choppy/ranging,
+        # raise effective confluence requirement by 1 to avoid low-quality signals
+        choppiness_penalty = 0
+        if hasattr(directional_signals[0], 'pair') and directional_signals:
+            try:
+                # Access CI from the last scan's indicator cache via market data
+                # We pass it through the signal metadata if available
+                _ci_vals = [
+                    float(s.metadata.get("choppiness_index", 0) or 0)
+                    for s in directional_signals
+                    if s.metadata.get("choppiness_index")
+                ]
+                if not _ci_vals:
+                    # Fallback: check if any signal has CI in metadata
+                    _ci_vals = []
+                if _ci_vals:
+                    avg_ci = sum(_ci_vals) / len(_ci_vals)
+                    if avg_ci > 61.8:
+                        choppiness_penalty = 1
+                        weighted_confidence *= 0.90  # 10% confidence haircut in choppy markets
+            except Exception:
+                pass
+
         # "Sure Fire" detection: threshold strategies + OBI agreement (tightened in high vol)
-        threshold_for_regime = self.confluence_threshold
+        threshold_for_regime = self.confluence_threshold + choppiness_penalty
         if vol_regime == "high_vol":
-            threshold_for_regime = max(self.confluence_threshold, self.high_vol_confluence_threshold)
+            threshold_for_regime = max(self.confluence_threshold, self.high_vol_confluence_threshold) + choppiness_penalty
 
         is_sure_fire = (
             confluence_count >= threshold_for_regime and
@@ -1003,6 +1119,38 @@ class ConfluenceDetector:
             vol_level=vol_level,
             vol_expanding=vol_expanding,
         )
+
+        # Structural stop loss: place stop behind recent swing structure
+        if (
+            getattr(self, "_structural_stop_config", None)
+            and self._structural_stop_config.get("enabled")
+            and highs is not None
+            and lows is not None
+            and indicator_cache is not None
+            and entry_price > 0
+            and direction != SignalDirection.NEUTRAL
+        ):
+            try:
+                from src.strategies.market_structure import MarketStructureStrategy
+                lookback = int(self._structural_stop_config.get("lookback", 5))
+                buffer_mult = float(self._structural_stop_config.get("buffer_atr_mult", 0.5))
+                max_dist = float(self._structural_stop_config.get("max_distance_atr", 4.0))
+                atr_vals = indicator_cache.atr(14)
+                atr_value = float(atr_vals[-1]) if len(atr_vals) > 0 else 0.0
+                if atr_value > 0 and math.isfinite(atr_value):
+                    swing_highs, swing_lows = MarketStructureStrategy._find_swings(
+                        highs, lows, lookback
+                    )
+                    side = "buy" if direction == SignalDirection.LONG else "sell"
+                    structural_sl = self._compute_structural_sl(
+                        side, entry_price, swing_highs, swing_lows,
+                        atr_value, buffer_mult, max_dist,
+                        getattr(self, "_atr_multiplier_sl", 2.0),
+                    )
+                    if structural_sl is not None and structural_sl > 0:
+                        result.structural_sl = structural_sl
+            except Exception:
+                pass
 
         self._last_confluence[pair] = result
         self._signal_history.append(result)
@@ -1169,6 +1317,67 @@ class ConfluenceDetector:
         if isinstance(self.regime_config, dict):
             return dict(self.regime_config.get(key, default) or default)
         return dict(getattr(self.regime_config, key, default) or default)
+
+    def set_structural_stop_config(
+        self, config: Dict[str, Any], atr_multiplier_sl: float = 2.0,
+    ) -> None:
+        """Inject structural stop configuration for swing-based SL computation."""
+        self._structural_stop_config = config or {}
+        self._atr_multiplier_sl = atr_multiplier_sl
+
+    @staticmethod
+    def _compute_structural_sl(
+        side: str,
+        entry_price: float,
+        swing_highs: list,
+        swing_lows: list,
+        atr_value: float,
+        buffer_atr_mult: float,
+        max_distance_atr: float,
+        atr_multiplier_sl: float,
+    ) -> Optional[float]:
+        """Compute a stop loss behind the nearest swing structure.
+
+        For buy: find the nearest swing low below entry, place SL = swing_low - buffer.
+        For sell: find the nearest swing high above entry, place SL = swing_high + buffer.
+
+        Buffer = buffer_atr_mult * atr_value.
+
+        If no suitable swing found within max_distance_atr * ATR from entry,
+        fall back to standard ATR-based stop (entry -/+ atr_multiplier_sl * ATR).
+
+        Returns the stop loss price, or None on error.
+        """
+        if entry_price <= 0 or atr_value <= 0:
+            return None
+
+        buffer = buffer_atr_mult * atr_value
+        max_distance = max_distance_atr * atr_value
+
+        if side == "buy":
+            # Find swing lows below entry within max_distance
+            candidates = [
+                (idx, price) for idx, price in swing_lows
+                if price < entry_price and (entry_price - price) <= max_distance
+            ]
+            if candidates:
+                # Use the nearest (closest to entry) swing low
+                nearest = max(candidates, key=lambda x: x[1])
+                return nearest[1] - buffer
+            # Fallback to ATR-based stop
+            return entry_price - atr_multiplier_sl * atr_value
+        else:
+            # Find swing highs above entry within max_distance
+            candidates = [
+                (idx, price) for idx, price in swing_highs
+                if price > entry_price and (price - entry_price) <= max_distance
+            ]
+            if candidates:
+                # Use the nearest (closest to entry) swing high
+                nearest = min(candidates, key=lambda x: x[1])
+                return nearest[1] + buffer
+            # Fallback to ATR-based stop
+            return entry_price + atr_multiplier_sl * atr_value
 
     def get_strategy_stats(self) -> List[Dict[str, Any]]:
         """Get performance stats for all strategies."""

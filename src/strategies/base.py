@@ -117,8 +117,12 @@ class BaseStrategy(ABC):
         self._win_count = 0
         self._total_pnl = 0.0
         # Sliding window of recent trades for adaptive weighting
+        # Shortened to 25 for faster reaction to regime changes (was 50)
         # Each entry: (pnl, trend_regime, vol_regime, timestamp, hold_hours)
-        self._recent_trades: Deque[Tuple[float, str, str, float, float]] = deque(maxlen=50)
+        self._recent_trades: Deque[Tuple[float, str, str, float, float]] = deque(maxlen=25)
+        # Strategy temperature: tracks rolling P&L of signals over 48h window
+        # Used to penalize strategies that generate losing signals even without trades
+        self._signal_temperature: float = 1.0  # 1.0 = neutral
 
     @abstractmethod
     async def analyze(
@@ -156,13 +160,22 @@ class BaseStrategy(ABC):
         vol_regime: str = "",
         hold_hours: float = 0.0,
     ) -> None:
-        """Record a trade result for performance tracking."""
+        """Record a trade result for performance tracking and update strategy temperature."""
         self._trade_count += 1
         if pnl > 0:
             self._win_count += 1
         self._total_pnl += pnl
         import time
         self._recent_trades.append((pnl, trend_regime, vol_regime, time.time(), hold_hours))
+
+        # Update strategy temperature: exponential moving average of trade outcomes
+        # Winning trade pushes temp toward 1.1, losing toward 0.9
+        # Alpha=0.15 means ~7 trades to mostly reflect new regime (fast response)
+        alpha = 0.15
+        outcome = 1.1 if pnl > 0 else 0.85
+        self._signal_temperature = (1 - alpha) * self._signal_temperature + alpha * outcome
+        # Clamp to prevent extreme values
+        self._signal_temperature = max(0.6, min(1.4, self._signal_temperature))
 
     def avg_winning_hold_hours(self) -> float:
         """Average hold duration (hours) of recent winning trades.
@@ -193,12 +206,13 @@ class BaseStrategy(ABC):
     ) -> float:
         """Compute adaptive weight factor from recent sliding-window performance.
 
-        Returns a multiplier (0.4 – 2.0) based on rolling Sharpe-like score
-        and regime-specific win rate from the last 50 trades.
+        Returns a multiplier (0.3 – 2.0) based on rolling Sharpe-like score,
+        regime-specific win rate, and strategy temperature from the last 25 trades.
+        Widened range (was 0.4-2.0) and faster reaction (window 25, was 50).
         """
         trades = list(self._recent_trades)
-        if len(trades) < 10:
-            return 1.0  # Not enough data — neutral
+        if len(trades) < 5:
+            return 1.0  # Not enough data — neutral (lowered from 10)
 
         pnls = [t[0] for t in trades]
         mean_pnl = np.mean(pnls)
@@ -210,18 +224,18 @@ class BaseStrategy(ABC):
         else:
             sharpe_raw = 1.0 if mean_pnl > 0 else -1.0
 
-        # Map sharpe_raw to a 0.5-1.5 range (sigmoid-like squash)
-        # sharpe_raw of 0 → 1.0, +1 → ~1.35, -1 → ~0.65
+        # Map sharpe_raw to a wider range with sigmoid squash
+        # sharpe_raw of 0 → 1.0, +1 → ~1.4, -1 → ~0.6
         sharpe_score = 1.0 / (1.0 + np.exp(-sharpe_raw))  # 0.27 to 0.73
-        sharpe_factor = 0.4 + sharpe_score * 1.2  # 0.72 to 1.28
+        sharpe_factor = 0.3 + sharpe_score * 1.4  # 0.68 to 1.32 (wider than before)
 
-        # Regime-specific win rate bonus/penalty
+        # Regime-specific win rate bonus/penalty (lowered threshold from 5 to 3)
         regime_trades = [
             t for t in trades
             if (not trend_regime or t[1] == trend_regime)
             and (not vol_regime or t[2] == vol_regime)
         ]
-        if len(regime_trades) >= 5:
+        if len(regime_trades) >= 3:
             regime_wins = sum(1 for t in regime_trades if t[0] > 0)
             regime_wr = regime_wins / len(regime_trades)
             # 50% WR → 1.0, 70% → 1.2, 30% → 0.8
@@ -229,8 +243,9 @@ class BaseStrategy(ABC):
         else:
             regime_factor = 1.0
 
-        combined = sharpe_factor * regime_factor
-        return max(0.4, min(2.0, combined))
+        # Apply strategy temperature (updated externally via record_trade_result)
+        combined = sharpe_factor * regime_factor * self._signal_temperature
+        return max(0.3, min(2.0, combined))
 
     def get_stats(self) -> Dict[str, Any]:
         """Get strategy performance statistics."""

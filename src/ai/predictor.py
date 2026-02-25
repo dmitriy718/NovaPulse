@@ -299,12 +299,12 @@ class TFLitePredictor:
 
     def _predict_heuristic(self, market_state: Dict[str, Any]) -> float:
         """
-        Heuristic fallback when TFLite model is unavailable.
-        
-        Uses a rule-based scoring system that approximates the
-        trained model's behavior using domain knowledge.
-        
-        # ENHANCEMENT: Calibrated heuristic weights from backtesting
+        Direction-aware heuristic fallback when TFLite model is unavailable.
+
+        Uses signal_direction from market_state to score indicators directionally.
+        Falls back to direction-agnostic scoring if direction is not provided.
+
+        # ENHANCEMENT: Direction-aware scoring for OBI, RSI, BB position, momentum
         """
         score = 0.5  # Start neutral
 
@@ -315,13 +315,71 @@ class TFLitePredictor:
         bb_pos = market_state.get("bb_position", 0.5)
         trend = market_state.get("trend_strength", 0)
         momentum_val = market_state.get("momentum_score", 0)
+        signal_direction = market_state.get("signal_direction", "")  # "long" or "short"
 
-        # RSI scoring (favorable range: 30-70 for longs, avoid extremes)
-        if 40 < rsi < 65:
-            score += 0.08
-        elif rsi > 80 or rsi < 20:
-            score -= 0.1
+        if signal_direction == "long":
+            # RSI: favor 40-60 pullback zone for longs, penalize overbought
+            if 40 < rsi < 60:
+                score += 0.08
+            elif rsi > 75:
+                score -= 0.08  # Overbought — risky long entry
+            elif rsi < 25:
+                score += 0.06  # Deeply oversold — potential bounce
 
+            # OBI: positive imbalance confirms buy pressure
+            if obi > 0.15:
+                score += min(obi * 0.3, 0.10)
+            elif obi < -0.15:
+                score -= 0.06  # Selling pressure opposes long
+
+            # BB position: below middle band = good entry for longs
+            if bb_pos < 0.3:
+                score += 0.07  # Below lower band — mean reversion long
+            elif bb_pos > 0.85:
+                score -= 0.05  # Near upper band — extended
+
+            # Momentum: positive momentum confirms long
+            if momentum_val > 0:
+                score += min(momentum_val * 0.5, 0.06)
+
+        elif signal_direction == "short":
+            # RSI: favor 40-60 zone for shorts, penalize oversold
+            if 40 < rsi < 60:
+                score += 0.08
+            elif rsi < 25:
+                score -= 0.08  # Oversold — risky short entry
+            elif rsi > 75:
+                score += 0.06  # Deeply overbought — potential drop
+
+            # OBI: negative imbalance confirms sell pressure
+            if obi < -0.15:
+                score += min(abs(obi) * 0.3, 0.10)
+            elif obi > 0.15:
+                score -= 0.06  # Buy pressure opposes short
+
+            # BB position: above middle band = good entry for shorts
+            if bb_pos > 0.7:
+                score += 0.07  # Near upper band — mean reversion short
+            elif bb_pos < 0.15:
+                score -= 0.05  # Near lower band — extended
+
+            # Momentum: negative momentum confirms short
+            if momentum_val < 0:
+                score += min(abs(momentum_val) * 0.5, 0.06)
+
+        else:
+            # Direction-agnostic fallback (original behavior)
+            if 40 < rsi < 65:
+                score += 0.08
+            elif rsi > 80 or rsi < 20:
+                score -= 0.1
+
+            if 0.2 < bb_pos < 0.8:
+                score += 0.05
+            elif bb_pos < 0.1 or bb_pos > 0.9:
+                score += 0.06
+
+        # Direction-agnostic features (always applied)
         # ADX scoring (trending market better for directional trades)
         if adx > 25:
             score += min((adx - 25) / 100, 0.1)
@@ -329,18 +387,6 @@ class TFLitePredictor:
         # Volume confirmation
         if volume_ratio > 1.3:
             score += min((volume_ratio - 1.0) * 0.1, 0.1)
-
-        # S4 FIX: OBI and directional features removed from heuristic
-        # (heuristic doesn't know trade direction — these would boost wrong signals)
-        # Only score market-quality features here
-
-        # Bollinger position (mean reversion scoring)
-        if 0.2 < bb_pos < 0.8:
-            score += 0.05  # Price in comfortable zone
-        elif bb_pos < 0.1 or bb_pos > 0.9:
-            score += 0.06  # Extreme levels can be profitable reversals
-
-        # S4 FIX: Trend/momentum removed (direction-agnostic heuristic can't use these correctly)
 
         return np.clip(score, 0.0, 1.0)
 

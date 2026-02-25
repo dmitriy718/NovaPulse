@@ -101,6 +101,15 @@ class StubDB:
     async def cleanup_old_data(self, retention_hours=168):
         pass
 
+    async def insert_attribution(self, record, tenant_id=None):
+        pass
+
+    async def get_attribution_stats(self, tenant_id=None, **kwargs):
+        return []
+
+    async def get_attribution_summary(self, tenant_id=None):
+        return {}
+
 
 class StubMarketData:
     """Market data stub with configurable prices.
