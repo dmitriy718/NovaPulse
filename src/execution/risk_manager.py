@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field, asdict
@@ -135,6 +136,9 @@ class RiskManager:
 
         # Price history for correlation-based sizing
         self._price_history: Dict[str, Deque[float]] = {}
+
+        # Lock for position state mutations
+        self._state_lock = threading.Lock()
 
         # State tracking
         self._daily_pnl: float = 0.0
@@ -571,17 +575,18 @@ class RiskManager:
                 incrementing _daily_trades and updating cooldown timestamps
                 because these positions already exist in the DB.
         """
-        self._open_positions[trade_id] = {
-            "pair": pair,
-            "side": side,
-            "entry_price": entry_price,
-            "size_usd": size_usd,
-            "strategy": strategy,
-            "opened_at": time.time(),
-        }
-        if not is_restart:
-            self._last_trade_time[pair] = time.time()
-            self._daily_trades += 1
+        with self._state_lock:
+            self._open_positions[trade_id] = {
+                "pair": pair,
+                "side": side,
+                "entry_price": entry_price,
+                "size_usd": size_usd,
+                "strategy": strategy,
+                "opened_at": time.time(),
+            }
+            if not is_restart:
+                self._last_trade_time[pair] = time.time()
+                self._daily_trades += 1
 
     def check_daily_reset(self) -> None:
         """Public entry point for daily reset — call from the engine scan loop."""
@@ -590,22 +595,22 @@ class RiskManager:
     def close_position(self, trade_id: str, pnl: float) -> None:
         """Close a position and update risk metrics."""
         self._check_daily_reset()
-        pos = self._open_positions.pop(trade_id, None)
-        if pos:
-            pair = pos.get("pair")
-            strategy = pos.get("strategy")
-            if strategy:
-                key = (pair, strategy, pos.get("side"))
-                self._strategy_cooldowns[key] = time.time()
-            # Update cooldown for this pair on exit (prevents rapid re-entry after loss)
-            if pair:
-                self._last_trade_time[pair] = time.time()
-        if trade_id in self._stop_states:
-            del self._stop_states[trade_id]
+        with self._state_lock:
+            pos = self._open_positions.pop(trade_id, None)
+            if pos:
+                pair = pos.get("pair")
+                strategy = pos.get("strategy")
+                if strategy:
+                    key = (pair, strategy, pos.get("side"))
+                    self._strategy_cooldowns[key] = time.time()
+                if pair:
+                    self._last_trade_time[pair] = time.time()
+            if trade_id in self._stop_states:
+                del self._stop_states[trade_id]
 
-        self._daily_pnl += pnl
-        self.current_bankroll = max(self.current_bankroll + pnl, 0.0)
-        self._trade_history.append({"pnl": pnl, "time": time.time()})
+            self._daily_pnl += pnl
+            self.current_bankroll = max(self.current_bankroll + pnl, 0.0)
+            self._trade_history.append({"pnl": pnl, "time": time.time()})
 
         # Circuit breaker: block all new trades if bankroll is depleted
         if self.current_bankroll <= 0:

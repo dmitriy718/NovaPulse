@@ -7,6 +7,7 @@ so auth and routing stay in one place. The router delegates to the engine/execut
 
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Any, Dict, List, Optional, Protocol, runtime_checkable
 
@@ -57,6 +58,7 @@ class ControlRouter:
 
     def __init__(self, engine: EngineInterface) -> None:
         self._engine = engine
+        self._control_lock = asyncio.Lock()
 
     def _resolve_tenant(self, tenant_id: Optional[str]) -> str:
         return tenant_id if tenant_id is not None else getattr(self._engine, "tenant_id", "default")
@@ -72,15 +74,16 @@ class ControlRouter:
             return {"ok": False, "error": "engine not set"}
         if not self._is_tenant_match(tenant_id):
             return {"ok": False, "error": "tenant mismatch"}
-        tid = self._resolve_tenant(tenant_id)
-        self._engine._trading_paused = True
-        if self._engine.db:
-            await self._engine.db.log_thought(
-                "system", "Trading PAUSED via control", severity="warning",
-                tenant_id=tid,
-            )
-        logger.info("Trading paused via control router")
-        return {"ok": True, "status": "paused"}
+        async with self._control_lock:
+            tid = self._resolve_tenant(tenant_id)
+            self._engine._trading_paused = True
+            if self._engine.db:
+                await self._engine.db.log_thought(
+                    "system", "Trading PAUSED via control", severity="warning",
+                    tenant_id=tid,
+                )
+            logger.info("Trading paused via control router")
+            return {"ok": True, "status": "paused"}
 
     async def resume(self, tenant_id: Optional[str] = None) -> Dict[str, Any]:
         """Resume trading. Returns status dict."""
@@ -88,15 +91,16 @@ class ControlRouter:
             return {"ok": False, "error": "engine not set"}
         if not self._is_tenant_match(tenant_id):
             return {"ok": False, "error": "tenant mismatch"}
-        tid = self._resolve_tenant(tenant_id)
-        self._engine._trading_paused = False
-        if self._engine.db:
-            await self._engine.db.log_thought(
-                "system", "Trading RESUMED via control", severity="info",
-                tenant_id=tid,
-            )
-        logger.info("Trading resumed via control router")
-        return {"ok": True, "status": "resumed"}
+        async with self._control_lock:
+            tid = self._resolve_tenant(tenant_id)
+            self._engine._trading_paused = False
+            if self._engine.db:
+                await self._engine.db.log_thought(
+                    "system", "Trading RESUMED via control", severity="info",
+                    tenant_id=tid,
+                )
+            logger.info("Trading resumed via control router")
+            return {"ok": True, "status": "resumed"}
 
     async def close_all(
         self, reason: str = "control", tenant_id: Optional[str] = None
