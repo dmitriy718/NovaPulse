@@ -255,7 +255,7 @@ def _apply_env_overrides(config: Dict[str, Any]) -> None:
 
     for env_key, mapping in env_mappings.items():
         value = os.getenv(env_key)
-        if value is not None:
+        if value is not None and value != "":
             # Back-compat: ("section","key"[,"converter"]) or (("a","b","c"), converter)
             try:
                 if isinstance(mapping[0], tuple):
