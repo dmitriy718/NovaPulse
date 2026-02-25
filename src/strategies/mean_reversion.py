@@ -106,7 +106,8 @@ class MeanReversionStrategy(BaseStrategy):
         curr_middle = middle[-1]
 
         # Band squeeze: width below 20-period average suggests imminent expansion
-        avg_bb_width = np.nanmean(bb_width[-20:]) if len(bb_width) >= 20 else curr_bb_width
+        raw_avg = np.nanmean(bb_width[-20:]) if len(bb_width) >= 20 else curr_bb_width
+        avg_bb_width = raw_avg if np.isfinite(raw_avg) else curr_bb_width
         is_squeezed = curr_bb_width < avg_bb_width * 0.8
 
         # RSI divergence: price makes new low but RSI doesn't (bullish)

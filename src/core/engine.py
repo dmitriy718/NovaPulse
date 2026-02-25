@@ -1133,7 +1133,8 @@ class BotEngine:
         cu_cfg = getattr(self.config.trading, "crypto_universe", None)
         if added and cu_cfg and cu_cfg.warmup_new_pairs:
             self._warming_pairs |= added
-            asyncio.create_task(self._warmup_new_pairs(list(added)))
+            warmup_task = asyncio.create_task(self._warmup_new_pairs(list(added)))
+            self._tasks.append(warmup_task)
 
         logger.info(
             "Universe update applied",
@@ -1420,7 +1421,7 @@ class BotEngine:
                     for p in pairs_to_scan:
                         try:
                             px = self.market_data.get_latest_price(p)
-                            if px and px > 0:
+                            if px is not None and px > 0:
                                 self.risk_manager.update_price(p, px)
                         except Exception:
                             pass
@@ -1685,6 +1686,16 @@ class BotEngine:
                     error_type=type(e).__name__,
                     traceback=traceback.format_exc(),
                 )
+                try:
+                    if self.db:
+                        await self.db.log_thought(
+                            "system",
+                            f"Position management error: {type(e).__name__}: {e}",
+                            severity="error",
+                            tenant_id=self.tenant_id,
+                        )
+                except Exception:
+                    pass
                 await asyncio.sleep(1)
 
     async def _ws_data_loop(self) -> None:
