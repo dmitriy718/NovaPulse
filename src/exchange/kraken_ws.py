@@ -372,7 +372,15 @@ class KrakenWebSocketClient:
             logger.debug("Subscription confirmed", method=method, result=result)
         else:
             error = message.get("error", "Unknown error")
-            logger.error("Subscription failed", method=method, error=error)
+            error_lower = error.lower()
+            # "Already subscribed" is harmless — pair didn't change between refreshes
+            if "already subscribed" in error_lower:
+                logger.debug("Subscription already active", method=method, error=error)
+            # "not Found" means Kraken doesn't support this channel for the pair
+            elif "not found" in error_lower:
+                logger.warning("Subscription unavailable", method=method, error=error)
+            else:
+                logger.error("Subscription failed", method=method, error=error)
 
     @property
     def is_connected(self) -> bool:
