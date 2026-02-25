@@ -11,6 +11,7 @@ def _make_server(monkeypatch):
     monkeypatch.setenv("DASHBOARD_ADMIN_USERNAME", "admin")
     monkeypatch.setenv("DASHBOARD_ADMIN_PASSWORD", "correct-password")
     monkeypatch.setenv("DASHBOARD_SESSION_SECRET", "test-secret")
+    monkeypatch.setenv("APP_ENV", "development")
     monkeypatch.delenv("DASHBOARD_ADMIN_PASSWORD_HASH", raising=False)
     server = DashboardServer()
     return TestClient(server.app)
