@@ -167,11 +167,15 @@ class ReversalStrategy(BaseStrategy):
 
         # Confirmation: higher lows and higher closes for bullish
         n = self.confirmation_candles
-        loop_ran = min(n, len(closes) - 1) > 1
-        higher_lows = loop_ran
-        higher_closes = loop_ran
-        lower_highs = loop_ran
-        lower_closes = loop_ran
+        higher_lows = False
+        higher_closes = False
+        lower_highs = False
+        lower_closes = False
+        if min(n, len(closes) - 1) > 1:
+            higher_lows = True
+            higher_closes = True
+            lower_highs = True
+            lower_closes = True
 
         for i in range(1, min(n, len(closes) - 1)):
             if lows[-i] <= lows[-i - 1]:

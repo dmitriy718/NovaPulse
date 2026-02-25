@@ -47,7 +47,7 @@ class DatabaseManager:
     # Timeout for acquiring the DB lock to prevent deadlocks.
     _LOCK_TIMEOUT: float = 30.0
 
-    def __init__(self, db_path: str = "data/trading.db"):
+    def __init__(self, db_path: str = "[REDACTED]"):
         self.db_path = db_path
         self._db: Optional[aiosqlite.Connection] = None
         self._lock = asyncio.Lock()
@@ -329,6 +329,9 @@ class DatabaseManager:
             "CREATE INDEX IF NOT EXISTS idx_order_book_trade_id ON order_book_snapshots(trade_id);",
             "CREATE INDEX IF NOT EXISTS idx_metrics_tenant ON metrics(tenant_id);",
             "CREATE INDEX IF NOT EXISTS idx_trades_tenant_status ON trades(tenant_id, status);",
+            "CREATE INDEX IF NOT EXISTS idx_trades_tenant_status_exit ON trades(tenant_id, status, exit_time);",
+            "CREATE INDEX IF NOT EXISTS idx_metrics_tenant_name_ts ON metrics(tenant_id, metric_name, timestamp);",
+            "CREATE INDEX IF NOT EXISTS idx_thought_log_tenant_id ON thought_log(tenant_id, id);",
         ]
         for stmt in statements:
             try:
@@ -728,7 +731,7 @@ class DatabaseManager:
         rows = await cursor.fetchall()
         return [dict(zip(columns, row)) for row in rows]
 
-    async def get_trade_by_id(self, trade_id: str, tenant_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    async def get_trade_by_id(self, trade_id: str, tenant_id: Optional[str] = "default") -> Optional[Dict[str, Any]]:
         """Fetch a single trade by its unique trade_id."""
         if not self._db:
             return None

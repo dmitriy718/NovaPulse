@@ -377,7 +377,7 @@ class RiskManager:
         state = StopLossState(
             initial_sl=stop_loss,
             current_sl=stop_loss,
-            trailing_high=trailing_high if trailing_high > 0 else (entry_price if side == "buy" else 0),
+            trailing_high=trailing_high if trailing_high > 0 else (entry_price if side == "buy" else float("inf")),
             trailing_low=trailing_low if trailing_low != float("inf") else (entry_price if side == "sell" else float("inf")),
         )
         self._stop_states[trade_id] = state
