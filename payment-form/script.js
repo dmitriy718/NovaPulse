@@ -1,7 +1,6 @@
 const form = document.getElementById('paymentForm');
 const submitBtn = document.getElementById('submitBtn');
 const successState = document.getElementById('successState');
-const confirmEmail = document.getElementById('confirmEmail');
 const resetBtn = document.getElementById('resetBtn');
 
 const fields = {
@@ -79,7 +78,6 @@ form.addEventListener('submit', async (e) => {
     await new Promise(resolve => setTimeout(resolve, 1200));
 
     form.style.display = 'none';
-    confirmEmail.textContent = payload.email;
     successState.classList.add('visible');
 
     console.log('Payment form submitted:', {
