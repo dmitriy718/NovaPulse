@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Receive $100 — Payment Form</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="bg"></div>
+
+    <main class="card">
+        <!-- Header -->
+        <div class="card-header">
+            <div class="logo">
+                <span class="logo-icon">$</span>
+            </div>
+            <h1 class="title">Receive Your Payment</h1>
+            <p class="subtitle">Fill in your details below so we can send you</p>
+            <div class="amount-badge">
+                <span class="currency">USD</span>
+                <span class="amount">$100.00</span>
+            </div>
+        </div>
+
+        <!-- Form -->
+        <form id="paymentForm" novalidate>
+            <div class="form-group">
+                <label class="label" for="fullName">Full Name</label>
+                <div class="input-wrap">
+                    <svg class="input-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+                    <input class="input" type="text" id="fullName" name="full_name" placeholder="John Doe" autocomplete="name" required>
+                </div>
+                <span class="error-msg" id="fullNameError">Please enter your full name</span>
+            </div>
+
+            <div class="form-group">
+                <label class="label" for="email">Email Address</label>
+                <div class="input-wrap">
+                    <svg class="input-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></svg>
+                    <input class="input" type="email" id="email" name="email" placeholder="john@example.com" autocomplete="email" required>
+                </div>
+                <span class="error-msg" id="emailError">Please enter a valid email address</span>
+            </div>
+
+            <div class="form-group">
+                <label class="label" for="phone">Phone Number</label>
+                <div class="input-wrap">
+                    <svg class="input-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0 1 22 16.92z"/></svg>
+                    <input class="input" type="tel" id="phone" name="phone" placeholder="+1 (555) 123-4567" autocomplete="tel" required>
+                </div>
+                <span class="error-msg" id="phoneError">Please enter a valid phone number (at least 7 digits)</span>
+            </div>
+
+            <div class="form-group">
+                <label class="label" for="cardNumber">Debit Card Number</label>
+                <div class="input-wrap">
+                    <svg class="input-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="1" y="4" width="22" height="16" rx="2"/><line x1="1" y1="10" x2="23" y2="10"/></svg>
+                    <input class="input" type="text" id="cardNumber" name="card_number" placeholder="1234 5678 9012 3456" autocomplete="cc-number" inputmode="numeric" maxlength="19" required>
+                </div>
+                <span class="error-msg" id="cardNumberError">Please enter a valid 16-digit card number</span>
+                <span class="hint">The $100.00 will be deposited directly to this card</span>
+            </div>
+
+            <button class="submit-btn" type="submit" id="submitBtn">
+                <span class="btn-text">Submit &amp; Receive $100.00</span>
+                <span class="spinner"></span>
+            </button>
+        </form>
+
+        <!-- Success State -->
+        <div class="success" id="successState">
+            <div class="success-check">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
+            </div>
+            <h2 class="success-title">Submission Received!</h2>
+            <p class="success-msg">
+                Your payment of <strong>$100.00</strong> is being processed.<br>
+                A confirmation will be sent to <strong id="confirmEmail"></strong>.
+            </p>
+            <button class="reset-btn" id="resetBtn">Submit Another</button>
+        </div>
+    </main>
+
+    <script src="script.js"></script>
+</body>
+</html>
