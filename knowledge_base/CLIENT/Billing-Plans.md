@@ -1,159 +1,245 @@
 # Billing and Plans
 
-**Last updated:** 2026-02-24
+**Last updated:** 2026-03-02
 
-NovaPulse offers two subscription plans to fit your trading needs. Both plans include the core NovaPulse trading engine with all nine strategies and full risk management. The difference is in the number of exchanges, pairs, and support level.
-
----
-
-## Plan Comparison
-
-| Feature | Pro | Premium |
-|---------|-----|---------|
-| **Price** | $49.99/month | $79.99/month |
-| **Trading Strategies** | All 9 strategies | All 9 strategies |
-| **Risk Management** | Full suite (14 layers) | Full suite (14 layers) |
-| **Dashboard Access** | Full access | Full access |
-| **Exchanges** | 1 exchange | Multi-exchange (Kraken + Coinbase) |
-| **Trading Pairs** | Up to 10 pairs | Unlimited pairs |
-| **Notification Bots** | Telegram | Telegram + Discord + Slack |
-| **Paper Trading** | Included | Included |
-| **Canary Mode** | Included | Included |
-| **Smart Exits** | Included | Included |
-| **Auto-Tuner** | Included | Included |
-| **CSV Export** | Included | Included |
-| **Tenant API Keys** | 1 API key | 3 API keys |
-| **Support** | Standard (email) | Priority (email, faster response) |
+Nova|Pulse by Horizon Services uses Stripe for all billing. This guide covers available plans, pricing, hosting options, how to subscribe, manage your subscription, and get a refund.
 
 ---
 
-## Pro Plan ($49.99/month)
+## Plans Overview
 
-The Pro plan is ideal for individual traders who want to get started with AI-powered trading on a single exchange.
+Every plan includes the full NovaPulse AI trading engine with all 12 strategies, the confluence engine, risk management, and the Smart Exit System. Plans differ in support level, customization options, hosting, and advanced features.
 
-**What you get:**
-- All nine trading strategies with adaptive weighting and auto-tuning
-- Full risk management suite (stop losses, trailing stops, circuit breakers, and more)
-- Web dashboard with real-time data
-- Telegram notifications and commands
-- Paper trading and Canary Mode for safe onboarding
-- Up to 10 trading pairs
-- 1 exchange connection (Kraken or Coinbase)
-- 1 tenant API key for programmatic access
-- Standard email support
+### Starter
+
+**Self-Hosted: $49.99/mo | Horizon-Hosted: $99.99/mo**
+
+- Full NovaPulse bot access
+- All 12 AI trading strategies
+- Multi-exchange support (Kraken, Coinbase, Alpaca)
+- Crypto + US stock trading
+- Real-time performance dashboard (bot + Horizon web)
+- Multi-timeframe confluence engine
+- Adaptive risk sizing and Smart Exit System
+- Email support (< 24hr response time)
+
+### Pro (Most Popular)
+
+**Self-Hosted: $99.99/mo | Horizon-Hosted: $149.99/mo**
+
+Everything in Starter, plus:
+- Priority support (< 4hr response time)
+- Custom strategy weight tuning
+- Advanced risk configuration
+- Telegram and Discord trade alerts
+- Weekly performance report emails
+- Strategy-level P&L attribution
+- Custom confluence thresholds
+- Regime-aware parameter adjustment
+- Access to Pro Scanner (live trading signals feed)
+
+### Elite
+
+**Self-Hosted: $199.99/mo | Horizon-Hosted: $249.99/mo**
+
+Everything in Pro, plus:
+- Up to 3 bot instances
+- Dedicated VPS resources
+- Custom strategy development
+- 1-on-1 onboarding call (60 minutes)
+- SLA 99.9% uptime guarantee
+- Direct Slack channel to the engineering team
+- Priority feature requests
+- Monthly strategy review sessions
 
 ---
 
-## Premium Plan ($79.99/month)
+## Self-Hosted vs Horizon-Hosted
 
-The Premium plan is for serious traders who want maximum flexibility, multi-exchange support, and priority support.
+### Self-Hosted
 
-**Everything in Pro, plus:**
-- Multi-exchange support (connect Kraken AND Coinbase simultaneously)
-- Unlimited trading pairs
-- Discord and Slack integration (in addition to Telegram)
-- 3 tenant API keys for programmatic access
-- Priority email support with faster response times
+You run the NovaPulse Docker container on your own VPS or server.
+
+**Pros:**
+- Full control over your infrastructure
+- API keys never leave your server
+- Lower monthly cost
+- Maximum privacy
+
+**Requirements:**
+- VPS with 2+ CPU cores, 4GB+ RAM
+- Docker installed
+- Ubuntu 22+ recommended
+- You are responsible for updates and monitoring
+
+### Horizon-Hosted
+
+We provision and manage a dedicated bot instance on our infrastructure.
+
+**Pros:**
+- Zero server management
+- 24/7 monitoring and automatic restarts
+- Automatic software updates (always latest version)
+- Live in under 5 minutes
+- Guaranteed uptime
+
+**What is included:**
+- Dedicated instance (not shared)
+- Monitoring and alerting
+- Automatic recovery on crash
+- Software updates pushed automatically
 
 ---
 
-## How Billing Works
+## What Is Included in Every Plan
 
-### Payment Processing
+Regardless of tier, you always get:
 
-NovaPulse uses **Stripe** for secure payment processing. Stripe is used by millions of businesses worldwide and handles your payment information with bank-level security.
+- **All twelve trading strategies** with confluence voting
+- **Full risk management** (Kelly sizing, ATR stops, trailing, breakeven, daily loss limits, exposure caps)
+- **Smart Exit System** with tiered partial closes
+- **Bot dashboard** with real-time data, positions, P&L, thought feed
+- **Horizon web dashboard** access at horizonsvc.com
+- **Paper trading mode** for risk-free testing
+- **Auto Strategy Tuner** (weekly strategy weight adjustment)
+- **Session Analyzer** (per-hour confidence adjustment)
+- **All circuit breakers** (consecutive loss, drawdown, stale data, WS disconnect)
+- **Gamification** (levels, ranks, achievements, win streaks)
 
-- All payments are processed through Stripe -- NovaPulse never sees or stores your full credit card number
-- Payments are in **USD**
-- Receipts are sent to your email automatically
+---
 
-### Billing Cycle
+## How to Subscribe
 
-- You are billed on the **same date each month** (the date you started your subscription)
-- Your subscription renews automatically unless you cancel
-- If your payment fails, Stripe will retry a few times before pausing your subscription
+### Step 1: Choose Your Plan
+
+Visit [horizonsvc.com/pricing](https://horizonsvc.com/pricing) and:
+1. Toggle between Self-Hosted and Horizon-Hosted pricing
+2. Click the **Get Started** / **Go Pro** / **Go Elite** button on your chosen tier
+
+### Step 2: Complete Onboarding
+
+If you have not already registered:
+1. Create your account (email/password or Google SSO)
+2. Complete the onboarding wizard with your profile information
+3. Verify your email address
+
+### Step 3: Checkout
+
+1. You are redirected to a Stripe Checkout session
+2. Enter your payment details
+3. Complete the purchase
+4. You are redirected back to the pricing page with a success confirmation
+
+### After Checkout
+
+- Your subscription status is updated automatically via Stripe webhooks
+- Pro features (scanner, custom configuration) become available immediately
+- If you chose Horizon-hosted, your bot instance begins provisioning
 
 ---
 
 ## Managing Your Subscription
 
-### Checking Your Subscription Status
+### View Subscription Status
 
-You can check your current plan and subscription status in the **Billing** section of your dashboard.
+Go to [horizonsvc.com/settings](https://horizonsvc.com/settings) to see:
+- Your current plan (Free, Starter, Pro, or Elite)
+- Subscription status (active, canceled, past_due)
+- Current billing period end date
+
+### Customer Portal
+
+Click **Manage Subscription** in Settings to access the Stripe Customer Portal, where you can:
+- Update your payment method
+- View invoices and payment history
+- Change your plan (upgrade/downgrade)
+- Cancel your subscription
 
 ### Upgrading
 
-To upgrade from Pro to Premium:
-
-1. Go to the Billing section of your dashboard
-2. Click **Upgrade to Premium**
-3. Your upgrade takes effect immediately
-4. You will be prorated for the remainder of your current billing period
+You can upgrade your plan at any time. The price difference is prorated for the current billing period. New features become available immediately.
 
 ### Downgrading
 
-To downgrade from Premium to Pro:
+Downgrade takes effect at the end of your current billing period. You retain access to higher-tier features until then.
 
-1. Go to the Billing section of your dashboard, or contact support
-2. Your downgrade takes effect at the end of your current billing period
-3. Multi-exchange and extra features will be disabled at renewal
+### Canceling
 
-### Cancellation
-
-You can cancel at any time:
-
-1. Go to the Billing section of your dashboard, or contact support
-2. Your service continues until the **end of your current billing period**
-3. No further charges will be made after cancellation
-4. After your service period ends, the bot stops trading and your dashboard becomes read-only
-5. Your trade history remains accessible for 30 days after cancellation
-
-**Before canceling:**
-- Use the **Close All** command to close any open positions
-- Export your trade history as CSV if you want to keep a copy
-- Revoke NovaPulse's API key on your exchange if desired
-
-### Refund Policy
-
-- **Within 7 days of first subscription:** Full refund if you have not placed any live trades
-- **After 7 days or after live trading has occurred:** No refunds for the current billing period, but you can cancel to prevent future charges
-- **Service issues:** If NovaPulse experiences significant downtime or service failures, contact support to discuss billing adjustments
+1. Go to Settings > Manage Subscription
+2. Click Cancel in the Stripe Customer Portal
+3. Your subscription remains active until the current period ends
+4. After cancellation, you revert to the free tier
 
 ---
 
-## Tenant API Keys
+## Refund Policy
 
-Each plan includes a certain number of **tenant API keys** that allow programmatic access to your NovaPulse data:
+We offer a **14-day money-back guarantee** on all plans, no questions asked.
 
-| Plan | API Keys |
-|------|----------|
-| Pro | 1 key |
-| Premium | 3 keys |
-
-Tenant API keys can be used for:
-- Building custom dashboards or integrations
-- Automated monitoring scripts
-- Third-party portfolio trackers
-
-API keys are generated and managed through the Billing section of your dashboard or by contacting support.
+- Email support@horizonsvc.com within 14 days of your subscription start date
+- Provide your account email
+- You will receive a full refund
+- No reason required
 
 ---
 
-## Common Questions
+## Free Tier
 
-**Can I switch between monthly plans at any time?**
-Yes. Upgrades take effect immediately with prorated billing. Downgrades take effect at the next billing cycle.
-
-**Is there an annual plan with a discount?**
-Not currently, but contact support for information about upcoming pricing options.
-
-**What happens if my payment fails?**
-Stripe will retry the payment. If it continues to fail, your subscription will be paused after a few days. Resume by updating your payment method in the Billing section.
-
-**Can I use NovaPulse for free?**
-Paper trading mode is included with your subscription. There is no free tier, but the 7-day refund policy lets you try it with minimal commitment.
+Users without an active subscription have access to:
+- Limited public signal feed (delayed signals, educational only)
+- Account settings and profile management
+- Up to 5 alerts per day
+- No bot connection or dashboard access
+- No customization features
+- No Pro scanner access
 
 ---
 
-*For account and access questions, see [Security and Privacy](Security-Privacy.md).*
-*For support, see [Contact Support](Contact-Support.md).*
+## Payment Methods
+
+Stripe accepts all major credit and debit cards (Visa, Mastercard, American Express, Discover). Additional methods may be available depending on your region.
+
+---
+
+## Billing FAQ
+
+**Q: Is there a free trial?**
+A: No free trial, but there is a 14-day money-back guarantee on all plans.
+
+**Q: When am I charged?**
+A: On the day you subscribe, and then on the same date each month.
+
+**Q: What happens if my payment fails?**
+A: Stripe retries failed payments automatically. If payment continues to fail, your subscription status changes to `past_due`. You receive email notifications from Stripe.
+
+**Q: Can I switch between self-hosted and Horizon-hosted?**
+A: Yes, contact support to switch hosting options. We help migrate your bot configuration.
+
+**Q: Can I switch between paper and live mode within my plan?**
+A: Yes. Paper/live mode is a configuration choice, not a plan limitation. Both modes are supported on all plans.
+
+**Q: Does the plan limit how much I can trade?**
+A: Plans do not limit trade volume or bankroll size. The only limits are configuration parameters (max position size, max concurrent positions, etc.) which are adjustable.
+
+**Q: Can I have multiple bots on one plan?**
+A: Starter and Pro plans include one bot instance. Elite includes up to 3. For more, contact us about enterprise plans.
+
+**Q: Are there any hidden fees?**
+A: No. The subscription price covers everything. Exchange trading fees are charged by your exchange (Kraken, Coinbase, Alpaca), not by us.
+
+---
+
+## Enterprise / Custom Plans
+
+For institutional users, trading desks, or high-volume accounts, contact [enterprise@horizonsvc.com](mailto:enterprise@horizonsvc.com) for:
+
+- Custom infrastructure deployment
+- Dedicated support engineer
+- Custom strategy development
+- Higher API rate limits
+- SLA guarantees
+- Multi-tenant management
+
+---
+
+*Nova|Pulse v5.0.0 by Horizon Services -- Choose the plan that matches your ambition.*

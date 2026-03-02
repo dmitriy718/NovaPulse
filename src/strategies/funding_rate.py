@@ -100,7 +100,7 @@ class FundingRateStrategy(BaseStrategy):
             trend_bullish = float(ema_fast[-1]) > float(ema_slow[-1])
             trend_bearish = float(ema_fast[-1]) < float(ema_slow[-1])
 
-        extreme = self.funding_extreme_pct / 100.0  # Convert from percentage
+        extreme = self.funding_extreme_pct  # Already a decimal fraction (e.g., 0.01 = 1%)
 
         direction = SignalDirection.NEUTRAL
         strength = 0.0

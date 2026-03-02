@@ -58,7 +58,7 @@ class DatabaseManager:
         self._initialized = False
         # TTL cache for get_performance_stats (keyed by tenant_id)
         self._perf_stats_cache: Dict[str, Any] = {}
-        self._perf_stats_cache_ts: float = 0.0
+        self._perf_stats_cache_ts: Dict[str, float] = {}
         self._perf_stats_cache_ttl: float = 5.0
 
     @property
@@ -636,6 +636,7 @@ class DatabaseManager:
         "exit_price", "pnl", "pnl_pct", "fees", "slippage", "status",
         "stop_loss", "take_profit", "trailing_stop", "exit_time",
         "duration_seconds", "notes", "metadata", "quantity",
+        "close_reason",
     })
 
     async def update_trade(
@@ -1142,7 +1143,7 @@ class DatabaseManager:
         now = time.monotonic()
         if (
             cache_key in self._perf_stats_cache
-            and (now - self._perf_stats_cache_ts) < self._perf_stats_cache_ttl
+            and (now - self._perf_stats_cache_ts.get(cache_key, 0.0)) < self._perf_stats_cache_ttl
         ):
             return self._perf_stats_cache[cache_key]
 
@@ -1236,7 +1237,7 @@ class DatabaseManager:
 
         # --- Populate cache ---
         self._perf_stats_cache[cache_key] = stats
-        self._perf_stats_cache_ts = now
+        self._perf_stats_cache_ts[cache_key] = now
 
         return stats
 

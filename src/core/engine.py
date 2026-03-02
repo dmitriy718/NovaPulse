@@ -108,6 +108,7 @@ class BotEngine:
         self._event_calendar = None
         self._anomaly_detector = None
         self._lead_lag_tracker = None
+        self._regime_predictor = None
         self._onchain_client = None
         self._ensemble_model = None
         self._bayesian_optimizer = None
@@ -142,6 +143,7 @@ class BotEngine:
         self._stale_check_count = 0
         self._ws_disconnected_since: Optional[float] = None
         self._auto_pause_reason: str = ""
+        self._auto_pause_cooldown_until: float = 0.0
         self._invalid_pairs: set = set()  # pairs permanently rejected by exchange
         # Pre-exclude stablecoins / pegged assets — no tradeable volatility
         self._untradeable_pairs: frozenset = frozenset({
@@ -209,9 +211,20 @@ class BotEngine:
                 pass
 
     async def _apply_circuit_breakers(self, stale_pairs: List[str]) -> None:
-        """Apply simple circuit breakers (stale data, WS disconnect) to reduce blow-ups in live mode."""
+        """Apply simple circuit breakers (stale data, WS disconnect) to reduce blow-ups in live mode.
+
+        ALL breakers respect the post-resume grace period (_auto_pause_cooldown_until)
+        to prevent the common "resume → immediate re-pause" loop.
+        """
         mon = getattr(self.config, "monitoring", None)
         if not mon:
+            return
+
+        # Grace period: after a manual resume, skip ALL circuit breakers
+        # for the configured duration so the operator has time to address
+        # the underlying issue (e.g., restart WS, wait for data to flow).
+        now = time.time()
+        if now < self._auto_pause_cooldown_until:
             return
 
         # Stale data breaker
@@ -232,7 +245,6 @@ class BotEngine:
         # WebSocket disconnect breaker
         if getattr(mon, "auto_pause_on_ws_disconnect", True):
             ws_ok = bool(self.ws_client and getattr(self.ws_client, "is_connected", False))
-            now = time.time()
             if not ws_ok:
                 if self._ws_disconnected_since is None:
                     self._ws_disconnected_since = now
@@ -696,7 +708,7 @@ class BotEngine:
             rp_cfg = getattr(self.config.ai, "regime_predictor", None)
             if rp_cfg and getattr(rp_cfg, "enabled", False):
                 from src.ai.regime_predictor import RegimeTransitionPredictor
-                _regime_predictor = RegimeTransitionPredictor(
+                self._regime_predictor = RegimeTransitionPredictor(
                     squeeze_duration_threshold=rp_cfg.squeeze_duration_threshold,
                     adx_slope_period=rp_cfg.adx_slope_period,
                     adx_emerging_threshold=rp_cfg.adx_emerging_threshold,
@@ -704,7 +716,7 @@ class BotEngine:
                     emerging_trend_boost=rp_cfg.emerging_trend_boost,
                 )
                 if self.confluence:
-                    self.confluence.set_regime_predictor(_regime_predictor)
+                    self.confluence.set_regime_predictor(self._regime_predictor)
                 logger.info("Regime transition predictor initialized")
         except Exception as e:
             logger.warning("Regime predictor init failed (non-fatal)", error=repr(e))
@@ -1370,8 +1382,13 @@ class BotEngine:
                 tenant_id=self.tenant_id,
             )
 
+        # Startup grace period: give the bot 5 minutes before circuit
+        # breakers can fire.  This prevents startup stale-data / WS-disconnect
+        # pauses while warmup data is still flowing in.
+        self._auto_pause_cooldown_until = time.time() + 300
+
         logger.info(
-            "All subsystems initialized",
+            "All subsystems initialized (5-min startup grace period active)",
             pairs=len(self.pairs),
             mode=self.mode,
             bankroll=initial_bankroll,
@@ -1661,8 +1678,12 @@ class BotEngine:
                 # Step 3: Process signals through AI predictor
                 # Use config threshold (default 3) for higher-quality, fewer trades; allow 2+ with strong confidence
                 min_confluence = getattr(self.config.ai, "confluence_threshold", 3)
+                if min_confluence < 2:
+                    logger.warning("confluence_threshold below floor of 2", configured=min_confluence, effective=2)
                 min_confluence = max(2, min_confluence)  # At least 2 strategies must agree
                 exec_confidence = getattr(self.config.ai, "min_confidence", 0.50)
+                if exec_confidence > 0.75:
+                    logger.warning("min_confidence config exceeds 0.75 cap", configured=exec_confidence, capped=0.75)
                 exec_confidence = max(0.45, min(exec_confidence, 0.75))  # Keep within sane bounds
                 if self.canary_mode:
                     min_confluence = max(
@@ -1683,8 +1704,10 @@ class BotEngine:
                     self.continuous_learner and getattr(self.continuous_learner, "is_trained", False)
                 )
                 if not _model_loaded:
-                    min_confluence = max(min_confluence, 3)
-                    exec_confidence = max(exec_confidence, 0.60)
+                    # Cold-start: bump modestly — don't override config thresholds
+                    # too aggressively or it negates intentional tuning.
+                    min_confluence = max(min_confluence, 2)
+                    exec_confidence = max(exec_confidence, 0.55)
 
                 # Session-aware hard gating: raise confluence floor during
                 # historically losing hours (sub-40% WR → 4+, sub-30% → 5+).
@@ -1799,6 +1822,14 @@ class BotEngine:
                     )
 
                     if directional_real_votes < min_confluence and not keltner_solo_ok and not any_solo_ok:
+                        await self.db.log_thought(
+                            "filter",
+                            f"⛔ {signal.pair} {signal.direction.value.upper()} rejected: "
+                            f"confluence {directional_real_votes}/{min_confluence} "
+                            f"(conf={signal.confidence:.2f})",
+                            severity="info",
+                            tenant_id=self.tenant_id,
+                        )
                         continue
 
                     # Skip trades with poor risk/reward (TP distance should be at least min_rr * SL distance)
@@ -1806,9 +1837,17 @@ class BotEngine:
                     tp_dist = abs((signal.take_profit or 0) - signal.entry_price) if signal.take_profit else 0
                     min_rr = getattr(self.config.ai, "min_risk_reward_ratio", 0.9)
                     if sl_dist > 0 and tp_dist > 0 and (tp_dist / sl_dist) < min_rr:
+                        await self.db.log_thought(
+                            "filter",
+                            f"⛔ {signal.pair} rejected: risk/reward {tp_dist/sl_dist:.2f} < {min_rr}",
+                            severity="info",
+                            tenant_id=self.tenant_id,
+                        )
                         continue
 
                     # Skip if spread too wide (absolute max_spread_pct gate)
+                    # Note: spread <= 0 means no book data available — allow trade through
+                    # rather than blocking on missing data.
                     max_spread = getattr(self.config.trading, "max_spread_pct", 0.0) or 0.0
                     if max_spread > 0:
                         book = self.market_data.get_order_book(signal.pair) if self.market_data else {}
@@ -1818,7 +1857,14 @@ class BotEngine:
                             float(getattr(self.config.ai, "book_score_max_age_seconds", 5) or 5),
                         )
                         spread = self.market_data.get_spread(signal.pair)
-                        if spread <= 0 or book_age > max_book_age or spread > max_spread:
+                        if spread > 0 and (book_age > max_book_age or spread > max_spread):
+                            await self.db.log_thought(
+                                "filter",
+                                f"⛔ {signal.pair} rejected: spread {spread:.4f} > max {max_spread:.4f} "
+                                f"(book_age={book_age:.0f}s)",
+                                severity="info",
+                                tenant_id=self.tenant_id,
+                            )
                             continue
 
                     # Spread-to-ATR hard gate: reject when spread eats too much of
@@ -1828,6 +1874,13 @@ class BotEngine:
                     _spread_val = self.market_data.get_spread(signal.pair) if self.market_data else 0.0
                     if _atr_pct_val > 0 and _spread_val > 0:
                         if _spread_val > _atr_pct_val * 0.15:
+                            await self.db.log_thought(
+                                "filter",
+                                f"⛔ {signal.pair} rejected: spread/ATR "
+                                f"{_spread_val/_atr_pct_val*100:.0f}% > 15%",
+                                severity="info",
+                                tenant_id=self.tenant_id,
+                            )
                             continue
 
                     # Spread-relative TP adjustment: widen TP to cover
@@ -1862,7 +1915,7 @@ class BotEngine:
                                 direction=signal.direction.value,
                             )
 
-                # Log cycle metrics - every scan for visibility
+                # Log cycle metrics — every 10th scan or when signals found
                 cycle_time = (time.time() - cycle_start) * 1000
                 active_count = sum(1 for s in confluence_signals if s.direction != SignalDirection.NEUTRAL)
                 if self._scan_count % 10 == 0 or active_count > 0:
@@ -1875,7 +1928,7 @@ class BotEngine:
                         "system",
                         f"Scan #{self._scan_count} | {cycle_time:.0f}ms | "
                         f"Signals: {active_count}/{len(pairs_to_scan)} pairs",
-                        severity="debug",
+                        severity="info",
                         tenant_id=self.tenant_id,
                     )
                 # Next cycle is gated by _collect_scan_pairs (event-driven or timeout)

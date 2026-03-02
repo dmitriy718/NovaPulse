@@ -1,271 +1,221 @@
 # Multi-Exchange Trading
 
-**Version:** 4.5.0
-**Last updated:** 2026-02-24
+**Version:** 5.0.0
+**Last updated:** 2026-03-01
 
-NovaPulse is not limited to a single exchange or a single asset class. It can trade across Kraken, Coinbase, and the US stock market simultaneously -- all coordinated from one system, one dashboard, and one risk framework. This guide explains how multi-exchange trading works, why it matters, and what you should know as a subscriber.
+Nova|Pulse is not limited to a single exchange or a single asset class. It can trade across Kraken, Coinbase, and the US stock market simultaneously -- all coordinated from one system, one dashboard, and one risk framework. This guide explains how multi-exchange trading works, why it matters, and what you should know as a subscriber.
 
 ---
 
 ## Why Trade on Multiple Exchanges?
 
-Imagine a fisherman who only fishes in one pond. Some days that pond is full of fish; other days it is empty. Now imagine a fisherman with lines in three different bodies of water. Even when one is quiet, the others may be active.
+### Diversification
 
-That is the core idea behind multi-exchange trading:
+Different exchanges offer different pairs, different liquidity, and different fee structures. By trading across multiple venues, you spread your exposure and reduce dependence on any single exchange.
 
-- **Diversification:** Different exchanges list different assets and attract different types of traders. By watching all three, NovaPulse sees more opportunities.
-- **Different asset classes:** Crypto and stocks behave differently. Crypto trades 24/7 with higher volatility; stocks follow structured market hours with more predictable patterns. Combining both gives NovaPulse access to a wider range of market conditions.
-- **Reduced dependency:** If one exchange has downtime or connectivity issues, the others continue operating independently.
-- **More data, better AI:** NovaPulse's machine learning models learn from trades across all exchanges. More data means faster learning and better signal quality over time.
+### Access to More Markets
 
----
+- **Kraken** excels at crypto-to-USD pairs with excellent API stability and deep order books
+- **Coinbase** offers access to some pairs not available on Kraken
+- **Alpaca/Polygon** opens the door to US equity swing trading -- an entirely different asset class with different rhythms
 
-## The Three Exchanges
+### Risk Isolation
 
-### Kraken (Cryptocurrency)
-
-Kraken is NovaPulse's primary crypto exchange and the recommended choice for cryptocurrency trading.
-
-- **Data feed:** Real-time WebSocket (Kraken WS v2). Price updates arrive in milliseconds, giving NovaPulse the freshest possible view of the market.
-- **Order execution:** REST API for placing and managing orders.
-- **Pairs:** Configurable -- typically BTC/USD, ETH/USD, and other major crypto pairs.
-- **Trading hours:** 24/7 (crypto never sleeps).
-
-### Coinbase (Cryptocurrency)
-
-Coinbase Advanced Trade is an alternative crypto exchange that NovaPulse supports alongside Kraken.
-
-- **Data feed:** A combination of REST polling (for historical candles) and WebSocket (for live updates). This hybrid approach ensures reliable data even during brief connectivity hiccups.
-- **Order execution:** REST API for placing and managing orders.
-- **Pairs:** Configurable -- similar major crypto pairs as Kraken.
-- **Trading hours:** 24/7.
-
-### Alpaca (US Stocks)
-
-Alpaca is NovaPulse's broker for US equity (stock) trading.
-
-- **Data feed:** Polygon daily bars for market data. Polygon provides comprehensive stock market data covering thousands of US-listed equities.
-- **Order execution:** Alpaca's trading API for buying and selling stocks.
-- **Universe:** Up to 96 of the most liquid US stocks, automatically selected and refreshed every 60 minutes during market hours.
-- **Trading hours:** US regular market hours only (9:30 AM to 4:00 PM Eastern Time, weekdays).
+If one exchange experiences an outage or degraded performance, the other engines continue operating independently. Your trading is not completely halted by a single point of failure.
 
 ---
 
-## How the Priority Scheduler Works
+## Supported Exchanges
 
-One of NovaPulse's most distinctive features is its **priority scheduler** -- an automatic system that coordinates trading across crypto and stock markets so they never compete for attention or resources.
+### Kraken (Primary for Crypto)
 
-Here is how it works:
+| Feature | Details |
+|---------|---------|
+| **Connection** | WebSocket v2 (live data) + REST API (historical data, orders) |
+| **Data** | Ticker, OHLC candles, order book, trade stream |
+| **Order types** | Limit (with chase), Market (fallback) |
+| **Default pairs** | BTC/USD, ETH/USD, SOL/USD, XRP/USD, ADA/USD, DOT/USD, AVAX/USD, LINK/USD |
+| **Fees** | Maker 0.16%, Taker 0.26% |
 
+### Coinbase (Secondary for Crypto)
+
+| Feature | Details |
+|---------|---------|
+| **Connection** | WebSocket (live data) + REST (candle polling, orders) |
+| **Data** | Ticker, candles (REST-polled every 60s), order book |
+| **Order types** | Limit, Market |
+| **Known exclusions** | USDC/USD, TRX/USD, XAUT/USD (permanently excluded, not tradeable pairs) |
+| **Fees** | Varies by volume tier |
+
+### Alpaca (Stocks)
+
+| Feature | Details |
+|---------|---------|
+| **Connection** | REST API for orders and account info |
+| **Market data** | Provided by Polygon.io (daily bars) |
+| **Order types** | Market orders via Alpaca |
+| **Default symbols** | 28 pinned stocks + up to 68 dynamic (96 total universe) |
+| **Fees** | Commission-free (Alpaca's standard) |
+
+---
+
+## How Multi-Exchange Mode Works
+
+### Engine Per Exchange
+
+Each exchange runs its own independent engine instance:
+
+- **Kraken engine** -- manages crypto trading on Kraken with its own database, strategies, and risk manager
+- **Coinbase engine** -- manages crypto trading on Coinbase with its own database and risk manager
+- **Stock engine** -- manages stock swing trading with Polygon data and Alpaca execution
+
+### MultiEngineHub
+
+The MultiEngineHub coordinates all engines:
+- Aggregates portfolio data for the unified dashboard view
+- Routes control commands (pause, resume, close_all) to all engines
+- Manages the priority scheduler
+
+### Unified Dashboard
+
+Even with multiple engines running, you see a single dashboard:
+- Portfolio totals are summed across all engines
+- Positions show their exchange label (e.g., "BTC/USD (kraken:default)")
+- The thought feed combines entries from all engines
+- Control buttons affect all engines simultaneously
+
+### Separate Databases
+
+Each engine writes to its own SQLite database:
+- `data/trading_kraken_default.db` -- Kraken crypto trades
+- `data/trading_coinbase_default.db` -- Coinbase crypto trades
+- `data/trading_stocks_default.db` -- Stock trades
+
+This ensures isolation -- a database issue with one engine does not affect the others.
+
+---
+
+## Priority Scheduler
+
+Nova|Pulse uses an intelligent priority scheduler to coordinate between crypto and stock trading:
+
+### During US Market Hours (9:30 AM -- 4:00 PM Eastern, Weekdays)
+- **Stock engine: ACTIVE** -- scanning and trading stocks
+- **Crypto engines: PAUSED** -- no new crypto trades (existing positions still managed)
+
+### Outside Market Hours
+- **Crypto engines: ACTIVE** -- scanning and trading crypto
+- **Stock engine: PAUSED** -- stocks cannot trade outside market hours anyway
+
+### Why This Exists
+
+Running all engines at full throttle simultaneously would:
+- Spread API rate limits across too many requests
+- Compete for the same risk budget
+- Create unnecessary complexity during periods when one market is closed anyway
+
+The scheduler ensures focused, efficient operation on the active market.
+
+### What You See
+
+The thought feed will log transitions:
 ```
-Weekday Timeline (Eastern Time)
-================================================================
-
-12:00 AM  ----  Crypto engines ACTIVE (Kraken + Coinbase)
-  |              Stocks engine PAUSED
-  |
-9:30 AM   ----  US market opens
-  |              Crypto engines PAUSE automatically
-  |              Stocks engine ACTIVATES
-  |
-4:00 PM   ----  US market closes
-  |              Stocks engine PAUSES
-  |              Crypto engines RESUME automatically
-  |
-11:59 PM  ----  (cycle repeats next weekday)
-
-================================================================
-Weekend:   Crypto engines ACTIVE 24/7, Stocks engine PAUSED
-```
-
-**Why does it work this way?**
-
-- During US market hours, the stock market offers structured, high-quality trading opportunities. NovaPulse focuses on stocks during this window.
-- Outside market hours (evenings, nights, weekends), the stock market is closed, so NovaPulse switches to crypto, which trades around the clock.
-- This ensures NovaPulse is always doing something productive, no matter the time of day or day of the week.
-
-**Is this automatic?** Yes, completely. You do not need to do anything. The scheduler monitors the clock and handles the transitions seamlessly. When it pauses a crypto engine, it does not close existing positions -- it simply stops scanning for new trades. Open positions continue to be managed (stop losses, trailing stops) regardless of whether the engine is paused.
-
----
-
-## Separate Databases, Separate Tracking
-
-Each exchange operates with its own independent database:
-
-| Exchange | Database | What It Tracks |
-|----------|----------|---------------|
-| Kraken | `trading_kraken_default.db` | All Kraken trades, signals, metrics, P&L |
-| Coinbase | `trading_coinbase_default.db` | All Coinbase trades, signals, metrics, P&L |
-| Stocks | `trading_stocks_default.db` | All stock trades, signals, metrics, P&L |
-
-**Why separate databases?**
-
-- **Clean accounting:** You can see exactly how each exchange is performing independently.
-- **Independent risk management:** Risk limits (daily loss, max positions, exposure) are tracked per exchange. A bad day on Kraken does not affect your stock trading limits.
-- **Simpler troubleshooting:** If something looks off on one exchange, the data is cleanly isolated.
-
-Even though the databases are separate, the dashboard combines them into one unified view, so you can see everything at a glance.
-
----
-
-## The Unified Dashboard
-
-Despite running multiple engines behind the scenes, your dashboard presents a single, unified view:
-
-- **Portfolio summary:** Total P&L across all exchanges, combined win rate, overall equity curve.
-- **Per-exchange breakdown:** Drill into Kraken, Coinbase, or Stocks individually to see exchange-specific performance.
-- **Active positions:** All open trades from all exchanges in one list, clearly labeled by exchange.
-- **Signal scanner:** Shows what each engine is analyzing, with exchange labels so you know which market generated each signal.
-- **Thought feed:** The bot's reasoning from all engines, interleaved chronologically.
-
-Think of it like a flight control center: multiple runways (exchanges), but one control tower (your dashboard) watching everything.
-
----
-
-## How Data Flows Differently Per Exchange
-
-Each exchange provides market data in a different way. NovaPulse adapts to each:
-
-### Kraken: Real-Time WebSocket
-
-```
-Kraken Exchange
-    |
-    |  WebSocket v2 (persistent connection)
-    |  Price updates in milliseconds
-    v
-NovaPulse Kraken Engine
-    |
-    |  REST API (order placement)
-    v
-Orders placed on Kraken
+Priority schedule PAUSED kraken engine | phase=equities_day_session
+Priority schedule RESUMED kraken engine | phase=crypto_after_hours
 ```
 
-Kraken's WebSocket connection is a persistent, always-on data stream. NovaPulse receives price updates, order book changes, and trade notifications in near real-time. This is the fastest data path and is ideal for the short-term crypto strategies NovaPulse employs.
+These are normal operational messages, not errors.
 
-### Coinbase: Hybrid REST + WebSocket
+---
 
+## Cross-Engine Risk Management
+
+### Global Risk Aggregator
+
+The `GlobalRiskAggregator` tracks total exposure across all engines. Before any engine opens a new position, it checks:
+
+1. **Local capacity** -- does this engine have room for more positions?
+2. **Global capacity** -- does the total across all engines have room?
+
+If either check fails, the trade is rejected. This prevents the combined portfolio from becoming over-exposed even if each individual engine looks fine in isolation.
+
+### How It Works
+
+Example with a $5,000 bankroll and 50% max exposure:
+- Maximum total exposure across all engines: $2,500
+- Kraken has $800 in positions, Coinbase has $600, Stocks has $400
+- Total: $1,800 of $2,500 capacity used
+- A new Kraken trade wanting $900 would be rejected (would bring total to $2,700)
+
+### Correlation Awareness
+
+The risk system also understands correlation groups:
+- BTC/USD on Kraken and BTC/USD on Coinbase are the same asset
+- If you are already long BTC on Kraken, opening long BTC on Coinbase counts against the same correlation group
+
+---
+
+## ML Training Across Exchanges
+
+The machine learning system can aggregate training data from all exchange databases:
+
+- The **leader engine** (typically the first configured exchange) runs ML training
+- It reads trade data from all exchange databases
+- The resulting model is shared across engines
+- This gives the ML system a broader dataset to learn from
+
+---
+
+## Configuration
+
+Multi-exchange mode is configured via the `trading_exchanges` or `trading_accounts` settings:
+
+**Simple multi-exchange:**
+```yaml
+app:
+  trading_exchanges: "kraken,coinbase"
 ```
-Coinbase Exchange
-    |
-    |  REST polling (historical candles, ~60s intervals)
-    |  + WebSocket (live price updates)
-    v
-NovaPulse Coinbase Engine
-    |
-    |  REST API (order placement)
-    v
-Orders placed on Coinbase
+
+**Multi-account (advanced):**
+```yaml
+app:
+  trading_accounts: "main:kraken,main:coinbase,swing:kraken"
 ```
 
-Coinbase uses a hybrid approach. Historical candle data is fetched via REST at regular intervals, while live price updates come through a WebSocket connection. This dual-path design provides reliability: if the WebSocket briefly disconnects, the REST polling ensures NovaPulse still has recent price data.
-
-### Stocks: Polygon Data + Alpaca Execution
-
-```
-Polygon (Market Data)
-    |
-    |  Daily bars via REST API
-    |  Universe scanning (volume, price filters)
-    v
-NovaPulse Stock Engine
-    |
-    |  REST API (order placement)
-    v
-Alpaca (Broker)
-    Orders executed on US stock market
-```
-
-Stock trading uses a split architecture: Polygon provides the market data (daily price bars for the entire stock universe), while Alpaca handles order execution. This separation lets NovaPulse use Polygon's comprehensive data coverage while leveraging Alpaca's commission-free stock trading.
+Your operator will set this up based on your subscription and exchange accounts.
 
 ---
 
-## Risk Management Across Exchanges
+## What to Expect
 
-Each exchange has its own independent risk limits:
+### Performance Differences
 
-- **Daily loss limit:** Tracked per exchange. If Kraken hits its daily loss limit, it pauses. Coinbase and Stocks continue unaffected.
-- **Max positions:** Each exchange has its own position cap.
-- **Exposure cap:** The maximum percentage of each exchange's bankroll that can be deployed at once.
-- **Circuit breakers:** Stale data, disconnects, and consecutive losses are monitored per exchange.
+Each exchange may show different results because:
+- Different liquidity affects execution quality
+- Different pairs may be available
+- Fee structures differ
+- Coinbase uses REST-polled candles (60s intervals) vs. Kraken's WebSocket (real-time), which affects signal timing
 
-There is also a **global risk layer** that monitors your combined exposure across all exchanges. This prevents a scenario where each individual exchange is within its limits but your total exposure across all three is too high.
+### Independent but Coordinated
 
----
-
-## Cross-Exchange ML Training
-
-One of the most powerful benefits of multi-exchange trading is cross-exchange learning. NovaPulse's machine learning models can aggregate trade data from all three exchanges:
-
-- The "leader" engine (typically Kraken) collects labeled training data from its own database plus the Coinbase and Stocks databases.
-- When the model retrains (weekly by default), it learns from a larger, more diverse dataset.
-- Patterns that work across multiple exchanges are given more weight, while exchange-specific noise is filtered out.
-
-Think of it like a student who learns not just from one textbook but from three different textbooks on the same subject. The core concepts that appear in all three are reinforced; the quirks of any single book are naturally de-emphasized.
+Each engine makes its own trading decisions independently (strategies, confluence, risk). The coordination happens at the risk level (global exposure) and scheduling level (priority scheduler). You will not see the same trade placed on both Kraken and Coinbase simultaneously -- they operate independently.
 
 ---
 
-## Frequently Asked Questions
+## Common Questions
 
-### Do I need accounts on all three exchanges?
+**Q: Do I need accounts on all three exchanges?**
+A: No. You can run with just one exchange. Multi-exchange is an option for those who want it.
 
-No. NovaPulse is fully flexible:
+**Q: Can I run crypto only or stocks only?**
+A: Yes. Stocks can be disabled in the config. You can also run just Kraken, just Coinbase, or any combination.
 
-- **Kraken only** -- Trade crypto on Kraken exclusively.
-- **Kraken + Coinbase** -- Trade crypto on both exchanges.
-- **Kraken + Stocks** -- Trade crypto and stocks.
-- **All three** -- The full multi-exchange experience.
+**Q: Does multi-exchange cost more?**
+A: Check your subscription plan. Some plans include multi-exchange; others may require an upgrade. See [Billing and Plans](Billing-Plans.md).
 
-Your subscription determines which exchanges are available. Contact support to adjust your exchange configuration.
-
-### Can I run just one exchange?
-
-Absolutely. Many subscribers start with Kraken only and add additional exchanges later. NovaPulse works perfectly well with a single exchange -- the multi-exchange features simply add more breadth when you are ready.
-
-### How is risk managed across exchanges?
-
-Risk is managed at two levels:
-
-1. **Per-exchange:** Each exchange has its own bankroll, daily loss limit, max positions, and exposure cap. They operate independently.
-2. **Global:** A cross-exchange risk layer monitors your combined exposure to prevent overcommitment across all exchanges simultaneously.
-
-This means a bad day on one exchange cannot cascade into losses on another. Each exchange stands on its own.
-
-### Will adding more exchanges increase my risk?
-
-Not inherently. Each exchange has its own independent risk limits. Adding an exchange gives NovaPulse more opportunities to find trades, but each trade is still subject to the same rigorous risk checks (position sizing, stop losses, daily loss limits, etc.). The global risk layer ensures your combined exposure stays within safe bounds.
-
-### What happens if one exchange goes down?
-
-The other exchanges continue operating normally. Each engine is independent. If Kraken has an outage, the Coinbase and Stocks engines are unaffected. NovaPulse will also pause the affected engine's trading (circuit breaker) and notify you, then resume automatically when the connection is restored.
-
-### Can I see per-exchange performance separately?
-
-Yes. While the dashboard shows a unified view by default, you can filter and drill into each exchange individually. Each exchange's database tracks its own complete history of trades, signals, and metrics.
-
-### How does the priority scheduler affect my open positions?
-
-When the scheduler pauses an engine (for example, pausing crypto during stock market hours), it only stops scanning for new trades. Existing positions continue to be actively managed -- stop losses are monitored, trailing stops are updated, and positions can be closed normally. No position is ever left unattended.
+**Q: What happens if one exchange goes down?**
+A: The other engines continue operating normally. The affected engine will reconnect automatically when the exchange recovers.
 
 ---
 
-## Summary
-
-| Feature | Kraken | Coinbase | Stocks (Alpaca) |
-|---------|--------|----------|-----------------|
-| **Asset type** | Cryptocurrency | Cryptocurrency | US equities |
-| **Data feed** | Real-time WebSocket | REST + WebSocket | Polygon daily bars |
-| **Trading hours** | 24/7 | 24/7 | 9:30 AM - 4:00 PM ET |
-| **Order execution** | Kraken REST API | Coinbase REST API | Alpaca REST API |
-| **Strategy type** | 9 crypto strategies | 9 crypto strategies | Swing trading |
-| **Typical hold time** | Minutes to hours | Minutes to hours | Days |
-| **Own database** | Yes | Yes | Yes |
-| **Own risk limits** | Yes | Yes | Yes |
-| **Paper mode** | Yes | Yes | Yes |
-
----
-
-*For details on stock trading specifically, see [Stock Trading](Stock-Trading.md).*
-*For AI and machine learning features, see [AI and ML Features](AI-ML-Features.md).*
-*For risk protections, see [Risk and Safety](Risk-Safety.md).*
-*Questions? See our [FAQ](FAQ.md) or [contact support](Contact-Support.md).*
+*Nova|Pulse v5.0.0 -- One bot, multiple markets, unified control.*

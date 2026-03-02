@@ -1,7 +1,7 @@
 # Adaptive Exit System
 
-**Version:** 4.5.0
-**Date:** 2026-02-24
+**Version:** 5.0.0
+**Date:** 2026-02-27
 **Sources:** `src/execution/executor.py` (TradeExecutor), `src/execution/risk_manager.py` (RiskManager)
 
 ---

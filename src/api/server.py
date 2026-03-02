@@ -428,7 +428,11 @@ class DashboardServer:
         remaining_capacity = sum(float(r.get("remaining_capacity_usd", 0.0) or 0.0) for r in reports)
         trade_count = sum(int(r.get("trade_count", 0) or 0) for r in reports)
 
-        max_drawdown_pct = max(float(r.get("max_drawdown_pct", 0.0) or 0.0) for r in reports)
+        # Aggregate max drawdown from summed peak/bankroll for cross-engine accuracy
+        max_drawdown_pct = (
+            ((peak_bankroll - bankroll) / peak_bankroll * 100) if peak_bankroll > 0 and bankroll < peak_bankroll
+            else max(float(r.get("max_drawdown_pct", 0.0) or 0.0) for r in reports)
+        )
         risk_of_ruin_vals = [float(r.get("risk_of_ruin", 0.0) or 0.0) for r in reports]
         drawdown_factors = [float(r.get("drawdown_factor", 1.0) or 1.0) for r in reports]
 
@@ -1655,13 +1659,36 @@ class DashboardServer:
             engines = self._get_engines()
             if not engines:
                 raise HTTPException(status_code=503, detail="Bot not running")
-            if not self._engines_share_db(engines):
-                raise HTTPException(status_code=400, detail="CSV export requires a shared DB")
-            primary = self._get_primary_engine()
-            if not primary or not getattr(primary, "db", None):
-                raise HTTPException(status_code=503, detail="DB not available")
 
-            rows = await primary.db.get_trade_history(limit=limit, tenant_id=tenant_id)
+            # Aggregate trades across all engine DBs (works for both single and multi-engine)
+            all_rows: List[Dict[str, Any]] = []
+            for eng in engines:
+                if not getattr(eng, "db", None):
+                    continue
+                eng_rows = await eng.db.get_trade_history(limit=limit, tenant_id=tenant_id)
+                for row in eng_rows:
+                    row["exchange"] = getattr(eng, "exchange_name", "unknown")
+                all_rows.extend(eng_rows)
+
+            all_rows.sort(key=lambda t: t.get("exit_time") or "", reverse=True)
+            rows = all_rows[:limit]
+
+            def _extract_close_reason(row: Dict[str, Any]) -> str:
+                """Extract close_reason from metadata JSON field."""
+                reason = row.get("close_reason") or row.get("notes") or ""
+                if reason:
+                    return str(reason)
+                raw_meta = row.get("metadata")
+                if raw_meta and isinstance(raw_meta, str):
+                    try:
+                        meta = json.loads(raw_meta)
+                        if isinstance(meta, dict):
+                            return str(meta.get("close_reason", ""))
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                elif isinstance(raw_meta, dict):
+                    return str(raw_meta.get("close_reason", ""))
+                return ""
 
             def _iter_csv():
                 buf = io.StringIO()
@@ -1684,6 +1711,7 @@ class DashboardServer:
                     "confidence",
                     "strategy",
                     "reason",
+                    "exchange",
                     "metadata",
                 ]
                 w.writerow(cols)
@@ -1691,8 +1719,22 @@ class DashboardServer:
                 buf.seek(0)
                 buf.truncate(0)
 
+                def _get_csv_value(r, col):
+                    if col == "size_usd":
+                        raw_meta = r.get("metadata")
+                        if raw_meta:
+                            try:
+                                m = json.loads(raw_meta) if isinstance(raw_meta, str) else raw_meta
+                                return m.get("size_usd", "")
+                            except Exception:
+                                return ""
+                        return ""
+                    if col == "reason":
+                        return _extract_close_reason(r)
+                    return r.get(col, "")
+
                 for r in rows:
-                    w.writerow([r.get(c, "") for c in cols])
+                    w.writerow([_get_csv_value(r, c) for c in cols])
                     yield buf.getvalue()
                     buf.seek(0)
                     buf.truncate(0)
@@ -1780,7 +1822,9 @@ class DashboardServer:
 
             stats["unrealized_pnl"] = round(unrealized, 2)
             stats["total_equity"] = round(realized_equity + unrealized, 2)
-            return {**stats, **risk_report}
+            # Merge: risk_report first, then stats on top so DB-derived values
+            # (open_positions, total_trades, total_pnl) are authoritative.
+            return {**risk_report, **stats}
 
         @self.app.get("/api/v1/strategies")
         async def get_strategies(
@@ -3447,8 +3491,15 @@ class DashboardServer:
                 return {"status": "resumed"}
             if self._bot_engine:
                 self._bot_engine._trading_paused = False
+                # Reset auto-pause state so circuit breakers don't immediately re-pause
+                self._bot_engine._auto_pause_reason = ""
+                self._bot_engine._stale_check_count = 0
+                self._bot_engine._ws_disconnected_since = None
+                rm = getattr(self._bot_engine, "risk_manager", None)
+                if rm:
+                    rm._consecutive_losses = 0
                 await self._bot_engine.db.log_thought(
-                    "system", "Trading RESUMED via API", severity="info",
+                    "system", "Trading RESUMED via API (auto-pause state cleared)", severity="info",
                     tenant_id=tenant_id,
                 )
             return {"status": "resumed"}

@@ -1,0 +1,174 @@
+# Scanner & Signals
+
+Nova by Horizon includes a signal scanner that identifies trading opportunities across markets. There are two tiers: a free public feed with delayed signals, and a Pro-only live scanner with real-time signals.
+
+---
+
+## Public Signal Feed
+
+The public signal feed is available to all visitors, including unregistered users.
+
+### What It Shows
+
+- Up to 10 recent signals, deduplicated by symbol (most recent per symbol)
+- Each signal includes:
+  - **Symbol** -- Trading pair or stock ticker
+  - **Venue** -- Exchange or market
+  - **Asset Type** -- Crypto, stock, etc.
+  - **Pattern** -- The detected pattern (e.g., breakout, reversal, divergence)
+  - **Entry Price** -- Suggested entry level
+  - **Stop Loss (SL)** -- Suggested stop-loss price
+  - **Take Profit Levels (TP1, TP2, TP3)** -- Three target levels
+  - **Confidence** -- Signal confidence score (0-100)
+  - **Bar Time** -- The candle timestamp when the signal was detected
+  - **Published At** -- When the signal was published to the feed
+  - **Interval** -- Timeframe (e.g., 15m, 1h, 1d)
+
+### Signal Delay
+
+Public feed signals are published with a configurable delay (default: 15 minutes). This means signals appear after the initial detection window, making them educational rather than actionable for real-time trading.
+
+### Disclaimer
+
+All public signals carry the disclaimer: "Educational only. No trade execution. Signals computed on closed bars; records are immutable."
+
+### Access
+
+- **Website**: The landing page at horizonsvc.com displays recent signals
+- **API**: `GET /api/public-feed` returns the latest signals as JSON
+- **Candidates**: `GET /api/public-feed/candidates` returns categorized candidates (day, swing, invest)
+
+### Signal Cards
+
+On the website, signals are displayed as SignalCard components showing:
+- Symbol with exchange badge
+- Pattern name
+- Entry, SL, TP1 levels
+- Confidence meter
+- MiniChart visualization of recent price action
+- Published timestamp
+
+---
+
+## Pro Scanner (Paid Feature)
+
+The Pro Scanner provides real-time, undelayed trading signals. This feature requires an active Pro or Elite subscription.
+
+### Requirements
+
+- Verified email address
+- Active Pro or Elite subscription (checked via `stripe_entitlements`)
+- Authenticated session
+
+### What It Provides
+
+- **Live signals** with no delay -- signals appear as soon as they are detected
+- Up to 50 active signals at a time
+- Real-time status updates for each signal (active, filled, expired)
+- The same signal data as the public feed, but current and actionable
+
+### How to Access
+
+1. Navigate to your dashboard
+2. The scanner is integrated into the dashboard as the ScanCarousel component
+3. Signals update in real-time as the signal engine detects new opportunities
+
+### Scan Requests
+
+Pro users can also trigger manual scan runs via the API:
+
+```
+POST /api/scanner/run
+{
+  "classScope": "day" | "swing" | "invest",
+  "markets": ["us", "ca", "crypto"]
+}
+```
+
+This queues a new scan job for the specified scope and markets.
+
+---
+
+## Signal Engine
+
+The signal engine is a separate service (`services/signal-engine/`) that runs independently from the main API. It continuously scans markets for patterns and publishes signals.
+
+### Detectors
+
+The signal engine includes multiple pattern detectors:
+
+1. **Vault Detector** -- Identifies vault/accumulation patterns
+2. **Divergence Detector** -- Detects price/indicator divergences
+3. **Vice Detector** -- Identifies squeeze and compression patterns
+
+Each detector runs independently and publishes signals to the database when patterns are found.
+
+### Signal Lifecycle
+
+1. **Detection**: A detector identifies a pattern on a specific symbol and timeframe
+2. **Signal Creation**: A record is inserted into the `signals` table with all details
+3. **Vote Recording**: Individual detector votes are recorded in `signal_votes`
+4. **Live Status**: Active signals are tracked in `signals_live` with deduplication
+5. **Public Feed**: After the configured delay, signals are published to `public_feed`
+6. **Expiry**: Signals are eventually marked as expired when no longer active
+
+### Signal Data Model
+
+Each signal contains:
+- **Identification**: UUID, symbol, venue, asset_type, class_scope
+- **Pattern**: Pattern name, interval/timeframe
+- **Levels**: Entry, stop-loss, three take-profit targets
+- **Confidence**: Integer confidence score (0-100)
+- **Features**: JSONB blob with detailed feature data
+- **Options Metadata**: JSONB for options-specific data
+- **Timing**: Bar time, seen time, data latency in milliseconds
+- **Source**: Vendor and detector information
+
+---
+
+## Candidates
+
+The signal engine also produces candidate lists categorized by trading style:
+
+- **Day Candidates** (`day_candidates.json`) -- Short-term intraday opportunities
+- **Swing Candidates** (`swing_candidates.json`) -- Multi-day swing trading setups
+- **Invest Candidates** (`invest_candidates.json`) -- Longer-term investment ideas
+
+These JSON files are generated by the signal engine and served from the `/content` directory. They are accessible via the public feed API.
+
+---
+
+## Signal Display on Dashboard
+
+### ScanCarousel Component
+
+The dashboard includes a carousel widget that displays recent scanner signals:
+- Scrollable horizontal carousel of signal cards
+- Each card shows symbol, pattern, confidence, and key levels
+- Tapping a card expands details including the full chart
+- Auto-rotates through signals
+
+### MiniChart Component
+
+Each signal card includes a MiniChart -- a small sparkline chart showing recent price action for the signal's symbol. This provides quick visual context for the signal.
+
+---
+
+## Data Sources
+
+Signal data comes from multiple sources:
+- **Market data**: Polygon.io for stock data, exchange APIs for crypto
+- **Computed patterns**: The signal engine's detector algorithms
+- **User-triggered scans**: Manual scan requests from Pro users
+
+---
+
+## Rate Limits
+
+- Public feed: Subject to global API rate limits (120 requests/minute)
+- Pro scanner: Subject to global API rate limits (120 requests/minute)
+- Manual scan runs: Subject to authentication and entitlement checks
+
+---
+
+*Last updated: March 2026*

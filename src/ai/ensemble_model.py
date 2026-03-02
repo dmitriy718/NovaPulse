@@ -48,7 +48,7 @@ class EnsembleModel:
         self._model = None  # LightGBM Booster
         self._last_train_time: float = 0
         self._is_trained: bool = False
-        self._training_lock = asyncio.Lock()
+        self._training_lock: Optional[asyncio.Lock] = None
         self._feature_importance: Dict[str, float] = {}
 
     @property
@@ -79,6 +79,8 @@ class EnsembleModel:
             )
             return False
 
+        if self._training_lock is None:
+            self._training_lock = asyncio.Lock()
         async with self._training_lock:
             try:
                 import lightgbm as lgb
@@ -96,11 +98,23 @@ class EnsembleModel:
                 if len(X) == 0 or len(y) == 0:
                     return False
 
-                # Train with LightGBM
+                # Split into train/validation (80/20) for honest early stopping
+                n = len(X)
+                split = max(1, int(n * 0.8))
+                X_train, X_val = X[:split], X[split:]
+                y_train, y_val = y[:split], y[split:]
+
+                feat_names = self._feature_names[: X.shape[1]]
                 train_data = lgb.Dataset(
-                    X,
-                    label=y,
-                    feature_name=self._feature_names[: X.shape[1]],
+                    X_train,
+                    label=y_train,
+                    feature_name=feat_names,
+                )
+                val_data = lgb.Dataset(
+                    X_val,
+                    label=y_val,
+                    feature_name=feat_names,
+                    reference=train_data,
                 )
                 params = {
                     "objective": "binary",
@@ -113,16 +127,21 @@ class EnsembleModel:
                     "verbose": -1,
                 }
 
-                self._model = lgb.train(
-                    params,
-                    train_data,
-                    num_boost_round=100,
-                    valid_sets=[train_data],
-                    callbacks=[
-                        lgb.early_stopping(10, verbose=False),
-                        lgb.log_evaluation(0),
-                    ],
-                )
+                def _train():
+                    return lgb.train(
+                        params,
+                        train_data,
+                        num_boost_round=100,
+                        valid_sets=[val_data],
+                        callbacks=[
+                            lgb.early_stopping(10, verbose=False),
+                            lgb.log_evaluation(0),
+                        ],
+                    )
+
+                # Run training in thread executor to avoid blocking event loop
+                loop = asyncio.get_running_loop()
+                self._model = await loop.run_in_executor(None, _train)
 
                 # Store feature importance
                 importance = self._model.feature_importance(

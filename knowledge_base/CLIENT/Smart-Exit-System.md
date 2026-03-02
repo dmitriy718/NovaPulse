@@ -1,333 +1,201 @@
 # Smart Exit System
 
-**Version:** 4.5.0
-**Last updated:** 2026-02-24
+**Version:** 5.0.0
+**Last updated:** 2026-03-01
 
-Getting into a trade at the right time is important. But getting out at the right time is just as important -- perhaps more so. A perfectly timed entry can still result in a loss if the exit is poorly managed. NovaPulse's Smart Exit System is designed to protect profits, limit losses, and adapt to changing market conditions as a trade progresses.
+Getting into a trade at the right time is important. But getting out at the right time is just as important -- perhaps more so. A perfectly timed entry can still result in a loss if the exit is poorly managed. Nova|Pulse's Smart Exit System is designed to protect profits, limit losses, and adapt to changing market conditions as a trade progresses.
 
 ---
 
 ## Why Exits Matter as Much as Entries
 
-Consider two traders who enter the same trade at the same time and price:
+A common mistake in trading is focusing all attention on when to enter and treating exits as an afterthought. Consider these scenarios:
 
-- **Trader A** sets a fixed take-profit and walks away. The price rises to within a hair of the target, then reverses all the way back. Trader A's winning trade turns into a loss.
-- **Trader B** uses partial exits and trailing stops. When the price rises, Trader B locks in half the profit early. When the price reverses, the trailing stop catches the rest. Trader B walks away with a solid gain.
+- **Scenario A:** You enter a great trade that moves 5% in your favor, then reverses and you give it all back. A good exit system would have captured most of that 5%.
+- **Scenario B:** You enter a trade that slowly drifts sideways for hours, tying up capital that could be used elsewhere. A time-based exit would free up that capital.
+- **Scenario C:** You enter during a volatile session and your trailing stop gets clipped by normal noise. A volatility-aware trailing stop would have given the trade more room.
 
-Same entry. Different exits. Completely different outcomes.
-
-NovaPulse's Smart Exit System is designed to behave like Trader B -- taking profits along the way, tightening stops as conditions change, and never letting a good trade turn into a bad one.
-
----
-
-## Multi-Tier Partial Closing
-
-The core of the Smart Exit System is **multi-tier partial closing** -- instead of waiting for a single price target and closing the entire position at once, NovaPulse closes portions of the position at different profit levels.
-
-### The Three Tiers
-
-| Tier | Trigger | Action | Purpose |
-|------|---------|--------|---------|
-| **Tier 1** | Price reaches 1x the take-profit distance | Close 50% of the position | Lock in half the profit immediately |
-| **Tier 2** | Price reaches 1.5x the take-profit distance | Close 30% of the position | Capture more of the extended move |
-| **Tier 3** | Trailing stop catches remainder | Close the final 20% | Let the last piece ride as far as possible |
-
-### Example: A BTC/USD Long Trade
-
-Let us walk through a concrete example:
-
-```
-Entry price:              $64,000
-Take-profit target:       $65,200 (1.875% above entry)
-Stop loss:                $62,800 (1.875% below entry)
-Position size:            0.10 BTC ($6,400)
-
-The take-profit distance is $1,200 (from entry to TP target).
-```
-
-**Tier 1 triggers** when price reaches $65,200 (1x the TP distance):
-```
-Price hits $65,200
-Action: Close 50% of position (0.05 BTC)
-Profit locked in: 0.05 x $1,200 = $60
-Remaining position: 0.05 BTC
-```
-
-**Tier 2 triggers** when price reaches $65,800 (1.5x the TP distance):
-```
-Price hits $65,800
-Action: Close 30% of original position (0.03 BTC)
-Profit locked in: 0.03 x $1,800 = $54
-Remaining position: 0.02 BTC (final 20%)
-```
-
-**Tier 3** -- the final 20% rides with a trailing stop:
-```
-Price continues to $66,400, then reverses
-Trailing stop catches at $66,100
-Action: Close final 0.02 BTC
-Profit locked in: 0.02 x $2,100 = $42
-
-Total profit: $60 + $54 + $42 = $156
-```
-
-Compare this to a **flat exit** at the original $65,200 target:
-```
-Close entire 0.10 BTC at $65,200
-Total profit: 0.10 x $1,200 = $120
-```
-
-In this example, the tiered approach captured $156 versus $120 -- a 30% improvement.
-
-**But what if the price reverses after Tier 1?** Then you have already locked in $60 of profit on 50% of the position. The remaining 50% may be caught by the trailing stop at a lower level, or even at breakeven. Either way, you are better off than having held the entire position through the reversal.
+Nova|Pulse's Smart Exit System handles all of these scenarios through a layered approach.
 
 ---
 
-## Dynamic Trailing Stops
+## The Five Exit Mechanisms
 
-Every trade in NovaPulse (whether or not Smart Exit is enabled) is protected by a **dynamic trailing stop**. This is a stop loss that moves in your favor as the price moves in your favor.
+Nova|Pulse positions are managed by five complementary mechanisms that work together. Each position is checked every 2 seconds.
 
-### How Trailing Stops Work
+### 1. Initial Stop Loss
 
-1. **Starting point:** When a trade is opened, a fixed stop loss is set based on the ATR (Average True Range) -- a measure of recent volatility. This initial stop accounts for normal market noise.
+Every position starts with a stop loss set at entry time.
 
-2. **Activation:** Once the trade is profitable by 1.5% (by default), the trailing stop activates.
+**How it is calculated:**
+- Base distance = 2x ATR (Average True Range) from entry price
+- For longs: stop loss is below entry; for shorts: above entry
+- Minimum floor of 2.5% is enforced to prevent absurdly tight stops
+- Maximum is capped to prevent absurdly wide stops
 
-3. **Trailing behavior:** From that point, the stop loss follows the price:
-   - For long trades: the stop rises as price rises, but never falls.
-   - For short trades: the stop falls as price falls, but never rises.
-   - The trailing distance is 0.5% by default (the "step size").
+**What happens when hit:** The position is closed at market price. The loss is recorded and counts toward daily loss limits and consecutive loss tracking.
 
-4. **Acceleration:** As profits grow, the trailing stop tightens:
-   - At 3%+ profit: the trailing distance narrows to 0.25% (half the normal step).
-   - At 5%+ profit: the trailing distance narrows to 0.15% (locking in gains aggressively).
+**Structural Stops (v5.0, optional):** When enabled, the stop is placed behind a recent swing low (for longs) or swing high (for shorts) instead of using a fixed ATR multiplier. This places the stop where the market has demonstrated support/resistance, with a minimum 0.5x ATR buffer added for safety.
 
-**Plain-language analogy:** Imagine climbing a mountain with a safety rope that a belayer pulls tighter as you ascend. Early in the climb (small profit), the rope has some slack -- you might fall a bit before it catches you. But the higher you go (bigger profit), the tighter the belayer pulls the rope. At the peak, the rope is so tight that any slip is caught almost immediately.
+### 2. Breakeven Logic
 
-```
-Example: Long trade from $100
+Once a trade moves 3% in your favor (default), the stop loss is moved to the entry price.
 
-Price: $100 -> $102 -> $104 -> $106 -> $108 -> $106 -> $104
-Stop:  $97  -> $97  -> $101.4 -> $103.4 -> $107.5 -> $107.5 -> CLOSED
-                       ^activated          ^tightened
-                                                      Profit: $4
-```
+**What this achieves:**
+- You have a "free trade" -- if the market reverses, you exit at breakeven (minus small fees)
+- The risk on this trade is now effectively zero
+- You can let the position run without worrying about giving back your initial capital
 
----
+**When it activates:** The breakeven check runs every position management cycle (every 2 seconds). The moment the position's profit exceeds the threshold, the stop is moved.
 
-## Breakeven Activation
+### 3. Trailing Stop
 
-Once a trade reaches **1% profit** from the entry price, the stop loss is moved to the entry price. This is called "breakeven activation."
+Once a trade reaches 4% profit (default), a trailing stop activates.
 
-**What this means:** After the stop moves to breakeven, the trade can no longer result in a loss (ignoring fees). The worst outcome is exiting at the price you entered.
+**How it works:**
+- The trailing stop follows the price in the profitable direction
+- It never moves backward -- only forward
+- Default trailing distance: 0.8% from the highest (longs) or lowest (shorts) price since activation
+- If the market pulls back by more than 0.8%, the trailing stop closes the position, locking in most of the profit
 
-**Why it matters:** Many trades move into profit but then reverse. Breakeven activation ensures that once a trade has shown it can be profitable, you are protected from it turning into a loss.
+**Volatility-regime adaptation:**
+- **High volatility:** trailing step is multiplied by 1.5 (more room to breathe, wider trailing). This prevents volatile markets from prematurely triggering the trailing stop on normal swings.
+- **Mid volatility:** trailing step stays at the default (1.0x)
+- **Low volatility:** trailing step is multiplied by 0.7 (tighter trailing). In calm markets, you want to capture profit quickly because big moves are less likely.
 
-### How It Fits with Trailing Stops
+**Adaptive trailing activation:**
+The activation threshold also adapts to volatility:
+- **Low volatility:** 2.5% profit to activate
+- **Mid volatility:** 4.0% profit to activate (default)
+- **High volatility:** 6.0% profit to activate (give winners more room to develop)
 
-Breakeven activation kicks in before the trailing stop activates:
+### 4. Tiered Exit (Smart Exit)
 
-```
-Profit level:    0%         1%              1.5%             3%+
-                 |          |               |                |
-Action:          Initial    Breakeven       Trailing stop    Accelerated
-                 stop       activation      activates        trailing
-                 loss       (stop → entry)  (stop follows    (tighter
-                                            price)           step)
-```
+Instead of closing the entire position at one price, the Smart Exit System closes it in three stages:
 
-This creates a smooth progression: the initial stop protects against large losses, breakeven eliminates the possibility of a loss entirely, and the trailing stop then locks in ever-increasing profit.
+| Tier | What Happens | When | Example on $300 Position |
+|------|-------------|------|-------------------------|
+| **Tier 1** | Close 50% of the position | Price reaches 1x take-profit distance | Close $150 at 3% profit |
+| **Tier 2** | Close 60% of remaining (30% of original) | Price reaches 1.5x take-profit distance | Close $90 at 4.5% profit |
+| **Tier 3** | Close the final 20% | Via trailing stop (no fixed target) | Trail the last $60 until the trend ends |
 
----
+**Why this is better than a single take-profit:**
+- **Locks in profit early:** Tier 1 secures profit on the majority of the position, so even if the trade reverses after that, you have already banked gains.
+- **Captures extended moves:** Tiers 2 and 3 stay in the market to capture larger moves when they happen.
+- **Reduces regret:** You never have the feeling of "I should have held" (because part of the position is still running) or "I should have taken profit" (because you already took profit on the majority).
 
-## Time-Based Exit Tightening
+### 5. Time-Based Exit Tightening
 
-Not all trades move quickly in your favor. Some trades enter and then just sit there -- price drifts sideways, neither hitting the take-profit target nor the stop loss. NovaPulse recognizes that a stagnant position is tying up capital and opportunity.
+Positions that sit without making meaningful progress get tighter exit parameters:
 
-### How It Works
+| Duration | Condition | Action |
+|----------|-----------|--------|
+| > 30 minutes | Less than 0.5% profit | Take profit is reduced to 60% of original |
+| > 60 minutes | Less than 1.0% profit | Take profit is reduced to 40% of original |
 
-NovaPulse monitors how long a trade has been open and how much progress it has made toward its target:
-
-| Condition | Action |
-|-----------|--------|
-| **30+ minutes open** and less than 0.5% profit | Take-profit target reduced to 60% of original distance |
-| **60+ minutes open** and less than 1% profit | Take-profit target reduced to 40% of original distance |
-
-### Example
-
-```
-Original trade:
-  Entry: $64,000
-  Take profit: $65,200 (TP distance = $1,200)
-
-After 30 minutes with only 0.3% profit:
-  Take profit tightened to 60%: $64,000 + ($1,200 x 0.6) = $64,720
-
-After 60 minutes with only 0.8% profit:
-  Take profit tightened to 40%: $64,000 + ($1,200 x 0.4) = $64,480
-```
-
-**Why this matters:** A trade that was expected to move quickly but has not is often a sign that the signal was weaker than anticipated. By reducing the target, NovaPulse takes what is available rather than holding indefinitely for a target that may never be reached. The freed-up capital can then be deployed on a fresh, stronger opportunity.
-
-**Important:** Time-based tightening only affects the take-profit level. The stop loss and trailing stop continue operating normally. NovaPulse never widens risk -- it only narrows the profit target.
+**Why this matters:** Capital tied up in stagnant trades could be deployed elsewhere. Time-based tightening encourages positions to either perform or be exited, keeping your capital working.
 
 ---
 
-## Volatility-Regime-Aware Stops
+## How All Five Mechanisms Work Together
 
-NovaPulse continuously monitors the market's volatility regime (high, medium, or low) and adjusts trailing stop behavior accordingly.
+Here is a typical trade lifecycle showing how these mechanisms interact:
 
-### How It Works
+**Minute 0 -- Entry:**
+- Position opened: BTC/USD LONG at $67,000 with $300 size
+- Stop loss set at $65,660 (2.0% below entry, based on ATR)
+- Take profit target at $69,010 (3.0% above entry)
 
-| Volatility Regime | Trailing Step Adjustment | Why |
-|-------------------|--------------------------|-----|
-| **High volatility** | Step widened by 50% (e.g., 0.5% becomes 0.75%) | Volatile markets have larger natural swings. A tighter stop would get triggered by normal noise, closing profitable trades prematurely. |
-| **Normal volatility** | Standard step (0.5%) | Default behavior. |
-| **Low volatility** | Step narrowed by 30% (e.g., 0.5% becomes 0.35%) | Calm markets have smaller swings. A wider stop would give back too much profit unnecessarily. |
+**Minute 5 -- Price moves to $67,500 (0.7% profit):**
+- Not yet at breakeven threshold (3%). Stop loss stays at $65,660.
+- All five mechanisms are monitoring.
 
-**Plain-language analogy:** Imagine you are walking a dog on a leash. In an open field (calm market), you keep the leash short -- there is no reason to give lots of slack. In a crowded, chaotic environment (volatile market), you let the leash out longer so the dog has room to navigate without constantly pulling you off balance. The leash length (trailing stop distance) adapts to the environment.
+**Minute 12 -- Price moves to $69,010 (3.0% profit):**
+- Breakeven activates: stop loss moves to $67,000 (entry price)
+- Tier 1 triggers: 50% of position ($150) closed at $69,010. Profit banked: $4.50
 
-### How Regime Is Detected
+**Minute 18 -- Price moves to $69,680 (4.0% profit):**
+- Trailing stop activates with 0.8% trailing distance
+- Trailing high set to $69,680
 
-NovaPulse classifies the current volatility regime using multiple indicators:
+**Minute 22 -- Price moves to $70,005 (4.5% profit):**
+- Tier 2 triggers: 60% of remaining ($90) closed at $70,005
+- Remaining position: $60 (20% of original)
+- Trailing high updated to $70,005
 
-- ATR (Average True Range) relative to recent history
-- Bollinger Band width
-- Price range relative to its moving average
+**Minute 30 -- Price reaches $70,800 (5.7% profit):**
+- Trailing high updated to $70,800
+- Trailing stop sits at $70,234 (0.8% below the high)
 
-This classification happens on every scan cycle, so the regime label is always current. When a trade is opened, the current regime is stored with the trade's metadata. As the trailing stop is updated, this regime information adjusts the step size.
-
----
-
-## Exchange-Native Stop Orders
-
-All of the features described above -- trailing stops, breakeven, tiered exits -- are managed by NovaPulse's software. But what happens if NovaPulse itself has an issue? What if the server restarts, loses connectivity, or experiences an unexpected error?
-
-This is where **exchange-native stop orders** come in.
-
-### How It Works
-
-When NovaPulse opens a live trade (not paper mode), it immediately places a **stop-loss order directly on the exchange**. This order lives on the exchange's own servers, completely independent of NovaPulse.
-
-```
-NovaPulse places trade (buy BTC at $64,000)
-    |
-    +--> Also places stop-loss order on exchange at $62,800
-         (this order is on Kraken/Coinbase's servers, not ours)
-    |
-    +--> NovaPulse monitors and adjusts the stop as usual
-         |
-         +--> When trailing stop moves, exchange stop is updated too
-```
-
-**If NovaPulse goes offline:**
-- The exchange's own stop order is already in place.
-- If price hits the stop level, the exchange executes the stop automatically.
-- Your position is protected regardless of what happens to NovaPulse.
-
-**When NovaPulse comes back online:**
-- It reconciles with the exchange to determine if the stop was triggered.
-- If the position was closed by the exchange stop, NovaPulse records it and moves on.
-- If the position is still open, NovaPulse resumes normal management.
-
-### Stop Updates
-
-As NovaPulse moves the trailing stop (or activates breakeven), it also updates the exchange-native stop order. The exchange stop is only updated when the stop price moves by more than 0.5%, to avoid excessive order cancellations.
-
-When a trade is closed (for any reason), NovaPulse cancels the exchange-native stop order to keep things clean.
-
-**This is your crash-proof safety net.** Even in the worst-case scenario -- complete server failure during a market crash -- your exchange's own stop order stands ready to protect your position.
+**Minute 35 -- Price pulls back to $70,234:**
+- Trailing stop triggered
+- Final $60 closed at $70,234
+- Total result: profit from all three tiers combined
 
 ---
 
-## How It All Works Together
+## Exit Reasons You Will See
 
-Here is the complete lifecycle of a trade's exit management:
+In the thought feed and trade history, each trade closure shows a reason:
 
-```
-Trade opened
-    |
-    v
-Initial stop loss set (ATR-based, 2x ATR from entry)
-Exchange-native stop placed on exchange
-    |
-    |-- Price reaches 1% profit -->  Breakeven activation
-    |                                (stop moved to entry price)
-    |                                Exchange stop updated
-    |
-    |-- Price reaches 1.5% profit -> Trailing stop activates
-    |                                (stop follows price, 0.5% step)
-    |                                Exchange stop updated
-    |
-    |-- [If Smart Exit enabled] ---> Tier 1 at 1x TP distance
-    |   Price reaches 1x TP          Close 50% of position
-    |
-    |-- Price reaches 3%+ profit --> Trailing step accelerates
-    |                                (0.25% step, tighter)
-    |                                Exchange stop updated
-    |
-    |-- [If Smart Exit enabled] ---> Tier 2 at 1.5x TP distance
-    |   Price reaches 1.5x TP        Close 30% of position
-    |
-    |-- Price reaches 5%+ profit --> Maximum acceleration
-    |                                (0.15% step, very tight)
-    |
-    |-- 30 min with < 0.5% gain --> Time-based TP tightening (60%)
-    |-- 60 min with < 1% gain ----> Time-based TP tightening (40%)
-    |
-    |-- Price reverses ------------> Trailing stop catches reversal
-    |                                Final 20% closed (Tier 3)
-    |                                Exchange stop cancelled
-    |
-    v
-Trade closed. P&L recorded. ML model updated.
-```
-
-Each layer builds on the ones before it. Together, they create a comprehensive exit system that adapts to what the market is actually doing rather than relying on a single, rigid exit rule.
+| Reason | What Happened |
+|--------|--------------|
+| **tp_hit** | Price reached the take-profit level |
+| **sl_hit** | Price hit the stop loss |
+| **trailing_stop** | Trailing stop was triggered |
+| **breakeven_exit** | Price returned to entry after breakeven was activated |
+| **smart_exit_tier_1** | Tier 1 partial close at 1x TP distance |
+| **smart_exit_tier_2** | Tier 2 partial close at 1.5x TP distance |
+| **time_tightened** | Time-based tightening reduced TP and it was hit |
+| **manual_close** | You manually closed the position |
+| **close_all** | Emergency close-all triggered |
+| **max_duration** | Position exceeded maximum hold duration (24 hours default for crypto) |
 
 ---
 
-## Smart Exit: Enabled vs. Disabled
+## Configuration Options
 
-The multi-tier partial closing feature (Tiers 1, 2, and 3) is an optional enhancement that must be enabled in your configuration. It is **disabled by default**.
+The Smart Exit System has several configurable parameters. These are typically set by your operator, but here is what each controls:
 
-**When Smart Exit is disabled:**
-- Trades use a single take-profit target (standard behavior).
-- Trailing stops, breakeven activation, time-based tightening, volatility-aware stops, and exchange-native stops all still work.
-- This is a simpler approach that works well for most market conditions.
-
-**When Smart Exit is enabled:**
-- Trades use the three-tier partial closing system described above.
-- All other exit features (trailing stops, breakeven, etc.) still apply.
-- This approach is more sophisticated and tends to capture more profit on extended moves, at the trade-off of slightly more complexity in position management.
-
-If you are interested in enabling Smart Exit, contact support or see the [Configuration Guide](Configuration-Guide.md).
-
----
-
-## Frequently Asked Questions
-
-**Can I adjust the tier percentages?**
-Yes. The default tiers (50% at 1x, 30% at 1.5x, 20% trailing) can be adjusted through the configuration. Contact support if you want to customize them.
-
-**Does the trailing stop work in paper mode?**
-Yes. All exit features -- trailing stops, breakeven, time-based tightening, and Smart Exit tiers -- work identically in paper mode and live mode. The only difference is that exchange-native stop orders are not placed in paper mode (since no real orders are on the exchange).
-
-**What if the market gaps past my stop loss?**
-In extreme cases (flash crashes, exchange outages), the market price may jump past your stop level without triggering it at the exact price. This is called "slippage" and is a limitation of all stop-loss systems, not specific to NovaPulse. Exchange-native stops help mitigate this (the exchange itself executes the stop), but they cannot eliminate gap risk entirely.
-
-**Do time-based exit changes affect my stop loss?**
-No. Time-based tightening only adjusts the take-profit level. Your stop loss and trailing stop continue operating at their current levels. NovaPulse never increases risk on an existing trade.
-
-**How does the system handle the final 20% if Smart Exit is enabled?**
-The final 20% of the position is managed entirely by the trailing stop. There is no fixed profit target for this last portion -- it rides until the trailing stop catches a reversal. This means the final piece has unlimited upside potential while still being protected by the trailing mechanism.
-
-**What is the "hold duration optimization"?**
-In addition to time-based TP tightening, NovaPulse tracks the average winning hold time for each strategy. If a trade has been open for more than twice the average winning duration for its strategy, the trailing stop is tightened to 50% of its current distance. This prevents "hope trades" -- positions that have overstayed their welcome and are unlikely to reach their target.
+| Setting | Default | What It Controls |
+|---------|---------|-----------------|
+| `smart_exit.enabled` | true | Whether tiered exits are active |
+| `smart_exit.tiers[0].pct` | 0.50 | Tier 1: close 50% of position |
+| `smart_exit.tiers[0].tp_mult` | 1.0 | Tier 1 triggers at 1x TP distance |
+| `smart_exit.tiers[1].pct` | 0.60 | Tier 2: close 60% of remaining |
+| `smart_exit.tiers[1].tp_mult` | 1.5 | Tier 2 triggers at 1.5x TP distance |
+| `smart_exit.tiers[2].pct` | 1.00 | Tier 3: close remaining 100% |
+| `smart_exit.tiers[2].tp_mult` | 0 | Tier 3: trailing only (no fixed TP) |
+| `trailing_activation_pct` | 0.04 | 4% profit to activate trailing |
+| `trailing_step_pct` | 0.008 | 0.8% trailing distance |
+| `breakeven_activation_pct` | 0.03 | 3% profit to move SL to entry |
+| `atr_multiplier_sl` | 2.0 | Stop loss = 2x ATR |
+| `atr_multiplier_tp` | 3.0 | Take profit = 3x ATR |
 
 ---
 
-*For details on risk protections, see [Risk and Safety](Risk-Safety.md).*
-*For how AI scores affect exit decisions, see [AI and ML Features](AI-ML-Features.md).*
-*For dashboard controls, see [Controls: Pause, Resume, Kill](Controls-Pause-Resume-Kill.md).*
-*Questions? See our [FAQ](FAQ.md) or [contact support](Contact-Support.md).*
+## Stock Exits vs. Crypto Exits
+
+Stock positions use a simpler exit model:
+- **Stop loss:** Fixed percentage (default 2%)
+- **Take profit:** Fixed percentage (default 4%)
+- **Hold period:** 1-7 days (swing trading)
+- **No Smart Exit tiers** -- stocks use single exit points because the hold period is longer and the daily bar granularity is coarser
+
+Crypto positions use the full Smart Exit System described above because the shorter timeframes and 24/7 markets benefit from active management.
+
+---
+
+## Tips for Understanding Exit Behavior
+
+1. **Partial closes are normal.** When you see a position's size decrease, it means a tier was triggered and profit was locked in. The remaining portion is still active.
+
+2. **Trailing stops protect you.** If the trailing stop triggers after a big run, it means you captured most of the move. The trailing stop exists to prevent giving back gains.
+
+3. **Time tightening is healthy.** Stale trades that go nowhere are a drag on performance. Tightening their exits frees capital for better opportunities.
+
+4. **The system is designed for moderate consistency.** It will not catch the absolute top or bottom of every move. It aims to capture a reliable portion of each profitable move and limit the damage on losers.
+
+---
+
+*Nova|Pulse v5.0.0 -- Smart entries get you in. Smart exits keep you ahead.*

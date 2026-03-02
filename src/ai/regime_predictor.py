@@ -44,10 +44,10 @@ class RegimeTransitionPredictor:
         self,
         indicator_cache: Any,
         closes: np.ndarray,
-    ) -> str:
+    ) -> Tuple[str, float]:
         """Predict the current regime transition state.
 
-        Returns one of:
+        Returns a tuple of (state, confidence) where state is one of:
         - "stable_range"   — market staying range-bound
         - "stable_trend"   — market staying in established trend
         - "emerging_trend" — range about to break into trend
@@ -61,9 +61,10 @@ class RegimeTransitionPredictor:
             Close prices for the current timeframe.
         """
         if closes is None or len(closes) < 30:
-            self._last_state = "stable_range"
-            self._last_confidence = 0.0
-            return self._last_state
+            state, conf = "stable_range", 0.0
+            self._last_state = state
+            self._last_confidence = conf
+            return state, conf
 
         signals = []  # Each item: (state, weight)
 
@@ -88,9 +89,10 @@ class RegimeTransitionPredictor:
             signals.append(chop_signal)
 
         if not signals:
-            self._last_state = "stable_range"
-            self._last_confidence = 0.0
-            return self._last_state
+            state, conf = "stable_range", 0.0
+            self._last_state = state
+            self._last_confidence = conf
+            return state, conf
 
         # Tally votes
         state_votes: dict = {}
@@ -105,9 +107,11 @@ class RegimeTransitionPredictor:
         else:
             agreement = 0.0
 
-        self._last_state = best_state
-        self._last_confidence = min(1.0, agreement)
-        return self._last_state
+        state = best_state
+        conf = min(1.0, agreement)
+        self._last_state = state
+        self._last_confidence = conf
+        return state, conf
 
     def get_transition_confidence(self) -> float:
         """Return 0-1 confidence based on how many indicators agree."""

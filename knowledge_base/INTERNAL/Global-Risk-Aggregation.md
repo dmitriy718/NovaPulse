@@ -1,7 +1,7 @@
 # Cross-Engine Risk Aggregation
 
-**Version:** 4.5.0
-**Date:** 2026-02-24
+**Version:** 5.0.0
+**Date:** 2026-02-27
 **Source:** `src/execution/global_risk.py`
 **Class:** `GlobalRiskAggregator`
 

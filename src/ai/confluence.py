@@ -348,6 +348,8 @@ class ConfluenceDetector:
         """
         # S3 FIX: Also reject stale data — don't trade on outdated prices
         if not self.market_data.is_warmed_up(pair) or self.market_data.is_stale(pair, max_age_seconds=180):
+            warmed = self.market_data.is_warmed_up(pair)
+            logger.debug("Pair skipped: data not ready", pair=pair, warmed_up=warmed, stale=not warmed or True)
             return ConfluenceSignal(
                 pair=pair,
                 direction=SignalDirection.NEUTRAL,
@@ -394,11 +396,13 @@ class ConfluenceDetector:
 
             # Regime transition prediction (if available)
             regime_transition = None
+            regime_transition_confidence = 0.0
             if getattr(self, "_regime_predictor", None):
                 try:
-                    regime_transition = self._regime_predictor.predict_transition(indicator_cache, closes)
+                    regime_transition, regime_transition_confidence = self._regime_predictor.predict_transition(indicator_cache, closes)
                 except Exception:
                     regime_transition = None
+                    regime_transition_confidence = 0.0
 
             signals = await self._run_strategies(
                 pair, closes, highs, lows, volumes, opens, indicator_cache,
@@ -408,6 +412,7 @@ class ConfluenceDetector:
             tf_signal = self._compute_confluence(
                 pair, signals, trend_regime, vol_regime, vol_level, vol_expanding,
                 regime_transition=regime_transition,
+                regime_transition_confidence=regime_transition_confidence,
                 highs=highs,
                 lows=lows,
                 indicator_cache=indicator_cache,
@@ -549,7 +554,7 @@ class ConfluenceDetector:
 
         degraded = (
             win_rate < self.strategy_guardrails_min_win_rate
-            and profit_factor < self.strategy_guardrails_min_profit_factor
+            or profit_factor < self.strategy_guardrails_min_profit_factor
         )
         if not degraded:
             return
@@ -684,6 +689,13 @@ class ConfluenceDetector:
         total_tfs = len(results)
 
         if len(agreement) < self.multi_timeframe_min_agreement:
+            logger.debug(
+                "Multi-timeframe agreement not met",
+                pair=pair,
+                agreement=len(agreement),
+                required=self.multi_timeframe_min_agreement,
+                timeframes={str(tf): sig.direction.value for tf, sig in results.items()},
+            )
             return ConfluenceSignal(
                 pair=pair,
                 direction=SignalDirection.NEUTRAL,
@@ -789,6 +801,7 @@ class ConfluenceDetector:
         vol_level: float = 0.5,
         vol_expanding: bool = False,
         regime_transition: Optional[str] = None,
+        regime_transition_confidence: float = 0.0,
         highs: Optional[np.ndarray] = None,
         lows: Optional[np.ndarray] = None,
         indicator_cache: Optional[IndicatorCache] = None,
@@ -799,6 +812,7 @@ class ConfluenceDetector:
         # ENHANCEMENT: Added weighted scoring and performance-based adjustments
         """
         if not signals:
+            logger.debug("No actionable signals", pair=pair)
             return ConfluenceSignal(
                 pair=pair,
                 direction=SignalDirection.NEUTRAL,
@@ -920,6 +934,12 @@ class ConfluenceDetector:
             confluence_count = short_count
             obi_agrees = obi_agrees_short
         else:
+            logger.debug(
+                "No direction consensus",
+                pair=pair,
+                long_count=long_count,
+                short_count=short_count,
+            )
             return ConfluenceSignal(
                 pair=pair,
                 direction=SignalDirection.NEUTRAL,
@@ -1011,7 +1031,7 @@ class ConfluenceDetector:
                                  "vwap_momentum_alpha", "market_structure"}
                 _range_strats = {"mean_reversion", "stochastic_divergence", "reversal", "keltner"}
                 strat_names = {s.strategy_name for s in directional_signals if s.strategy_name != "order_book"}
-                predictor_confidence = self._regime_predictor.get_transition_confidence()
+                predictor_confidence = regime_transition_confidence
                 boost_val = self._regime_predictor.emerging_trend_boost * predictor_confidence
 
                 if regime_transition == "emerging_trend" and strat_names & _trend_strats:

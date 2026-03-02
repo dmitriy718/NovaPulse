@@ -134,7 +134,7 @@ class MarketStructureStrategy(BaseStrategy):
         # LONG: uptrend + price near previous swing low + RSI floor
         if uptrend:
             prev_swing_low = sl[-1][1]
-            pullback_near = curr_price <= prev_swing_low * (1 + tol)
+            pullback_near = prev_swing_low * (1 - tol) <= curr_price <= prev_swing_low * (1 + tol)
             if pullback_near and curr_rsi > self.rsi_floor:
                 direction = SignalDirection.LONG
                 strength = 0.40
@@ -162,7 +162,7 @@ class MarketStructureStrategy(BaseStrategy):
         # SHORT: downtrend + price near previous swing high + RSI ceiling
         elif downtrend:
             prev_swing_high = sh[-1][1]
-            pullback_near = curr_price >= prev_swing_high * (1 - tol)
+            pullback_near = prev_swing_high * (1 - tol) <= curr_price <= prev_swing_high * (1 + tol)
             if pullback_near and curr_rsi < self.rsi_ceiling:
                 direction = SignalDirection.SHORT
                 strength = 0.40

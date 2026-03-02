@@ -114,6 +114,10 @@ class UniverseScanner:
         movers: List[str] = []
         if self._cfg.include_movers:
             movers = await self._fetch_movers()
+            # If Polygon snapshot endpoints returned nothing (free tier 403),
+            # compute movers from the grouped daily bars we already have.
+            if not movers and snap_by_ticker:
+                movers = self._compute_movers_from_bars(snap_by_ticker)
 
         # --- Step 4: merge with pinned --------------------------------
         universe = self._merge(filtered, movers)
@@ -196,16 +200,76 @@ class UniverseScanner:
         return [sym for sym, _ in candidates[:max_dynamic]]
 
     async def _fetch_movers(self) -> List[str]:
-        """Fetch top gainers as bonus candidates."""
+        """Fetch top gainers AND losers as bonus candidates."""
+        movers: List[str] = []
+        half = max(1, self._cfg.movers_count // 2)
+
+        # Top gainers
         await self._rate_limit_delay()
         gainers = await self._polygon.get_gainers_losers("gainers")
-        movers: List[str] = []
-        for snap in gainers[: self._cfg.movers_count]:
+        for snap in gainers[:half]:
             ticker = (snap.get("ticker") or "").strip().upper()
             if ticker:
                 movers.append(ticker)
+
+        # Top losers (big drops = reversal / momentum plays)
+        await self._rate_limit_delay()
+        losers = await self._polygon.get_gainers_losers("losers")
+        for snap in losers[:half]:
+            ticker = (snap.get("ticker") or "").strip().upper()
+            if ticker and ticker not in movers:
+                movers.append(ticker)
+
         if movers:
-            logger.info("Top movers fetched", count=len(movers))
+            logger.info(
+                "Top movers fetched",
+                gainers=min(half, len(gainers)),
+                losers=min(half, len(losers)),
+                total=len(movers),
+            )
+        return movers
+
+    def _compute_movers_from_bars(
+        self, snap_by_ticker: Dict[str, Dict[str, Any]]
+    ) -> List[str]:
+        """Derive top gainers and losers from grouped daily bar data.
+
+        Uses open vs close to estimate daily change percentage.
+        Returns a mix of top gainers and top losers.
+        """
+        half = max(1, self._cfg.movers_count // 2)
+        min_vol = self._cfg.min_avg_volume
+        min_price = self._cfg.min_price
+
+        scored: List[tuple[str, float]] = []
+        for ticker, snap in snap_by_ticker.items():
+            try:
+                day = snap.get("day") or {}
+                close = float(day.get("c", 0) or 0)
+                open_price = float(day.get("o", 0) or 0)
+                volume = float(day.get("v", 0) or 0)
+                if close <= 0 or open_price <= 0 or close < min_price or volume < min_vol:
+                    continue
+                change_pct = (close - open_price) / open_price
+                scored.append((ticker, change_pct))
+            except (ValueError, TypeError):
+                continue
+
+        if not scored:
+            return []
+
+        # Sort by change_pct: top gainers first, then top losers
+        scored.sort(key=lambda x: x[1], reverse=True)
+        gainers = [s for s, _ in scored[:half]]
+        losers = [s for s, _ in scored[-half:]]
+        movers = gainers + [s for s in losers if s not in gainers]
+
+        logger.info(
+            "Movers computed from daily bars",
+            gainers=len(gainers),
+            losers=len([s for s in losers if s not in gainers]),
+            total=len(movers),
+        )
         return movers
 
     def _merge(self, dynamic: List[str], movers: List[str]) -> List[str]:

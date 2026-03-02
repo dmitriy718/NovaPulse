@@ -22,6 +22,8 @@ const favoriteSet = new Set();
 let chartResizeTimer = null;
 let chartPollTimer = null;
 let chartRequestInFlight = false;
+let _cachedPerf = null;
+let _cachedRisk = null;
 const chartState = {
     open: false,
     pair: '',
@@ -148,6 +150,8 @@ function renderStatus(status) {
 
 function renderPerformance(perf, risk) {
     if (!perf) return;
+    _cachedPerf = perf;
+    _cachedRisk = risk || _cachedRisk;
     const realized = perf.total_pnl || 0;
     const unrealized = perf.unrealized_pnl || 0;
     const totalPnl = realized + unrealized;
@@ -374,7 +378,7 @@ function renderThoughts(thoughts) {
         div.setAttribute('data-key', key);
         div.innerHTML =
             `<span class="thought-time">${formatTime(thought.timestamp)}</span>` +
-            `<span class="thought-category ${thought.category || 'system'}">${escHtml((thought.category || 'system').toUpperCase())}</span>` +
+            `<span class="thought-category ${escHtml(thought.category || 'system')}">${escHtml((thought.category || 'system').toUpperCase())}</span>` +
             `<span class="thought-msg">${escHtml(thought.message || '')}</span>`;
         frag.appendChild(div);
     }
@@ -2025,6 +2029,89 @@ function getPnlPct(pos, entry, qty, pnl) {
     return pnl / denom;
 }
 
+// ---- Stats Sharing ----
+
+function buildStatsShareText() {
+    const perf = _cachedPerf;
+    const risk = _cachedRisk;
+    const realized = (perf && perf.total_pnl) || 0;
+    const unrealized = (perf && perf.unrealized_pnl) || 0;
+    const totalPnl = realized + unrealized;
+    const winRate = perf ? ((perf.win_rate || 0) * 100).toFixed(1) : '0.0';
+    const trades = (perf && perf.total_trades) || 0;
+    const sign = totalPnl >= 0 ? '+' : '';
+    const pnlStr = sign + '$' + Math.abs(totalPnl).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    return `\u{1F4C8} Trading with NovaPulse!\nTotal P&L: ${pnlStr} | Win Rate: ${winRate}% | ${trades} trades\nStart trading \u{2192} novapulse.dev`;
+}
+
+function openStatsShareMenu() {
+    const overlay = document.getElementById('statsShareOverlay');
+    if (overlay) overlay.classList.remove('hidden');
+    const status = document.getElementById('statsShareStatus');
+    if (status) status.textContent = '';
+}
+
+function closeStatsShareMenu() {
+    const overlay = document.getElementById('statsShareOverlay');
+    if (overlay) overlay.classList.add('hidden');
+}
+
+function setStatsShareStatus(msg) {
+    const el = document.getElementById('statsShareStatus');
+    if (el) {
+        el.textContent = msg;
+        setTimeout(() => { if (el.textContent === msg) el.textContent = ''; }, 3000);
+    }
+}
+
+async function shareStats(platform) {
+    const text = buildStatsShareText();
+    const url = getPublicDashboardUrl() + '/';
+    const p = String(platform || '').toLowerCase();
+    let shareUrl = '';
+
+    if (p === 'x') {
+        const msg = encodeURIComponent(text + ' ' + url);
+        shareUrl = `https://twitter.com/intent/tweet?text=${msg}`;
+    } else if (p === 'discord') {
+        const copied = await copyTextSafe(text);
+        if (copied) setStatsShareStatus('Copied stats for Discord');
+        else setStatsShareStatus('Copy failed - paste manually');
+        window.open('https://discord.com/channels/@me', '_blank', 'noopener,noreferrer,width=960,height=760');
+        return;
+    } else if (p === 'telegram') {
+        const msg = encodeURIComponent(text);
+        const u = encodeURIComponent(url);
+        shareUrl = `https://t.me/share/url?url=${u}&text=${msg}`;
+    } else if (p === 'reddit') {
+        const title = encodeURIComponent(text.split('\n')[0]);
+        const u = encodeURIComponent(url);
+        shareUrl = `https://www.reddit.com/submit?url=${u}&title=${title}`;
+    } else if (p === 'copy') {
+        const copied = await copyTextSafe(text);
+        if (copied) setStatsShareStatus('Stats copied to clipboard!');
+        else setStatsShareStatus('Copy failed');
+        return;
+    }
+
+    if (!shareUrl) return;
+    window.open(shareUrl, '_blank', 'noopener,noreferrer,width=760,height=640');
+    closeStatsShareMenu();
+}
+
+function setupStatsShare() {
+    const row = document.getElementById('statsShareRow');
+    if (row) {
+        row.addEventListener('click', async (ev) => {
+            const btn = ev.target.closest('[data-stats-share]');
+            if (!btn) return;
+            ev.preventDefault();
+            ev.stopPropagation();
+            await shareStats(btn.dataset.statsShare || '');
+        });
+    }
+}
+
 // ---- Init ----
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -2035,6 +2122,7 @@ document.addEventListener('DOMContentLoaded', () => {
     setupFavorites();
     setupSettings();
     setupChartModal();
+    setupStatsShare();
     initAlgoTooltip();
     // Load settings when server is reachable (after first WS connect)
     setInterval(loadSettings, 15000);

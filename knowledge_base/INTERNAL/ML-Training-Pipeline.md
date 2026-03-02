@@ -1,7 +1,7 @@
 # NovaPulse ML Training Pipeline
 
-**Version:** 4.5.0
-**Last Updated:** 2026-02-24
+**Version:** 5.0.0
+**Last Updated:** 2026-02-27
 
 ---
 

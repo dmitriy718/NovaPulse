@@ -30,12 +30,36 @@ NC='\033[0m'
 BASE="$(cd "$(dirname "$0")" && pwd)"
 cd "$BASE"
 
+# Files created during runtime (temp env/override); cleaned on exit
+cleanup_files=()
+
+cleanup() {
+  for f in "${cleanup_files[@]:-}"; do
+    [ -n "$f" ] && [ -f "$f" ] && rm -f "$f"
+  done
+}
+trap cleanup EXIT
+
+# Compose file set (base + optional overrides)
+COMPOSE_FILES=(-f docker-compose.yml)
+
+reset_compose_files() {
+  COMPOSE_FILES=(-f docker-compose.yml)
+}
+
+compose() {
+  docker compose "${COMPOSE_FILES[@]}" "$@"
+}
+
+ENV_RUNTIME_FILE=".env"
+HOST_PORT_DEFAULT="127.0.0.1:8090"
+
 ts() { echo -n "[$(date +%H:%M:%S)] "; }
 
 banner() {
   echo -e "${CYAN}${BOLD}"
   echo "    ╔══════════════════════════════════════════════╗"
-  echo "    ║         NovaPulse v4.5.0 — Docker Deploy     ║"
+  echo "    ║         NovaPulse v5.0.0 — Docker Deploy     ║"
   echo "    ║       AI Crypto Trading Bot Operations        ║"
   echo "    ╚══════════════════════════════════════════════╝"
   echo -e "${NC}"
@@ -75,6 +99,40 @@ ensure_dirs() {
   mkdir -p data logs models config .secrets
 }
 
+prepare_env_runtime() {
+  ENV_RUNTIME_FILE=".env"
+
+  # Resolve 1Password op:// references into .secrets/env (if template exists).
+  # The Python app reads .secrets/env at startup (src/utils/secrets.py),
+  # completely bypassing Docker Compose's $VAR interpolation.
+  if [ -f ".env.secrets.tpl" ]; then
+    if command -v op &>/dev/null && op whoami &>/dev/null 2>&1; then
+      echo -e "  $(ts)${DIM}Resolving 1Password secrets...${NC}"
+      mkdir -p .secrets
+      if FORCE=1 bash scripts/resolve_secrets.sh .env.secrets.tpl .secrets/env; then
+        echo -e "  $(ts)${GREEN}✓ Secrets resolved into .secrets/env${NC}"
+      else
+        echo -e "  $(ts)${YELLOW}⚠ Secret resolution failed; check 1Password access.${NC}"
+      fi
+    elif [ -f ".secrets/env" ]; then
+      echo -e "  $(ts)${GREEN}✓ Using existing .secrets/env${NC}"
+    else
+      echo -e "  $(ts)${YELLOW}⚠ No 1Password CLI or .secrets/env found. Secrets must be set manually.${NC}"
+    fi
+  elif [ -f ".secrets/env" ]; then
+    echo -e "  $(ts)${GREEN}✓ Using .secrets/env${NC}"
+  fi
+}
+
+setup_compose_env() {
+  reset_compose_files
+  prepare_env_runtime
+}
+
+container_id() {
+  compose ps -q trading-bot | head -n 1
+}
+
 # ---------- Commands ----------
 
 cmd_start() {
@@ -97,10 +155,13 @@ cmd_start() {
   ensure_dirs
   echo -e "  $(ts)${GREEN}✓ .env present, directories ready.${NC}"
 
+  # 1Password injection (if available)
+  setup_compose_env
+
   # 2. Build & Start
   echo -e "\n$(ts)${BOLD}[3/4] Building & Starting Containers${NC}"
   echo -e "  $(ts)${DIM}Running docker compose up --build -d ...${NC}"
-  docker compose up --build -d
+  compose up --build -d
   echo -e "  $(ts)${GREEN}✓ Containers started.${NC}"
 
   # 3. Health check
@@ -108,9 +169,12 @@ cmd_start() {
   echo -e "  $(ts)${DIM}Waiting for bot to become healthy (up to 120s)...${NC}"
 
   healthy=0
+  cid="$(container_id)"
   for i in $(seq 1 24); do
     sleep 5
-    health="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}starting{{end}}' novapulse 2>/dev/null || echo starting)"
+    # Refresh container id each loop in case it was recreated
+    [ -z "$cid" ] && cid="$(container_id)"
+    health="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}starting{{end}}' "${cid:-}" 2>/dev/null || echo starting)"
     if [ "$health" = "healthy" ]; then
       healthy=1
       break
@@ -126,7 +190,7 @@ cmd_start() {
   fi
 
   # Dashboard info
-  HOST_PORT="$(grep -E '^HOST_PORT=' .env 2>/dev/null | cut -d= -f2 | tr -d '[:space:]' || echo '127.0.0.1:8090')"
+  HOST_PORT="$(grep -E '^HOST_PORT=' "$ENV_RUNTIME_FILE" 2>/dev/null | cut -d= -f2 | tr -d '[:space:]' || echo "$HOST_PORT_DEFAULT")"
   echo -e "\n$(ts)${CYAN}${BOLD}DEPLOYMENT COMPLETE${NC}"
   echo -e "  Dashboard: http://${HOST_PORT}"
   echo -e "  Logs:      docker compose logs -f trading-bot"
@@ -139,38 +203,40 @@ cmd_rebuild() {
   check_docker
   ensure_env
   ensure_dirs
+  setup_compose_env
 
   echo -e "$(ts)${BOLD}Force rebuilding image from scratch...${NC}"
-  docker compose build --no-cache
-  docker compose up -d
+  compose build --no-cache
+  compose up -d
   echo -e "$(ts)${GREEN}✓ Rebuilt and restarted.${NC}"
 }
 
 cmd_stop() {
   check_docker
   echo -e "$(ts)${BOLD}Stopping NovaPulse containers...${NC}"
-  docker compose down
+  compose down
   echo -e "$(ts)${GREEN}✓ All containers stopped.${NC}"
 }
 
 cmd_logs() {
   check_docker
-  docker compose logs -f trading-bot
+  compose logs -f trading-bot
 }
 
 cmd_status() {
   check_docker
   echo -e "${BOLD}Container Status:${NC}"
-  docker compose ps
+  compose ps
   echo ""
 
-  health="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}N/A{{end}}' novapulse 2>/dev/null || echo 'not running')"
-  started="$(docker inspect -f '{{.State.StartedAt}}' novapulse 2>/dev/null || echo 'N/A')"
+  cid="$(container_id)"
+  health="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}N/A{{end}}' "${cid:-}" 2>/dev/null || echo 'not running')"
+  started="$(docker inspect -f '{{.State.StartedAt}}' "${cid:-}" 2>/dev/null || echo 'N/A')"
   echo -e "  Health:     ${health}"
   echo -e "  Started at: ${started}"
 
   # Try to hit the health endpoint
-  HOST_PORT="$(grep -E '^HOST_PORT=' .env 2>/dev/null | cut -d= -f2 | tr -d '[:space:]' || echo '127.0.0.1:8090')"
+  HOST_PORT="$(grep -E '^HOST_PORT=' "$ENV_RUNTIME_FILE" 2>/dev/null | cut -d= -f2 | tr -d '[:space:]' || echo "$HOST_PORT_DEFAULT")"
   if curl -fsS "http://${HOST_PORT}/api/v1/health" &>/dev/null; then
     echo -e "  API:        ${GREEN}responding${NC}"
   else
@@ -186,16 +252,17 @@ cmd_stress() {
   ensure_env
 
   echo -e "$(ts)${BOLD}Launching Stress Monitor (${hours}h, every ${interval}m)${NC}"
+  setup_compose_env
 
   # Read API key from .env for auth
-  API_KEY="$(grep -E '^DASHBOARD_READ_KEY=' .env 2>/dev/null | cut -d= -f2 | tr -d '[:space:]' || true)"
+  API_KEY="$(grep -E '^DASHBOARD_READ_KEY=' "$ENV_RUNTIME_FILE" 2>/dev/null | cut -d= -f2 | tr -d '[:space:]' || true)"
 
   # Read dashboard port from .env
-  DASH_PORT="$(grep -E '^DASHBOARD_PORT=' .env 2>/dev/null | cut -d= -f2 | tr -d '[:space:]' || echo '8080')"
+  DASH_PORT="$(grep -E '^DASHBOARD_PORT=' "$ENV_RUNTIME_FILE" 2>/dev/null | cut -d= -f2 | tr -d '[:space:]' || echo '8080')"
 
   # Run stress test inside a container on the same Docker network.
   # Uses the service name "trading-bot" as hostname so it reaches the bot container.
-  docker compose run --rm \
+  compose run --rm \
     --no-deps \
     -e PYTHONPATH=/app \
     -e DASHBOARD_URL="http://trading-bot:${DASH_PORT}" \
@@ -205,8 +272,9 @@ cmd_stress() {
 
 cmd_shell() {
   check_docker
+  setup_compose_env
   echo -e "$(ts)${DIM}Opening shell in novapulse container...${NC}"
-  docker compose exec trading-bot /bin/bash || docker compose exec trading-bot /bin/sh
+  compose exec trading-bot /bin/bash || compose exec trading-bot /bin/sh
 }
 
 # ---------- Main ----------

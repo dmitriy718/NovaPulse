@@ -10,6 +10,8 @@ L2 FIX: Uses get_running_loop() instead of deprecated get_event_loop().
 
 from __future__ import annotations
 
+import src.utils.secrets  # noqa: F401 — must be first: loads .secrets/env into os.environ
+
 import asyncio
 import atexit
 import os
@@ -254,13 +256,27 @@ async def run_bot():
             started = time.time()
             try:
                 await coro_factory()
+                # Clean exit while engine is still running is expected for
+                # tasks like WS reconnect loops and dashboard restarts.
+                # Only count it as a failure if it exits very quickly
+                # (< 30s), which indicates a startup crash rather than a
+                # normal reconnection cycle.
                 if engine._running:
-                    failures += 1
-                    logger.warning(
-                        "Background task exited unexpectedly",
-                        task=name,
-                        failures=failures,
-                    )
+                    ran = time.time() - started
+                    if ran < 30:
+                        failures += 1
+                        logger.warning(
+                            "Background task exited too quickly",
+                            task=name,
+                            ran_seconds=round(ran, 1),
+                            failures=failures,
+                        )
+                    else:
+                        logger.info(
+                            "Background task exited normally, restarting",
+                            task=name,
+                            ran_seconds=round(ran, 1),
+                        )
             except asyncio.CancelledError:
                 break
             except Exception as e:

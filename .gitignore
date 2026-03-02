@@ -25,6 +25,7 @@ env/
 .env
 .env.*
 !.env.example
+!.env.secrets.tpl
 .secrets/
 NovaPulse.json
 config/.vault.enc
@@ -57,6 +58,9 @@ node_modules/
 
 # Local secret scratch files
 eskey
+
+# Runtime output
+nohup.out
 
 # Testing
 .pytest_cache/

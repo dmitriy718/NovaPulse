@@ -1,230 +1,247 @@
 # Controls: Pause, Resume, Close All, and Emergency Kill
 
-**Last updated:** 2026-02-24
+**Last updated:** 2026-03-01
 
-NovaPulse gives you full control over the bot at all times. Whether you want to temporarily pause trading, close all positions, or hit the emergency stop, you can do it instantly from the dashboard, Telegram, Discord, or Slack.
+Nova|Pulse gives you full control over the bot at all times. Whether you want to temporarily pause trading, close all positions, or hit the emergency stop, you can do it instantly from the dashboard, Telegram, Discord, or Slack.
 
 ---
 
 ## Overview of Controls
 
+| Action | What Happens | How to Trigger |
+|--------|-------------|---------------|
+| **Pause** | Stops opening new trades. Existing positions continue to be managed (stops, trailing, exits). | Dashboard button, Telegram `/pause`, Discord `!pause`, Slack `/pause` |
+| **Resume** | Starts opening new trades again. | Dashboard button, Telegram `/resume`, Discord `!resume`, Slack `/resume` |
+| **Close All** | Immediately closes every open position at market price. | Dashboard button (with confirmation), Telegram `/close_all`, Discord `!close_all` |
+| **Kill** | Stops the bot process entirely. Positions remain open on the exchange. | Telegram `/kill`, Docker stop, SIGTERM |
+
+---
+
+## Pause Trading
+
+Pausing is the most common control action. When paused:
+
+- **No new trades** will be opened
+- **Existing positions continue to be managed** -- stop losses are still enforced, trailing stops still tighten, the smart exit system still runs, and take profit levels still trigger
+- **Market data continues flowing** -- the bot keeps watching prices and updating indicators
+- **The dashboard stays fully operational** -- you can still see positions, P&L, and the thought feed
+
+### When to Pause
+
+- Before a major news event you are unsure about
+- When you want to observe the bot's signals without acting on them
+- If you notice unusual market conditions
+- Before making configuration changes
+- Any time you feel the bot should sit on its hands for a while
+
+### How to Pause
+
+**From the Dashboard:**
+1. Click the **PAUSE** button in the header bar (top right)
+2. The button text changes to **RESUME** and the status indicator turns orange
+
+**From Telegram:**
+Send `/pause` to your bot. You will receive confirmation:
 ```
-+------------------------------------------------------------------+
-|                                                                  |
-|    [ PAUSE ]    [ RESUME ]    [ CLOSE ALL ]    [ KILL ]          |
-|                                                                  |
-|    Pause new     Resume        Close all         Emergency       |
-|    trades        trading       positions         shutdown        |
-|                                                                  |
-+------------------------------------------------------------------+
+Trading PAUSED. Existing positions still managed.
+Send /resume to start trading again.
 ```
 
-| Control | What It Does | Existing Positions? | New Trades? |
-|---------|-------------|---------------------|-------------|
-| **Pause** | Stops new trades from opening | Still managed and protected (stop losses, trailing stops active) | Blocked |
-| **Resume** | Lifts the pause and allows trading again | Continues normal management | Allowed again |
-| **Close All** | Closes every open position at market price immediately | All closed | Still allowed (bot keeps running) |
-| **Kill** | Emergency: closes all positions AND stops the bot entirely | All closed | Blocked (bot is stopped) |
+**From Discord:**
+Send `!pause` in the allowed channel.
+
+**From Slack:**
+Send `/pause` in the allowed channel.
+
+### How to Resume
+
+Reverse the pause from any channel:
+- Dashboard: click the **RESUME** button
+- Telegram: `/resume`
+- Discord: `!resume`
+- Slack: `/resume`
+
+The bot will resume scanning and opening new trades on the next scan cycle (within seconds).
 
 ---
 
-## Pause
+## Close All Positions
 
-**What happens when you pause:**
+This immediately sends market sell orders for every open position.
 
-1. The bot stops opening new trades.
-2. The scanner keeps running -- you can still see signals and confluence on the dashboard.
-3. All existing positions remain open and fully protected:
-   - Stop losses continue to be monitored
-   - Trailing stops continue to adjust
-   - Take profit targets are still active
-   - If a stop loss or take profit is hit, the trade closes normally
-4. The status indicator changes to **PAUSED** (yellow).
-5. A notification is sent to your configured channels (Telegram, Discord, Slack).
+### What Happens
 
-**When to use Pause:**
+1. Every open position (crypto and stocks) is closed at the current market price
+2. Market orders are used for speed -- no limit chasing
+3. Each closure is logged in the thought feed with the reason "manual_close_all"
+4. P&L for each position is recorded
+5. The bot continues running and can open new trades (unless also paused)
 
-- You want to take a break from trading for a while
-- The market feels unusually volatile and you want to be cautious
-- You want to review settings or performance before continuing
-- You are diagnosing unexpected behavior
+### When to Use Close All
 
-**Pause does NOT close your existing trades.** It simply prevents new ones from opening. Your existing positions are still fully managed.
+- Unexpected extreme market event (flash crash, black swan)
+- You need to free up capital immediately
+- The bot has accumulated positions you are uncomfortable with
+- Before switching from live to paper mode
 
----
+### How to Close All
 
-## Resume
+**From the Dashboard:**
+1. Click the **CLOSE ALL** button (red, top right)
+2. A confirmation dialog appears: "Are you sure you want to close all positions?"
+3. Click "Confirm" to proceed or "Cancel" to abort
 
-**What happens when you resume:**
+**From Telegram:**
+Send `/close_all` to your bot. Confirmation is sent:
+```
+Closing all 3 positions...
+Closed BTC/USD LONG: P&L $42.15
+Closed ETH/USD SHORT: P&L -$8.30
+Closed SOL/USD LONG: P&L $12.70
+All positions closed. Net P&L: $46.55
+```
 
-1. The pause flag is cleared.
-2. The bot begins placing new trades again on the next scan (if signals meet the thresholds).
-3. The status indicator changes back to **RUNNING** (green) -- unless a circuit breaker is still active (e.g., stale data), in which case it will show the relevant status instead.
-4. A notification is sent to your configured channels.
+### Important Notes
 
-**When to use Resume:**
-
-- You previously paused and are ready to allow trading again
-- You have reviewed the situation and are confident it is safe to continue
-
-> **Note:** If the bot was auto-paused by a circuit breaker (daily loss limit, consecutive losses, stale data, etc.), resuming clears the manual pause flag, but the circuit breaker condition may still block trading. Check the Risk Shield panel on the dashboard to see if any circuit breakers are still active.
-
----
-
-## Close All
-
-**What happens when you close all:**
-
-1. Every open position is closed immediately at market price.
-2. Realized P&L is recorded for each closed trade.
-3. The bot continues running and scanning -- it may open new trades on the next scan unless you also pause.
-4. A notification is sent with the number of positions closed.
-
-**When to use Close All:**
-
-- You want to go flat (no open positions) before a major market event (e.g., interest rate announcements, regulatory news)
-- You want to reset and start fresh
-- You see something in the market that concerns you
-
-**Important:** Close All does NOT pause the bot. If you want to close everything AND prevent new trades, use Close All followed by Pause, or use Kill.
+- Close All uses market orders, so there may be small slippage in fast markets
+- After Close All, the bot will resume scanning and may open new positions unless you also pause
+- If you want to stop trading entirely, use Close All followed by Pause
 
 ---
 
 ## Emergency Kill
 
-**What happens when you kill:**
+The kill command stops the bot process entirely. This is the nuclear option.
 
-1. Every open position is closed immediately at market price.
-2. The bot engine is shut down entirely.
-3. No new scans or trades will occur.
-4. The status indicator changes to **STOPPED** (red).
-5. A notification is sent to your configured channels.
+### What Happens
 
-**When to use Kill:**
+1. The bot stops its event loop and all background tasks
+2. **Positions remain open on the exchange** -- Nova|Pulse does not close them
+3. Exchange-native stop loss orders (if placed) remain active
+4. The dashboard becomes unreachable
+5. The bot must be restarted manually
 
-- You suspect your API credentials have been compromised
-- You see unexpected or erroneous trading behavior
-- You want to completely freeze all activity until support reviews
-- Any situation where you want an immediate, total stop
+### When to Use Kill
 
-**After a Kill:** The bot remains stopped until it is manually restarted (by you via Resume, or by support). No automatic restart occurs after a Kill.
+- The bot is behaving unexpectedly and you want it fully stopped
+- You need to perform maintenance on the server
+- You are migrating to a new deployment
 
----
+### How to Kill
 
-## How to Use Controls
+**From Telegram:**
+Send `/kill` to your bot. This triggers a graceful shutdown.
 
-### From the Dashboard
-
-The control buttons are located in the header area of your dashboard:
-- Click **Pause** to pause trading
-- Click **Resume** to resume trading
-- Click **Close All** to close all positions
-- **Kill** may require confirmation (a dialog will ask "Are you sure?")
-
-### From Telegram
-
-If you have the Telegram bot set up (see [Notifications](Notifications.md)):
-
-| Command | Action |
-|---------|--------|
-| `/pause` | Pause trading |
-| `/resume` | Resume trading |
-| `/close_all` | Close all positions |
-| `/kill` | Emergency stop (requires confirmation -- reply "yes" within 30 seconds) |
-
-### From Discord
-
-If you have the Discord bot set up:
-
-| Command | Action |
-|---------|--------|
-| `/pause` | Pause trading |
-| `/resume` | Resume trading |
-| `/close_all` | Close all positions |
-| `/kill` | Emergency stop |
-
-### From Slack
-
-If you have the Slack bot set up:
-
-| Command | Action |
-|---------|--------|
-| `/trading-pause` | Pause trading |
-| `/trading-resume` | Resume trading |
-| `/trading-close-all` | Close all positions |
-| `/trading-kill` | Emergency stop |
-
-### Via API
-
-If you are using the API directly:
-
-| Endpoint | Method | Action |
-|----------|--------|--------|
-| `/api/v1/control/pause` | POST | Pause trading |
-| `/api/v1/control/resume` | POST | Resume trading |
-| `/api/v1/control/close_all` | POST | Close all positions |
-
-API calls require your admin API key in the `X-API-Key` header.
-
----
-
-## What Happens After a Restart
-
-If the bot restarts (due to a system update, server reboot, or manual restart):
-
-1. The bot re-initializes and goes through its warmup phase (downloading recent price data).
-2. It reads its last known state from the database.
-3. Any positions that were open before the restart are re-detected from the exchange.
-4. If it was paused before the restart, it comes back in a paused state.
-5. If it was killed before the restart, it comes back in a stopped state and will not resume automatically.
-
-The restart process typically takes 1-2 minutes. During this time, your exchange's native stop-loss orders (if enabled) continue to protect your positions.
-
----
-
-## Automatic Pauses (Circuit Breakers)
-
-NovaPulse can also pause itself automatically when safety conditions are triggered. These are different from a manual pause:
-
-| Trigger | Threshold | What Happens |
-|---------|-----------|-------------|
-| **Daily loss limit** | Losses exceed 5% of bankroll | Auto-pauses until next day |
-| **Consecutive losses** | 4 losses in a row (default) | Auto-pauses for review |
-| **Drawdown limit** | Drawdown exceeds 8% | Auto-pauses and may reduce position sizes |
-| **Stale market data** | No fresh data for 3+ checks | Auto-pauses until data recovers |
-| **Exchange disconnect** | WebSocket down for 5+ minutes | Auto-pauses until reconnected |
-
-When an auto-pause occurs:
-- You receive a notification explaining what triggered it
-- The Risk Shield panel on the dashboard shows the active circuit breaker
-- You can resume manually once you have reviewed the situation
-
----
-
-## Decision Flowchart
-
+**From the Server:**
+```bash
+docker stop novatrader-trading-bot-1
 ```
-  Something concerns you?
-         |
-         v
-  Is it urgent / suspected compromise?
-        / \
-      YES   NO
-       |     |
-       v     v
-     KILL   Do you want to close positions?
-              / \
-            YES   NO
-             |     |
-             v     v
-         CLOSE    PAUSE
-         ALL      (keeps positions,
-         then     stops new trades)
-         PAUSE
+Or send SIGTERM / SIGINT to the process.
+
+### After a Kill
+
+To restart:
+```bash
+docker start novatrader-trading-bot-1
+# or
+docker compose up -d
 ```
 
+When the bot restarts, it reconciles its database with exchange positions (checking which positions are still open) and resumes management.
+
 ---
 
-*If you are unsure which action to take, **Pause** is always a safe first step -- it stops new trades while keeping your existing positions protected. You can then review the situation calmly before deciding whether to Close All, Resume, or Kill.*
+## Automatic Pauses
 
-*For additional help, see [Troubleshooting](Troubleshooting.md) or [Contact Support](Contact-Support.md).*
+Nova|Pulse can automatically pause trading in several situations. These are safety features designed to protect your capital.
+
+### Consecutive Loss Pause
+
+If the bot suffers a streak of losing trades (default: 5 in a row), trading pauses automatically.
+
+**What you see:** The thought feed shows "Auto-pause: consecutive_losses" and the status shows "PAUSED".
+
+**What to do:** Review the recent trades to understand why. When ready, resume via any control channel. The consecutive loss counter resets when you resume.
+
+### Daily Loss Limit Pause
+
+If daily losses reach the configured maximum (default: 5% of bankroll), trading pauses for the rest of the UTC day.
+
+**What you see:** "Auto-pause: daily_loss_limit_reached" in the thought feed.
+
+**What to do:** Trading will automatically resume at the next UTC midnight, or you can manually resume if you have increased the limit.
+
+### Drawdown Pause
+
+If the bot's peak-to-trough drawdown exceeds the threshold (default: 8%), trading pauses.
+
+**What you see:** "Auto-pause: drawdown_limit" in the thought feed.
+
+**What to do:** Review your risk settings and recent trades. Resume when comfortable.
+
+### Stale Data Pause
+
+If market data stops updating for a prolonged period (e.g., WebSocket disconnection lasting >5 minutes), trading pauses.
+
+**What you see:** "Auto-pause: stale_data" or "Auto-pause: ws_disconnect" in the thought feed.
+
+**What to do:** This usually resolves on its own when the connection recovers. If it persists, check your network and exchange status.
+
+### Priority Schedule Pause
+
+The priority scheduler automatically pauses crypto engines during US stock market hours (9:30 AM -- 4:00 PM Eastern) and pauses stock engines outside those hours. This is normal behavior, not an error.
+
+### Anomaly Detection Pause (v5.0)
+
+If the anomaly detector is enabled and detects abnormal spread, volume, or depth conditions, trading pauses for a configurable cooldown (default 5 minutes).
+
+---
+
+## Control via Telegram Commands
+
+For users with Telegram set up, here is the full list of control commands:
+
+| Command | Action |
+|---------|--------|
+| `/status` | Show current bot status (running, paused, mode, positions) |
+| `/pause` | Pause trading |
+| `/resume` | Resume trading |
+| `/close_all` | Close all open positions |
+| `/kill` | Stop the bot process |
+| `/positions` | Show current open positions |
+| `/pnl` | Show P&L summary |
+| `/risk` | Show risk report |
+| `/trades` | Show recent trade history |
+
+See the [Notifications guide](Notifications.md) for how to set up Telegram.
+
+---
+
+## Control Permissions
+
+All control actions (pause, resume, close_all, kill) require authentication:
+
+- **Dashboard:** requires an active login session
+- **Telegram:** only responds to commands from authorized chat IDs
+- **Discord:** only responds in authorized channels/guilds
+- **API calls:** require the admin API key (not the read-only key)
+
+Read-only API keys can view data but cannot trigger control actions.
+
+---
+
+## Best Practices
+
+1. **Pause before panic.** If something looks wrong, pause first, investigate second. Pausing keeps existing protections active while preventing new exposure.
+
+2. **Close All is for emergencies.** In normal operation, let the bot manage exits through its stop losses and smart exit system. Closing all at once may exit profitable positions prematurely.
+
+3. **Kill is a last resort.** Remember that killing the bot leaves positions unmanaged. Only use it if the bot is truly misbehaving.
+
+4. **Set up Telegram.** Having mobile control means you can pause from anywhere in seconds, even if you are not near your computer.
+
+5. **Trust the auto-pauses.** They exist for a reason. When an auto-pause triggers, take it as a signal to review conditions before resuming.
+
+---
+
+*Nova|Pulse v5.0.0 -- You are always in control.*

@@ -1,7 +1,7 @@
 # NovaPulse Security
 
-**Version:** 4.5.0
-**Last Updated:** 2026-02-24
+**Version:** 5.0.0
+**Last Updated:** 2026-02-27
 
 ---
 
@@ -238,22 +238,44 @@ For billing webhooks:
 - Dashboard binds to `127.0.0.1` by default (not exposed to public)
 - ES binds to `127.0.0.1:9200` (not exposed to public)
 
-### Recommended Production Setup
+### Production Setup (Caddy Reverse Proxy)
+
+In the production deployment at `nova.horizonsvc.com`, Caddy provides the public-facing HTTPS layer:
 
 ```
 Internet
     |
-    +-- Reverse Proxy (nginx/Caddy)
-    |     - HTTPS termination (Let's Encrypt)
-    |     - IP allowlisting (optional)
-    |     - Additional rate limiting
+    +-- Caddy (nova.horizonsvc.com, ports 80/443)
+    |     - Automatic HTTPS via Let's Encrypt ACME
+    |     - HSTS, X-Content-Type-Options, X-Frame-Options headers
+    |     - Response compression (zstd, gzip)
+    |     - Server header removal
     |
-    +-- Host port 8090 (localhost only)
+    +-- Docker network: novatrader_trading-net
     |
-    +-- Container port 8080
+    +-- trading-bot container (port 8080, internal only)
     |
-    +-- NovaPulse Dashboard
+    +-- Host port 8090 (127.0.0.1 only, for local debugging)
 ```
+
+UFW firewall on the ops server allows only SSH (22), HTTP (80), and HTTPS (443). Port 8080 is intentionally blocked from external access.
+
+### Horizon Dashboard Proxy Security
+
+The horizonsvc.com Fastify API proxies customer requests to the bot. Security layers:
+
+| Layer | Protection |
+|-------|-----------|
+| Firebase Auth | Customer identity verified via Firebase ID token |
+| Per-user isolation | Each customer's bot_connections entry stores their own bot URL + API key |
+| SSRF prevention | `isAllowedBotUrl()` blocks private IPs (10.x, 172.16-31.x, 192.168.x, localhost, ::1, link-local) |
+| DNS rebinding check | Hostname resolved and all returned IPs checked against blocklist |
+| Redirect blocking | `redirect: "error"` on fetch prevents chained redirects to internal services |
+| Query string allowlisting | Only permitted query parameters are forwarded to the bot |
+| Connection validation | `PUT /bot/connection` validates the bot URL by calling `/api/v1/status` before saving |
+| Key non-exposure | `GET /bot/connection` never returns the raw `api_key` to the frontend |
+| Rate limiting | Fastify rate limiter: 120 requests/minute per IP |
+| Request timeout | 10-second timeout on all proxy requests |
 
 ### Exchange API Security
 

@@ -1,227 +1,220 @@
 # Stock Trading
 
-**Version:** 4.5.0
-**Last updated:** 2026-02-24
+**Version:** 5.0.0
+**Last updated:** 2026-03-01
 
-NovaPulse is not just a crypto bot -- it also swing-trades US equities (stocks). This guide explains how the stock trading feature works, what makes it different from the crypto side, and what to expect as a subscriber.
+Nova|Pulse is not just a crypto bot -- it also swing-trades US equities (stocks). This guide explains how the stock trading feature works, what makes it different from the crypto side, and what to expect as a subscriber.
 
 ---
 
 ## What Is Swing Trading?
 
-Swing trading means holding positions for days, not minutes. Unlike NovaPulse's crypto strategies, which may open and close trades within hours, the stock engine looks for multi-day price movements and holds positions to capture those larger swings.
+Swing trading means holding positions for days rather than minutes. While the crypto side of Nova|Pulse makes short-term trades (holding for minutes to hours), the stock side looks for multi-day price swings:
 
-**Plain-language analogy:** Think of it as the difference between fishing with a quick-cast rod (crypto -- fast, frequent casts) and fishing with a deep-sea setup (stocks -- fewer casts, bigger catch per cast). Both are fishing, but the technique and patience required are different.
-
----
-
-## How the Stock Universe Works
-
-NovaPulse does not attempt to trade every stock on the market. Instead, it maintains a **dynamic universe** of up to 96 of the most liquid US stocks.
-
-### The Selection Process
-
-Every 60 minutes during market hours, NovaPulse runs a universe scan:
-
-1. **Data collection:** Polygon provides daily price and volume data for thousands of US-listed stocks.
-2. **Filtering:** Stocks are filtered by minimum price and minimum trading volume. This ensures NovaPulse only considers stocks that are liquid enough to trade without excessive slippage.
-3. **Ranking:** Qualifying stocks are ranked by trading volume (most liquid first).
-4. **Selection:** The top stocks are selected, up to a maximum of 96.
-
-### Pinned Stocks
-
-Four stocks are always included in the universe, regardless of the scan results:
-
-| Stock | Why It Is Pinned |
-|-------|-----------------|
-| **AAPL** (Apple) | Highest-volume tech stock, extremely liquid |
-| **MSFT** (Microsoft) | Major tech bellwether, deep order book |
-| **NVDA** (NVIDIA) | AI/semiconductor leader, high volatility and volume |
-| **TSLA** (Tesla) | Consistently among the highest-volume names on the market |
-
-These four are pinned because they consistently meet all quality criteria and provide a stable foundation for the universe.
-
-### Dynamic Stocks
-
-The remaining 92 slots are filled dynamically based on the latest volume data. This means the universe adapts as market attention shifts. If a stock suddenly sees a surge in trading volume (perhaps due to earnings, news, or sector rotation), it may enter the universe. If volume dries up, it may be replaced.
-
-**Refresh cycle:** Every 60 minutes during market hours (9:30 AM to 4:00 PM Eastern Time). Outside market hours, the universe holds steady until the next trading session.
+- **Hold period:** 1 to 7 days (configurable)
+- **Scanning frequency:** Every 2 minutes during market hours
+- **Data source:** Daily bars from Polygon.io
+- **Execution:** Market orders via Alpaca brokerage
+- **Market hours:** 9:30 AM -- 4:00 PM Eastern, Monday through Friday
 
 ---
 
-## The Swing Trading Approach
+## How Stock Trading Works
 
-NovaPulse's stock engine uses a different philosophy from its crypto strategies. Rather than running nine strategies and requiring confluence, the stock engine uses a focused set of technical signals specifically tuned for swing trading.
+### The Stock Universe
 
-### Entry Signals
+Nova|Pulse maintains a dynamic universe of up to 96 stocks to scan:
 
-For NovaPulse to open a stock position, **all three** of the following conditions must be met simultaneously:
+**Pinned Stocks (28):** Core stocks that are always scanned:
+- Mega-cap tech: AAPL, MSFT, NVDA, TSLA, GOOG, AMZN, META
+- Semiconductor: AMD, AVGO, INTC
+- Finance: JPM, BAC, GS
+- Consumer/Retail: NFLX, DIS, NKE
+- Crypto-adjacent: MSTR, COIN, MARA, RIOT, CIFR
+- High-beta: PLTR, SOFI, RIVN, LCID, NIO, SNAP
 
-#### 1. Trend Alignment (EMA Stack)
+**Dynamic Stocks (up to 68):** Added by the universe scanner based on:
+- Minimum average daily volume (300,000 shares)
+- Price range ($3 to $2,000)
+- Ranked by volume (most liquid first)
+- Top movers overlay: 10 biggest gainers + 10 biggest losers are included for momentum/reversal plays
 
-The stock's price must be above its 20-day Exponential Moving Average (EMA20), and the EMA20 must be above the 50-day Exponential Moving Average (EMA50).
+### Universe Refresh
 
-**What this means in plain language:** The stock is in an uptrend on both a short-term and medium-term basis. The price is not just rising -- it is rising in a structured, healthy way where the shorter-term average leads the longer-term average.
+The scanner refreshes every 60 minutes during market hours (plus 30 minutes before open):
+1. Fetches grouped daily bars from Polygon.io
+2. Filters by volume and price criteria
+3. Ranks by trading volume
+4. Merges with pinned stocks
+5. Caps at 96 total symbols
 
-```
-Price ---- above ----> EMA20 ---- above ----> EMA50
-(current)              (short-term trend)      (medium-term trend)
-
-All three aligned = healthy uptrend
-```
-
-#### 2. RSI Sweet Spot (45 to 72)
-
-The Relative Strength Index (RSI) must be between 45 and 72.
-
-**What this means in plain language:** RSI measures how "overbought" or "oversold" a stock is on a scale of 0 to 100. NovaPulse looks for the sweet spot:
-
-- **Below 45:** The stock might be weakening -- too risky for a swing buy.
-- **45 to 72:** The stock has momentum but is not overextended. This is the "Goldilocks zone" for swing entries.
-- **Above 72:** The stock may be overbought and due for a pullback -- too late to enter.
-
-#### 3. Positive 5-Day Momentum
-
-The stock must show positive price momentum over the last 5 trading days.
-
-**What this means in plain language:** Price has been moving upward recently. This confirms that the trend alignment (condition 1) is not stale -- there is fresh energy behind the move.
-
-### Why All Three Must Agree
-
-Requiring all three conditions to be met simultaneously is the stock engine's version of confluence. Each condition catches a different type of false signal:
-
-- Trend alignment without momentum could be a stale, fading trend.
-- Momentum without trend alignment could be a brief bounce in a downtrend.
-- Good RSI without the other two could be a random fluctuation.
-
-When all three agree, the probability of a genuine, tradeable swing setup increases substantially.
+This ensures the universe stays relevant as market conditions change throughout the day.
 
 ---
 
-## Market Hours and the Priority Scheduler
+## The Stock Swing Strategy
 
-Stock trading operates exclusively during **US regular market hours**: 9:30 AM to 4:00 PM Eastern Time, Monday through Friday (excluding market holidays).
+The stock engine uses a simplified entry strategy compared to crypto's twelve-strategy confluence:
 
-NovaPulse's priority scheduler handles this automatically:
+### Entry Criteria (All Must Be True)
 
-- **Market opens (9:30 AM ET):** The crypto engines pause scanning, and the stock engine activates.
-- **Market closes (4:00 PM ET):** The stock engine pauses, and the crypto engines resume.
-- **Weekends and holidays:** The stock engine remains paused; crypto engines run continuously.
+1. **Price above EMA-20 above EMA-50** -- confirms the stock is in an uptrend
+2. **RSI between 45 and 72** -- not overbought, not oversold, in the "sweet spot"
+3. **Positive 5-day momentum** -- the stock has been gaining recently
 
-This means you never need to manually switch between crypto and stock modes. NovaPulse handles it seamlessly.
+When all three conditions align, the stock engine opens a long position.
 
-**Important note about open stock positions:** When the market closes, any open stock positions remain open. They are not automatically closed at 4:00 PM. Swing trades are designed to be held for days, so positions carry overnight and through weekends as needed. NovaPulse will continue monitoring them when the market reopens.
+### Why Simpler Than Crypto?
 
----
-
-## Data and Execution: Polygon + Alpaca
-
-NovaPulse's stock trading uses two separate services:
-
-### Polygon (Market Data)
-
-Polygon provides the raw market data -- daily price bars for each stock in the universe. This includes open, high, low, close prices and trading volume for each day.
-
-- **Data type:** Daily bars (one data point per trading day per stock).
-- **Coverage:** Thousands of US-listed stocks.
-- **Refresh:** Updated throughout the trading day as new bars form.
-
-### Alpaca (Order Execution)
-
-Alpaca is the broker that executes your stock trades. When NovaPulse decides to buy or sell a stock, the order is sent to Alpaca, which routes it to the stock market for execution.
-
-- **Commission-free:** Alpaca does not charge trading commissions on US stocks.
-- **Paper mode:** Alpaca provides a fully functional paper trading environment for testing.
-- **Fractional shares:** Not currently used -- NovaPulse trades in whole shares.
-
-**Why two services?** Splitting data and execution lets NovaPulse use the best tool for each job. Polygon excels at comprehensive market data; Alpaca excels at reliable, commission-free order execution.
+Stock swing trading uses daily bars (one candle per day), not 1-minute or 5-minute candles. With so much less data per unit of time, the signal-to-noise ratio is different. The strategy focuses on clear trend alignment rather than multi-strategy confluence, which requires higher-frequency data to be meaningful.
 
 ---
 
-## How Stock Trading Differs from Crypto
+## Risk Management for Stocks
 
-Understanding the key differences helps set expectations:
+### Position Sizing
 
-| Aspect | Crypto (Kraken/Coinbase) | Stocks (Alpaca) |
-|--------|--------------------------|-----------------|
-| **Trading hours** | 24/7 | 9:30 AM - 4:00 PM ET weekdays |
-| **Hold time** | Minutes to hours | Days |
-| **Strategies** | 9 strategies with confluence | Swing signals (EMA + RSI + momentum) |
-| **Data frequency** | 1-minute candles, real-time | Daily bars |
-| **Universe** | 5-15 configured pairs | Up to 96 dynamically selected stocks |
-| **Volatility** | Higher (crypto swings can be large) | Lower (stocks tend to move more gradually) |
-| **Scan interval** | Every 60 seconds | Every 120 seconds |
-| **Signal approach** | Multi-strategy confluence | All-conditions-must-agree filter |
+- Maximum position size: $500 per stock (default)
+- Maximum open positions: 6 simultaneously
+- No correlation group enforcement (stocks are inherently more diverse)
 
-### Why the Different Approach?
+### Stop Loss and Take Profit
 
-Crypto and stocks are fundamentally different markets:
+- Stop loss: 2% below entry (fixed percentage)
+- Take profit: 4% above entry (fixed percentage)
+- No smart exit tiers or trailing stops (the daily-bar timeframe makes these less practical)
 
-- **Crypto** moves fast and unpredictably. Nine strategies with a confluence requirement help filter the noise and find high-quality short-term opportunities in a chaotic environment.
-- **Stocks** follow more structured patterns, with earnings cycles, sector rotations, and market hours creating more predictable behavior. A focused swing approach with clear technical criteria is well-suited to capture multi-day moves.
+### Fee Estimation
 
-NovaPulse uses the right tool for each market rather than forcing one approach onto both.
+The engine accounts for estimated fees and slippage:
+- Estimated fee: 0.05% per side (Alpaca is commission-free, but market impact exists)
+- Estimated slippage: 0.02% per side
+- Combined cost estimate: 0.14% round-trip
 
 ---
 
-## Paper Mode for Stocks
+## Priority Scheduling
 
-Just like the crypto side, NovaPulse supports **paper trading** for stocks. In paper mode:
+The priority scheduler coordinates stock and crypto trading:
 
-- Real market data from Polygon is used -- you see actual stock prices and actual signals.
-- Trades are simulated through Alpaca's paper trading environment -- no real money is at risk.
-- All metrics (P&L, win rate, number of trades) are tracked as if they were real.
-- The dashboard looks and works identically to live mode.
+- **9:30 AM -- 4:00 PM Eastern (weekdays):** Stock engine active, crypto engines paused
+- **All other times:** Crypto engines active, stock engine paused
 
-We recommend running stock trading in paper mode for at least one to two weeks before going live, especially if you are new to swing trading.
+This happens automatically. During market hours, the stock engine scans every 2 minutes and places trades via Alpaca. Outside market hours, it goes dormant.
 
----
+### Pre-Market
 
-## Position Sizing for Stocks
-
-The stock engine uses the same core risk principles as the crypto side:
-
-- **Risk per trade:** A fixed percentage of your stock bankroll (default 2%).
-- **Maximum position size:** Capped in dollar terms to prevent oversized bets.
-- **Kelly Criterion:** Position size is calculated using the Kelly formula (at a conservative quarter-Kelly fraction), factoring in recent win rate and average win/loss ratio.
-
-Because stock swing trades are held longer, position sizes tend to be moderate -- large enough to capture meaningful gains, but small enough that a losing trade does not significantly impact your account.
+The universe scanner starts refreshing 30 minutes before market open (9:00 AM Eastern) to have fresh data ready when trading begins.
 
 ---
 
 ## What You See on the Dashboard
 
-Stock trades appear on your dashboard alongside crypto trades, clearly labeled:
+Stock positions appear in the positions table with a "(stocks:default)" suffix:
 
-- **Position list:** Stock positions show the stock ticker (e.g., "AAPL"), entry price, current price, unrealized P&L, and holding period.
-- **Signal scanner:** When the stock engine identifies potential swing setups, they appear in the scanner with a "stocks" label.
-- **Performance metrics:** Stock P&L is tracked separately in the per-exchange breakdown and combined in the overall portfolio view.
+```
+AAPL (stocks:default)  LONG  $182.45  $184.20  $500  +$4.80  ...
+NVDA (stocks:default)  LONG  $825.30  $831.50  $500  +$3.75  ...
+```
 
----
-
-## Frequently Asked Questions
-
-**Do I need a separate Alpaca account?**
-Yes. You need an Alpaca brokerage account (or Alpaca paper account for testing). NovaPulse uses your Alpaca API keys to place orders on your behalf. Signing up at Alpaca is free.
-
-**Can I choose which stocks NovaPulse trades?**
-The four pinned stocks (AAPL, MSFT, NVDA, TSLA) are always included. The remaining 92 are selected dynamically based on liquidity. You cannot manually add or remove individual stocks from the dynamic universe, but you can adjust the maximum universe size through configuration.
-
-**What if a stock gaps down overnight?**
-Swing trades carry overnight risk, which is inherent to the approach. NovaPulse accounts for this by using conservative position sizing and setting stop losses that accommodate normal overnight price movement. However, extreme overnight gaps (e.g., a company reporting terrible earnings after hours) can cause losses beyond the stop level. This is a known limitation of all swing trading systems.
-
-**Why only 96 stocks?**
-The universe size balances breadth with quality. Scanning too many stocks would dilute focus onto less-liquid names. 96 stocks provides excellent coverage of the most actively traded US equities while keeping the universe manageable and high-quality.
-
-**Can I run stocks without crypto?**
-NovaPulse is designed as a multi-engine system, but you can configure it to run only the stock engine. Contact support to adjust your configuration.
-
-**What about dividends?**
-Dividends from stocks held in your Alpaca account are handled by Alpaca according to their standard policies. NovaPulse does not factor dividend dates into its trading signals.
+Stock-specific metrics in the scanner panel show:
+- Universe size (e.g., "96 stocks")
+- Which stocks are pinned vs. dynamic
+- Last refresh time
 
 ---
 
-*For details on multi-exchange trading, see [Multi-Exchange Trading](Multi-Exchange-Trading.md).*
-*For risk protections, see [Risk and Safety](Risk-Safety.md).*
-*For AI features that enhance stock trading, see [AI and ML Features](AI-ML-Features.md).*
-*Questions? See our [FAQ](FAQ.md) or [contact support](Contact-Support.md).*
+## Required Accounts and API Keys
+
+### Polygon.io (Market Data)
+
+- **What it provides:** Daily price bars, grouped daily bars for universe scanning
+- **Required tier:** Free tier works. The free tier provides grouped daily bars, which is sufficient for the universe scanner. Snapshot endpoints require a paid tier but are not required.
+- **API key:** Set via config or `POLYGON_API_KEY` environment variable
+- **Rate limit:** 5 requests per minute on free tier (the engine respects this)
+
+### Alpaca (Brokerage)
+
+- **What it provides:** Order execution, position management, account info
+- **Account types:** Paper trading (recommended to start) or live trading
+- **API keys:** API Key ID + Secret Key, set via config or environment variables
+- **Commission:** Free (no per-trade fees)
+
+---
+
+## Paper Trading vs. Live Trading
+
+**Paper mode (default):** The stock engine simulates trades using real market data but does not place actual orders on Alpaca. This is the recommended starting mode.
+
+**Live mode:** Real orders are placed on your Alpaca account. Make sure:
+- Your Alpaca account is funded
+- You have switched from paper to live API keys
+- You are comfortable with the bot's behavior in paper mode first
+
+---
+
+## Differences from Crypto Trading
+
+| Aspect | Crypto | Stocks |
+|--------|--------|--------|
+| **Hold period** | Minutes to hours | 1-7 days |
+| **Strategies** | 12 strategies with confluence | Single trend-alignment strategy |
+| **Scan frequency** | Every 15 seconds | Every 2 minutes |
+| **Data** | 1-min candles via WebSocket | Daily bars via REST |
+| **Exit system** | Smart Exit with tiers + trailing | Fixed SL/TP percentages |
+| **Market hours** | 24/7 | 9:30 AM - 4:00 PM ET, weekdays |
+| **Max positions** | 10 | 6 |
+| **Max position size** | $350 | $500 |
+| **Exchanges** | Kraken, Coinbase | Alpaca |
+
+---
+
+## Configuration
+
+Stock trading is configured under the `stocks:` section in config.yaml:
+
+```yaml
+stocks:
+  enabled: true               # Master switch
+  scan_interval_seconds: 120   # Scan every 2 minutes
+  lookback_bars: 120           # 120 daily bars for indicators
+  min_hold_days: 1             # Minimum 1 day hold
+  max_hold_days: 7             # Maximum 7 day hold
+  max_open_positions: 6
+  max_position_usd: 500.0
+  stop_loss_pct: 0.02          # 2% stop loss
+  take_profit_pct: 0.04        # 4% take profit
+  universe:
+    enabled: true
+    max_universe_size: 96
+    min_avg_volume: 300000
+    min_price: 3.0
+    max_price: 2000.0
+    refresh_interval_minutes: 60
+```
+
+---
+
+## Common Questions
+
+**Q: Can I trade stocks only, without crypto?**
+A: Yes. Set `stocks.enabled: true` and do not configure any crypto exchanges. Or ask your operator.
+
+**Q: Why are some stocks not in the universe?**
+A: The scanner filters by volume and price. Stocks with very low daily volume or extreme prices are excluded. Pinned stocks are always included regardless.
+
+**Q: Can I add specific stocks to always scan?**
+A: Yes, via the `stocks.symbols` list in the config. All symbols in that list are treated as pinned.
+
+**Q: Does the bot trade options?**
+A: The config includes options support (`options_enabled`), but this feature is currently disabled by default and still in development. Stock trading is limited to shares for now.
+
+**Q: What happens to stock positions over the weekend?**
+A: They remain open. The stock engine does not trade on weekends, but existing positions are held. Stop losses are checked when the market reopens Monday.
+
+**Q: Why only long positions for stocks?**
+A: The current stock swing strategy focuses on uptrend alignment (price > EMA-20 > EMA-50). Shorting individual stocks involves additional broker requirements and risk, so the strategy is currently long-only.
+
+---
+
+*Nova|Pulse v5.0.0 -- Stocks by day, crypto by night.*

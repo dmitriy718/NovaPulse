@@ -1,217 +1,258 @@
 # AI and Machine Learning Features
 
-**Version:** 4.5.0
-**Last updated:** 2026-02-24
+**Version:** 5.0.0
+**Last updated:** 2026-03-01
 
-NovaPulse uses artificial intelligence to improve the quality of its trading decisions. This guide explains how the AI works in plain language -- what it does, what it does not do, and why it matters for your account.
+Nova|Pulse uses artificial intelligence and machine learning to improve the quality of its trading decisions. This guide explains how the AI works in plain language -- what it does, what it does not do, and why it matters for your account.
 
 ---
 
 ## The Key Principle
 
-**The AI does not make trading decisions. It provides a quality score that helps filter out lower-probability signals.**
+Nova|Pulse's AI does not replace the technical strategies -- it enhances them. Think of the twelve strategies as your core analysts, and the AI as a supervisor that:
 
-Think of it this way: NovaPulse's nine trading strategies are like a team of analysts who identify potential opportunities. The AI acts as a senior reviewer who examines each opportunity and rates it on a scale from low to high quality. If the AI rates a signal poorly, NovaPulse reduces its confidence and may skip the trade. If the AI rates it well, the confidence is boosted and the trade is more likely to be taken.
+- Learns which strategies work best in which conditions
+- Predicts whether a trade setup is likely to succeed
+- Adjusts confidence scores based on historical patterns
+- Tunes strategy parameters based on accumulated data
 
-The strategies find the opportunities. The AI helps separate the good ones from the mediocre ones.
-
----
-
-## The Two AI Models
-
-NovaPulse uses two separate AI models that work together. Each approaches the problem differently, and combining them produces better results than either one alone.
-
-### 1. TFLite Neural Network (The Trained Expert)
-
-This is a pre-trained neural network -- a type of AI model that has been trained on historical trade data to recognize patterns associated with winning and losing trades.
-
-**How it works:**
-
-1. When a trading signal is generated, NovaPulse extracts 12 features from the current market conditions (more on these features below).
-2. These 12 features are fed into the neural network.
-3. The network outputs a probability score between 0 and 1, representing its estimate of how likely this signal is to result in a winning trade.
-4. This score is used to adjust the signal's confidence.
-
-**Plain-language analogy:** Imagine an experienced doctor who has seen thousands of patients. When a new patient walks in, the doctor quickly recognizes patterns -- "I have seen these symptoms before, and 70% of the time they indicate condition X." The neural network does the same thing with market conditions: it has seen thousands of historical trades and recognizes which patterns tend to lead to winners.
-
-**Retraining:** The neural network is periodically retrained (weekly by default) using your actual trade history. This means it adapts to current market conditions over time. If market behavior shifts, the model learns from recent trades and adjusts.
-
-### 2. Continuous Learner (The Adaptive Student)
-
-The Continuous Learner is an online model that improves with every single trade, in real time.
-
-**How it works:**
-
-1. Every time a trade closes, the Continuous Learner receives the trade's features and outcome (win or loss).
-2. It immediately updates its internal model with this new data point.
-3. On the next signal, it provides its own probability score based on its accumulated learning.
-
-**Plain-language analogy:** If the neural network is the experienced doctor, the Continuous Learner is a medical resident who learns from each new case in real time. The resident may not have as much historical experience, but they are learning rapidly and are especially attuned to what is happening right now.
-
-**Key properties:**
-
-- Starts with no knowledge and builds up over time (needs at least 50 trade examples before it starts making predictions).
-- Persists across restarts -- its learning is saved to disk.
-- Fail-safe: if anything goes wrong with the Continuous Learner, NovaPulse silently falls back to the neural network or pure strategy-based confidence.
+The AI never overrides a strategy signal. It adjusts confidence levels and can tip a marginal setup below the threshold, or boost a strong setup higher.
 
 ---
 
-## How the Two Models Combine
+## TFLite Predictor
 
-When both models are available and have enough data, NovaPulse blends their scores to produce a final AI confidence:
+### What It Does
 
-```
-Strategy Confidence:    Based on the strength of the signals from the nine strategies
-Neural Network Score:   Based on 12 features, trained on historical trades
-Continuous Learner:     Based on real-time learning from recent trades
-                        |
-                        v
-                 Final Confidence
-```
+The TFLite (TensorFlow Lite) predictor is a lightweight neural network that evaluates trade setups:
 
-The blending works as follows:
+- **Input:** A vector of market features (RSI, ATR percentage, Bollinger Band position, ADX, volume ratio, OBI, momentum score, trend strength, spread percentage)
+- **Output:** A probability score indicating how likely the trade is to be profitable
+- **Impact:** The prediction influences the final confidence score for the trade
 
-- **For multi-strategy signals** (strong confluence, 2+ strategies agree): The final confidence is an equal blend of the strategy confidence and the AI confidence. However, the AI can never fully veto a strong multi-strategy consensus -- the blended result is floored at 85% of the original strategy confidence. This prevents a temporarily pessimistic AI from overriding strong technical signals.
+### How It Trains
 
-- **For single-strategy signals** (only one strategy firing): The strategy confidence gets 70% weight and the AI gets 30% weight. Solo signals are inherently less reliable, so the AI has a smaller role -- these trades are primarily used as learning opportunities for the AI.
+The model trains on your bot's own trade history:
+1. Every completed trade has its entry-time features recorded in the database
+2. The outcome (profitable or not) is also recorded
+3. Periodically (default weekly), the model retrains on this accumulating dataset
+4. Minimum 500 trades are needed before training begins
 
-This means the AI refines existing signals rather than generating its own. It acts as a quality filter, not a signal generator.
+### Cold Start
+
+When you first start, the model has no data. During this period:
+- The model gracefully falls back to a neutral prediction
+- Strategies and confluence still work normally without the AI boost
+- As trades accumulate, the model starts learning
 
 ---
 
-## The 12 Features the AI Analyzes
+## Continuous Learner
 
-Every time a signal is generated, NovaPulse extracts these 12 features from the current market state:
+### What It Does
 
-| # | Feature | What It Measures |
-|---|---------|-----------------|
-| 1 | **RSI** | Relative Strength Index -- how overbought or oversold the market is (0-100) |
-| 2 | **EMA Ratio** | Ratio of the short-term average to the long-term average -- measures trend strength |
-| 3 | **Bollinger Band Position** | Where the current price sits relative to its Bollinger Bands -- near the top, middle, or bottom |
-| 4 | **ADX** | Average Directional Index -- how strong the current trend is, regardless of direction |
-| 5 | **Volume Ratio** | Current volume compared to the recent average -- detecting unusual activity |
-| 6 | **Order Book Imbalance** | The balance between buy and sell orders on the exchange -- real-time supply/demand pressure |
-| 7 | **ATR%** | Average True Range as a percentage of price -- current volatility level |
-| 8 | **Momentum Score** | A composite measure of recent price momentum across multiple timeframes |
-| 9 | **Trend Strength** | How consistent and strong the directional trend is |
-| 10 | **Spread%** | The bid-ask spread as a percentage of price -- a measure of liquidity and trading cost |
-| 11 | **Trend Regime Encoding** | A numeric code representing the current market regime (trending vs. ranging) |
-| 12 | **Volatility Regime Encoding** | A numeric code representing the current volatility environment (high vs. low) |
+In addition to the periodic retraining, a continuous learner uses online SGD (Stochastic Gradient Descent) to make small, ongoing adjustments to the model after each trade completes.
 
-**Why these 12?** Each feature captures a different dimension of the market. Together, they give the AI a comprehensive snapshot: Is the market trending or ranging? Is volatility high or low? Is there unusual volume or order flow? Is the price near an extreme or in the middle of its range? The AI uses all of these simultaneously to form its assessment.
+**Why this matters:** Markets change. A model trained on last month's data may not perfectly fit this month's conditions. The continuous learner provides incremental adaptation between major retraining cycles.
+
+### How It Works
+
+1. A trade closes
+2. The continuous learner compares the prediction to the actual outcome
+3. It makes a small weight adjustment (much smaller than full retraining)
+4. The model gradually adapts to shifting market conditions
+
+---
+
+## Session Analyzer
+
+### What It Does
+
+The session analyzer tracks your bot's win rate and profitability by hour of the day (UTC). It then applies confidence multipliers:
+
+- **High-performing hours** get a small confidence boost (up to 15%)
+- **Low-performing hours** get a small confidence penalty (down to 85% of baseline)
+- **Insufficient data hours** get no adjustment
+
+### Why This Matters
+
+Different hours of the day have different market characteristics:
+- Asian session (UTC 0-8) has different liquidity than US session (UTC 14-20)
+- Some hours consistently produce better setups than others
+- The session analyzer learns this from your specific trading history
+
+### Requirements
+
+The analyzer needs at least 5 trades per hour before applying adjustments. Until then, all hours are treated equally.
 
 ---
 
 ## Auto Strategy Tuner
 
-Beyond the two AI models, NovaPulse includes an **Auto Strategy Tuner** that adjusts strategy weights based on real performance data.
+### What It Does
 
-**How it works:**
+The auto-tuner runs weekly (default) and evaluates each strategy's performance:
 
-1. Every week, the Tuner reviews the last 50 trades for each of the nine strategies.
-2. For each strategy, it calculates performance metrics: win rate, Sharpe ratio (a measure of risk-adjusted return), and profit factor.
-3. Strategies that have been performing well get their weight increased.
-4. Strategies that have been performing poorly get their weight decreased.
-5. If a strategy has been consistently losing (negative Sharpe ratio below -0.3 over 30+ trades), it may be temporarily disabled.
+1. Calculates Sharpe ratio, win rate, and profit factor for each strategy over a rolling window
+2. Strategies with Sharpe ratio below -0.3 (consistently losing) can be auto-disabled
+3. Strategy weights can be rebalanced within bounds (0.05 to 0.50)
+4. A minimum of 15 trades per strategy is required before changes
 
-**Guardrails:**
-- No strategy's weight can go below 0.05 (5%) or above 0.50 (50%).
-- Disabled strategies are re-enabled after a cooldown period and given another chance.
-- Weight changes are gradual -- no sudden, dramatic shifts.
+### What This Means for You
 
-**Plain-language analogy:** Imagine a coach managing a nine-player team. Each week, the coach reviews game film and adjusts the lineup. Players who have been scoring get more playing time; those who have been struggling get fewer minutes but are not cut from the team. The Tuner is this coach, continuously optimizing the lineup based on recent results.
-
----
-
-## Session-Aware Trading
-
-NovaPulse does not treat all hours of the day equally. The **Session Analyzer** tracks historical win rates by hour and adjusts confidence accordingly.
-
-**How it works:**
-
-1. Over time, NovaPulse builds up a picture of which hours of the day have historically produced better results.
-2. During hours with strong historical performance, confidence gets a slight boost (up to 1.15x).
-3. During hours with historically poor performance, confidence gets a slight penalty (down to 0.70x).
-4. This data is refreshed hourly from your actual trade history.
-
-**Why this matters:** Crypto markets behave differently at different times of day. During US and European business hours, there tends to be more volume and clearer price action. During the quietest hours (late night UTC), signals can be less reliable. The Session Analyzer nudges NovaPulse to be more selective during historically weak hours and more confident during historically strong ones.
-
-**The adjustment is subtle.** This is not a major gate -- it is a gentle multiplier that provides a small edge over time.
+- Strategies that stop working in current conditions get sidelined
+- Working strategies get more influence
+- The bot adapts its strategy mix over time based on real performance
+- Disabled strategies are re-evaluated periodically
 
 ---
 
-## Cross-Exchange ML Training
+## Ensemble ML Model (v5.0, Optional)
 
-If you are running multiple exchanges (see [Multi-Exchange Trading](Multi-Exchange-Trading.md)), NovaPulse's AI can learn from trades across all of them.
+### What It Does
 
-**How it works:**
+When enabled, the ensemble model combines two different ML approaches:
 
-1. The primary (leader) engine collects training data from its own database.
-2. It also reads labeled trade data from the other exchange databases (Coinbase, Stocks).
-3. When the neural network retrains, it uses this aggregated dataset.
-4. Patterns that are consistent across exchanges are reinforced; exchange-specific noise is diluted.
+1. **TFLite neural network** -- the existing predictor (deep learning approach)
+2. **LightGBM gradient boosting** -- a tree-based model that excels at tabular data
 
-**Why this helps:** More data means better learning. A signal pattern that leads to winning trades on both Kraken and Coinbase is more likely to be genuinely predictive than one that only works on a single exchange. Cross-exchange training gives the AI a broader, more robust view of what works.
+The two models make independent predictions, which are then combined using a weighted average (default: 40% LightGBM, 60% TFLite).
 
----
+### Why Two Models?
 
-## ES Enrichment (External Signals)
+Different model architectures have different strengths:
+- Neural networks capture complex nonlinear relationships
+- Gradient boosting is excellent at learning from structured features
+- Combining them often produces more robust predictions than either alone
 
-NovaPulse can optionally incorporate external data sources to give the AI additional context:
+### Requirements
 
-- **Fear and Greed Index:** A 0-100 score measuring overall market sentiment. Extreme fear often precedes reversals upward; extreme greed often precedes reversals downward.
-- **Crypto Volume Trends:** 24-hour volume changes from CoinGecko, indicating whether market activity is increasing or decreasing.
-- **Social Sentiment:** News sentiment from CryptoPanic, capturing whether recent headlines are positive, negative, or neutral.
-- **On-Chain Data:** Blockchain-level activity metrics that can signal large-scale movements.
+- LightGBM Python package must be installed (optional dependency)
+- Minimum 100 trades for training
+- Retrains every 24 hours (default)
 
-These external signals are stored and associated with each trade for training. Over time, the AI learns whether these broader market conditions correlate with better or worse trade outcomes.
+### Feature Importance
 
-**Important:** These enrichment features are supplementary. They enhance the AI's training data but are not required for NovaPulse to function. If any external data source is unavailable, the AI continues working normally with its core 12 features.
-
----
-
-## What the AI Does NOT Do
-
-Transparency is important, so here is what the AI is not:
-
-- **It is not a crystal ball.** The AI provides probability estimates, not certainties. A high AI confidence score means the conditions are historically favorable, not that the trade is guaranteed to win.
-- **It does not generate signals on its own.** The nine trading strategies generate signals; the AI only scores them.
-- **It is not infallible.** The AI can be wrong, especially in market conditions that differ significantly from its training data. This is why NovaPulse uses it as one input among many, not as the sole decision-maker.
-- **It does not override risk management.** Even if the AI gives a perfect score, all risk checks (position sizing, daily loss limits, max exposure) still apply. The AI cannot bypass safety systems.
+LightGBM provides built-in feature importance, showing which market features (RSI, volume ratio, ADX, etc.) are most predictive for your specific trading. This is visible in the Advanced Features dashboard panel.
 
 ---
 
-## How the AI Improves Over Time
+## Bayesian Hyperparameter Optimizer (v5.0, Optional)
 
-NovaPulse's AI is not static. It improves through several mechanisms:
+### What It Does
 
-1. **Weekly retraining:** The neural network retrains on the latest trade data, adapting to current market conditions.
-2. **Continuous learning:** The Continuous Learner updates with every single trade in real time.
-3. **Auto-tuning:** The Strategy Tuner adjusts weights weekly based on performance.
-4. **Session analysis:** The Session Analyzer continuously refines its hourly confidence adjustments.
-5. **Cross-exchange aggregation:** As you trade on more exchanges, the training dataset grows and diversifies.
+The optimizer uses Optuna (a Bayesian optimization framework) to automatically search for better parameter values:
 
-Think of it as a system that gets a little smarter with every trade, every day, every week. The improvements are gradual but compounding.
+- **What it tunes:** Confluence threshold, minimum confidence, trailing stop activation, risk parameters, and more
+- **How it searches:** Tree-structured Parzen Estimator (TPE) -- an efficient algorithm that learns which parameter regions produce better results
+- **What it optimizes for:** Configurable metric -- Sharpe ratio (default), profit factor, or Calmar ratio
+
+### How It Works
+
+1. The optimizer runs periodically (default every 48 hours)
+2. It evaluates different parameter combinations against your historical trade data
+3. Each trial simulates how the system would have performed with different settings
+4. After 50 trials (default), it reports the best parameters found
+5. The operator can review and apply the suggestions
+
+### Important Note
+
+The optimizer **suggests** parameter changes -- it does not automatically apply them. This is intentional. Parameter changes should be reviewed by a human before deployment.
+
+### Requirements
+
+- Optuna Python package must be installed (optional dependency)
+- Minimum 200 trades for meaningful optimization
+- The optimization result is visible on the dashboard and via the API
 
 ---
 
-## Frequently Asked Questions
+## Lead-Lag Intelligence (v5.0, Optional)
 
-**Can I turn off the AI?**
-The AI is an integral part of NovaPulse and cannot be fully disabled through the subscriber dashboard. However, it is designed to enhance signals, not override them. If you want to understand how trades would look without AI scoring, paper mode lets you observe the system's behavior without financial risk.
+### What It Does
 
-**How long does the AI need to become effective?**
-The neural network is effective from day one if pre-trained on historical data. The Continuous Learner needs at least 50 completed trades to start making predictions. Depending on market conditions and trading frequency, this typically takes one to three weeks.
+Monitors "leader" pairs (BTC/USD, ETH/USD) for significant moves, then adjusts confidence on "follower" altcoins:
 
-**Does the AI work the same for stocks and crypto?**
-The core 12 features are applicable to both asset classes, but the models are trained on exchange-specific data. The stock engine's signals use a different structure (EMA/RSI/momentum rather than nine-strategy confluence), so the AI's role in stock trading is less central. Over time, cross-exchange training allows the AI to find patterns that span both asset classes.
+- If BTC moves up strongly and your signal is to buy an altcoin, confidence gets a small boost (up to +0.15)
+- If BTC moves down strongly and your signal is to buy an altcoin, confidence gets a small penalty (up to -0.10)
 
-**What happens if the AI model file is corrupted or missing?**
-NovaPulse includes fail-safe mechanisms. If the neural network cannot load, the system falls back to strategy-based confidence only. If the Continuous Learner encounters an error, it returns no score and the neural network handles the assessment alone. Trading never stops because of an AI issue.
+### Why This Matters
+
+In crypto markets, BTC and ETH often lead altcoin movements. When Bitcoin rallies, altcoins typically follow. The lead-lag tracker uses this correlation to validate or caution against altcoin trades.
+
+### How It Decides
+
+- Tracks leader pair prices over a rolling window (default 5 minutes)
+- Calculates the magnitude of the move relative to ATR
+- Computes correlation between the leader and follower pair
+- Only applies adjustment when correlation exceeds the minimum threshold (0.5)
 
 ---
 
-*For details on the trading strategies the AI scores, see [Trading Strategies](Trading-Strategies.md).*
-*For risk protections, see [Risk and Safety](Risk-Safety.md).*
-*For multi-exchange features, see [Multi-Exchange Trading](Multi-Exchange-Trading.md).*
-*Questions? See our [FAQ](FAQ.md) or [contact support](Contact-Support.md).*
+## Regime Transition Predictor (v5.0, Optional)
+
+### What It Does
+
+Anticipates when the market is about to shift from range-bound to trending (or vice versa) by analyzing:
+
+1. **Squeeze duration** -- how long Bollinger Bands have been inside Keltner Channels
+2. **ADX slope** -- whether trend strength is increasing or decreasing
+3. **Volume trend** -- whether volume is expanding or contracting
+4. **Choppiness analysis** -- whether price action is becoming more or less organized
+
+### Output States
+
+- **stable_range** -- market staying range-bound
+- **stable_trend** -- market in an established trend
+- **emerging_trend** -- range about to break into trend (boosts trend strategies)
+- **emerging_range** -- trend about to collapse into range (boosts mean reversion strategies)
+
+### Why This Matters
+
+By the time a trend is obvious, much of the move is over. The regime predictor tries to detect the transition early, giving trend-following strategies a head start when a new trend is forming.
+
+---
+
+## On-Chain Data Integration (v5.0, Optional)
+
+### What It Does
+
+Fetches blockchain-level sentiment data (exchange flows, stablecoin supply changes, large transactions) and applies a small confidence adjustment:
+
+- Aligned on-chain sentiment (e.g., outflows from exchanges = bullish, matching a long signal) adds up to +0.08 confidence
+- Opposing sentiment applies up to -0.08 penalty
+
+### Current Status
+
+The on-chain module is architecturally complete but currently uses a stub data source. Real API integration (Glassnode, DeFiLlama, etc.) will be connected when API keys are available.
+
+---
+
+## What the AI Cannot Do
+
+To set expectations clearly:
+
+- **The AI cannot predict the future.** It identifies patterns from historical data, but past patterns do not guarantee future results.
+- **The AI does not replace risk management.** Even a high-confidence prediction can lose money. Stop losses and position sizing protect you regardless of the AI's opinion.
+- **The AI needs data to learn.** In the first weeks, the model is essentially neutral. Give it time to accumulate enough trades (ideally 200+) before evaluating its contribution.
+- **The AI can be wrong.** It is one input among many. The confluence system, risk checks, and circuit breakers provide additional layers of judgment.
+
+---
+
+## Summary of AI Components
+
+| Component | What It Does | When Active | Data Needed |
+|-----------|-------------|-------------|-------------|
+| TFLite Predictor | Neural network trade scoring | After 500 trades | Automatic |
+| Continuous Learner | Ongoing model adaptation | Always | Automatic |
+| Session Analyzer | Per-hour confidence adjustment | After 5 trades/hour | Automatic |
+| Auto Tuner | Weekly strategy weight rebalancing | Weekly | 15 trades/strategy |
+| Ensemble ML | Combined LightGBM + TFLite | When enabled, after 100 trades | Requires lightgbm package |
+| Bayesian Optimizer | Parameter tuning suggestions | When enabled, after 200 trades | Requires optuna package |
+| Lead-Lag Intelligence | Cross-pair confidence adjustment | When enabled | Real-time |
+| Regime Predictor | Market state transition detection | When enabled | Real-time |
+| On-Chain Data | Blockchain sentiment adjustment | When enabled + API available | External API |
+
+---
+
+*Nova|Pulse v5.0.0 -- Intelligence that learns from every trade.*

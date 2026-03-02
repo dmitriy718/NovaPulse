@@ -90,8 +90,8 @@ class TestApplyLiquidityAdjustment:
         # adjusted = min(500, 200 * 0.10) = min(500, 20) = 20
         assert adjusted == pytest.approx(20.0, abs=0.01)
 
-    def test_zero_depth_minimum_size(self):
-        """Zero depth returns minimum position (not zero)."""
+    def test_zero_depth_unchanged_size(self):
+        """Zero depth returns position size unchanged (no data to adjust from)."""
         rm = RiskManager(initial_bankroll=10000)
 
         adjusted = rm.apply_liquidity_adjustment(
@@ -103,9 +103,8 @@ class TestApplyLiquidityAdjustment:
             min_depth_ratio=3.0,
         )
 
-        # Zero depth → max(10.0, 500 * 0.1) = max(10.0, 50.0) = 50.0
-        assert adjusted >= 10.0
-        assert adjusted == pytest.approx(50.0, abs=0.01)
+        # Zero depth → return position_size_usd unchanged
+        assert adjusted == pytest.approx(500.0, abs=0.01)
 
     def test_max_impact_cap(self):
         """Position never exceeds max_impact_pct of depth."""

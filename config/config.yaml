@@ -4,7 +4,7 @@
 
 app:
   name: "AI Crypto Trading Bot"
-  version: "4.5.0"
+  version: "5.0.0"
   mode: "paper"  # paper | live
   log_level: "INFO"
   db_path: "data/trading.db"
@@ -38,34 +38,34 @@ trading:
     - "DOT/USD"
     - "AVAX/USD"
     - "LINK/USD"
-  scan_interval_seconds: 20   # Faster scan cadence to increase entry opportunities
+  scan_interval_seconds: 15   # Faster scan cadence — tighter for 48h challenge
   position_check_interval_seconds: 2
   hft_scan_interval_seconds: 1
   candle_poll_seconds: 60     # REST candle poll interval (used for Coinbase)
   warmup_bars: 900     # 15 hours of 1-min data — ensures 60 fifteen-min candles for MTF
   warmup_timeframe: "1m"
   timeframes: [5, 15]   # Multi-timeframe: dropped 1-min (too noisy), 5m+15m require 2/2 agreement
-  max_concurrent_positions: 8
-  cooldown_seconds: 30
+  max_concurrent_positions: 10
+  cooldown_seconds: 20
   max_spread_pct: 0.0030
   use_closed_candles_only: true
   outlier_threshold: 0.15         # reject bars with >15% close-to-close deviation (0 disables)
   strategy_cooldowns_seconds:
-    keltner: 90
-    mean_reversion: 90
-    ichimoku: 90
-    order_flow: 90
-    trend: 90
-    stochastic_divergence: 90
-    volatility_squeeze: 90
-    supertrend: 90
-    reversal: 90
-    vwap_momentum_alpha: 90
-    market_structure: 90
-    funding_rate: 90
+    keltner: 60
+    mean_reversion: 60
+    ichimoku: 60
+    order_flow: 60
+    trend: 60
+    stochastic_divergence: 60
+    volatility_squeeze: 60
+    supertrend: 60
+    reversal: 60
+    vwap_momentum_alpha: 60
+    market_structure: 60
+    funding_rate: 60
   event_price_move_pct: 0.003
   single_strategy_mode: null    # or "keltner", "trend", "mean_reversion", etc. for testing
-  quiet_hours_utc: [2, 3, 4]  # Narrowed from 0-5 — only skip deepest liquidity desert (UTC)
+  quiet_hours_utc: [3]  # Only UTC 3 — deepest dead hour. Opens 2h more trading for challenge.
   max_trades_per_hour: 20
   canary_mode: false
   canary_pairs: ["BTC/USD", "ETH/USD"]  # Optional explicit subset; empty = first N from trading.pairs
@@ -201,23 +201,23 @@ strategies:
     weight: 0.06
 
 ai:
-  confluence_threshold: 3  # 3 strategies agreeing = tradable (prevents noisy solo/duo setups going red)
-  high_vol_confluence_threshold: 3  # Match base threshold — high-vol needs equal conviction
-  min_confidence: 0.55     # Restored — 0.50 let too many marginal signals through
-  min_risk_reward_ratio: 1.0  # Lowered from 1.2 — crypto setups often have 1.0-1.3 R:R
+  confluence_threshold: 2  # 48h challenge: 2 strategies agreeing (was 3). OBI+1 strat = 2 = tradeable.
+  high_vol_confluence_threshold: 2  # Match base — keep uniform for challenge
+  min_confidence: 0.50     # 48h challenge: lowered from 0.55. Aligns with executor floor.
+  min_risk_reward_ratio: 1.0  # Keep at 1.0 — balanced
   tflite_model_path: "models/trade_predictor.tflite"
   order_book_depth: 25
   obi_threshold: 0.15  # Order Book Imbalance threshold
   book_score_threshold: 0.2
   book_score_max_age_seconds: 5
-  multi_timeframe_min_agreement: 2    # Need 2 of 3 timeframes to agree
+  multi_timeframe_min_agreement: 1    # 48h challenge: primary TF (15m) drives direction alone. 5m can boost but won't veto.
   primary_timeframe: 15               # 15-min as primary — less noise, better signal quality
   obi_counts_as_confluence: true  # OBI as confluence vote — adds 1 extra vote when book agrees (OBI+1 strat = 2 = tradable)
   obi_weight: 0.4
   allow_keltner_solo: true
-  allow_any_solo: false   # Reverted — solo trades were too noisy, cc=1 signals went red across the board
-  keltner_solo_min_confidence: 0.60
-  solo_min_confidence: 0.67
+  allow_any_solo: true    # 48h challenge: allow solo trades with strict confidence gate
+  keltner_solo_min_confidence: 0.58
+  solo_min_confidence: 0.68  # Solo non-Keltner needs 0.68+ confidence
   whale_threshold_usd: 50000
   strategy_guardrails_enabled: true
   strategy_guardrails_min_trades: 20
@@ -229,7 +229,7 @@ ai:
     enabled: true
     min_trades_per_hour: 5
     max_boost: 1.15
-    max_penalty: 0.70
+    max_penalty: 0.85  # 48h challenge: less aggressive penalty so sessions don't kill signals
   lead_lag:
     enabled: false
     leader_pairs: ["BTC/USD", "ETH/USD"]
@@ -338,7 +338,7 @@ risk:
   kelly_fraction: 0.25            # Quarter-Kelly for safety
   max_kelly_size: 0.10            # Never more than 10% of bankroll
   risk_of_ruin_threshold: 0.01    # 1% acceptable risk of ruin
-  global_cooldown_seconds_on_loss: 60  # Reduce post-loss freeze to keep trade cadence healthy
+  global_cooldown_seconds_on_loss: 30  # 48h challenge: 30s post-loss cooldown (was 60)
   smart_exit:
     enabled: true    # Enabled per deep_4.md recommendation
     tiers:
@@ -365,16 +365,49 @@ webhooks:
   max_timestamp_skew_seconds: 300
 
 stocks:
-  enabled: false
-  symbols: ["AAPL", "MSFT", "NVDA", "TSLA"]
+  enabled: true
+  symbols:
+    # Mega-cap tech
+    - "AAPL"
+    - "MSFT"
+    - "NVDA"
+    - "TSLA"
+    - "GOOG"
+    - "AMZN"
+    - "META"
+    # Semiconductor
+    - "AMD"
+    - "AVGO"
+    - "INTC"
+    # Finance
+    - "JPM"
+    - "BAC"
+    - "GS"
+    # Consumer / retail
+    - "NFLX"
+    - "DIS"
+    - "NKE"
+    # Crypto-adjacent
+    - "MSTR"
+    - "COIN"
+    - "MARA"
+    - "RIOT"
+    - "CIFR"
+    # High-beta / volatile
+    - "PLTR"
+    - "SOFI"
+    - "RIVN"
+    - "LCID"
+    - "NIO"
+    - "SNAP"
   options_enabled: false
   option_symbols: []   # Example: ["O:AAPL260116C00250000"]
   option_contract_multiplier: 100
-  scan_interval_seconds: 900
+  scan_interval_seconds: 120   # Scan every 2 min during market hours (was 15 min)
   lookback_bars: 120
   min_hold_days: 1
   max_hold_days: 7
-  max_open_positions: 4
+  max_open_positions: 6       # Allow more stock positions (was 4)
   max_position_usd: 500.0
   stop_loss_pct: 0.02
   take_profit_pct: 0.04
@@ -387,14 +420,14 @@ stocks:
   alpaca_api_secret: "" # or set ALPACA_API_SECRET env
   alpaca_base_url: "https://paper-api.alpaca.markets"
   universe:
-    enabled: false            # Set true to enable dynamic universe scanning
-    pinned_symbols: []        # Always include these (empty = use stocks.symbols)
-    min_avg_volume: 500000    # Minimum average daily volume
-    min_price: 5.0            # Minimum last price
-    max_price: 1000.0         # Maximum last price
-    max_universe_size: 100    # Cap total symbols (pinned + dynamic)
-    include_movers: true      # Overlay top gainers into universe
-    movers_count: 10          # How many movers to splice in
+    enabled: true             # Dynamic universe scanning ON
+    pinned_symbols: []        # Empty = use stocks.symbols above (28 pinned)
+    min_avg_volume: 300000    # Lowered from 500k — catch more mid-caps
+    min_price: 3.0            # Lowered from 5 — include volatile small-caps
+    max_price: 2000.0         # Raised from 1000 — include BRK.B, high-priced tech
+    max_universe_size: 96     # ~96 total symbols scanned daily
+    include_movers: true      # Overlay top gainers AND losers
+    movers_count: 20          # 10 gainers + 10 losers (was 10 gainers only)
     refresh_interval_minutes: 60   # Re-scan universe every 60 min during market hours
     market_hours_only: true        # Only refresh during US market hours (+ pre_market_minutes)
     pre_market_minutes: 30         # Start refreshing 30 min before open (9:00 AM ET)
@@ -512,7 +545,7 @@ monitoring:
   auto_pause_on_ws_disconnect: true
   ws_disconnect_pause_after_seconds: 300
   auto_pause_on_consecutive_losses: true
-  consecutive_losses_pause_threshold: 4
+  consecutive_losses_pause_threshold: 5  # 48h challenge: allow 5 consecutive losses before auto-pause (was 4)
   auto_pause_on_drawdown: true
   drawdown_pause_pct: 8.0
   emergency_close_on_auto_pause: false

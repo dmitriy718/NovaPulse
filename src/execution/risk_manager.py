@@ -146,7 +146,7 @@ class RiskManager:
         self._peak_bankroll: float = initial_bankroll
         self._max_drawdown: float = 0.0
         self._trade_history: Deque[Dict[str, float]] = deque(maxlen=5000)
-        self._daily_reset_date: str = ""
+        self._daily_reset_date: str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         self._global_cooldown_until: float = 0.0
         self._consecutive_wins: int = 0
         self._consecutive_losses: int = 0
@@ -619,8 +619,11 @@ class RiskManager:
         relevant_depth = ask_depth_usd if side == "buy" else bid_depth_usd
 
         if relevant_depth <= 0:
-            # Zero depth: return minimum viable position
-            return max(10.0, position_size_usd * 0.1)
+            # Zero depth means no book data — return size unchanged.
+            # The caller already gates on depth > 0; arbitrary 10% slashing
+            # with no data would silently reduce every trade when book data
+            # is unavailable (known Kraken WS issue).
+            return position_size_usd
 
         ratio = relevant_depth / position_size_usd if position_size_usd > 0 else float("inf")
 

@@ -68,9 +68,10 @@ class OnChainDataClient:
             except Exception as e:
                 logger.warning("On-chain fetch failed, using cached data", error=repr(e))
                 sentiments = {}
+            # Always update timestamp to prevent retry storms on empty/failed fetches
+            self._cache_ts = time.time()
             if sentiments:
                 self._cache = sentiments
-                self._cache_ts = time.time()
             return dict(self._cache)
 
     async def _fetch_raw(self) -> Dict[str, float]:
