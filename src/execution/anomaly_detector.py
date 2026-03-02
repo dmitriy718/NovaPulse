@@ -151,6 +151,17 @@ class AnomalyDetector:
             except Exception:
                 pass
 
+            # Volume check
+            try:
+                volume = getattr(market_data, "get_volume", lambda _: 0.0)(pair) if market_data else 0.0
+                if volume > 0:
+                    self.update_volume(pair, volume)
+                    result = self.check_volume_anomaly(pair, volume)
+                    if result:
+                        anomalies.append(result)
+            except Exception:
+                pass
+
         if anomalies:
             now = time.time()
             if not self.is_paused():

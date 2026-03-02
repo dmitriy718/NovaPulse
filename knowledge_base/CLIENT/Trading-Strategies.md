@@ -1,260 +1,277 @@
 # Trading Strategies
 
-**Last updated:** 2026-02-24 | **Version:** 4.5.0
+**Last updated:** 2026-03-01 | **Version:** 5.0.0
 
-NovaPulse uses twelve independent trading strategies, each looking at the market from a different angle. No single strategy makes decisions alone -- instead, the bot requires multiple strategies to agree before entering a trade. This section explains each strategy in plain language, how confluence works, and how the AI adapts over time.
+Nova|Pulse uses twelve independent trading strategies, each looking at the market from a different angle. No single strategy makes decisions alone -- instead, the bot requires multiple strategies to agree before entering a trade. This approach, called **confluence**, dramatically reduces false signals and improves trade quality.
+
+This guide explains each strategy in plain language, how confluence works, and how the system adapts over time.
+
+---
+
+## The Core Idea: Confluence
+
+Imagine twelve analysts sitting around a table, each studying the same market but using different methods. One looks at price channels. Another watches for oversold conditions. A third tracks volume patterns. A fourth studies order flow.
+
+Nova|Pulse only opens a trade when at least two (or more, depending on your settings) of these analysts independently agree on the same direction at the same time. This is confluence -- the alignment of multiple independent viewpoints.
+
+**Why this works:**
+- Any single indicator can produce false signals
+- When multiple unrelated methods agree, the probability of a genuine move is much higher
+- The bot avoids impulsive entries that rely on one data point
 
 ---
 
 ## The Twelve Strategies
 
-### 1. Keltner Channel (Weight: 0.25 -- Highest)
+### 1. Keltner Channel (Weight: 0.25)
 
-**What it looks for:** Price bouncing off a channel that is drawn around the average price. The channel width is based on recent volatility. When price touches the lower channel and momentum indicators confirm, it is a buy signal. When price touches the upper channel with confirmation, it is a sell signal.
+**What it watches:** Price bouncing off the walls of a dynamic channel built around the average price (20-period EMA with ATR-based bands).
 
-**Plain-language analogy:** Imagine a ball bouncing between two walls. The Keltner Channel strategy watches for the ball (price) to hit one of the walls and bounce back. It also checks that the bounce has real momentum behind it (confirmed by MACD and RSI indicators) before calling it a trade.
+**When it signals:** When price touches or crosses the lower Keltner band (potential buy) or upper band (potential sell), confirmed by MACD alignment and RSI not being overbought/oversold in the wrong direction.
 
-**When it works best:** Ranging and gently trending markets where price oscillates within a channel. This has been NovaPulse's top-performing strategy historically.
+**Why it works:** Keltner Channels adapt to volatility. When price hits the channel edge and other indicators confirm, it often marks a reversal point.
+
+**Best conditions:** Works well in oscillating and mildly trending markets. This is Nova|Pulse's highest-weighted strategy based on historical performance.
 
 ---
 
 ### 2. Mean Reversion (Weight: 0.20)
 
-**What it looks for:** Extreme conditions where price has stretched far from its average. When price drops below the lower Bollinger Band and RSI confirms oversold conditions, the strategy expects price to "snap back" toward the average.
+**What it watches:** Price stretching far from the mean (average), measured using Bollinger Bands.
 
-**Plain-language analogy:** Think of a rubber band. The further you stretch it, the harder it snaps back. Mean Reversion looks for prices that have been stretched too far in one direction and bets on the snap-back.
+**When it signals:** When price moves beyond 2.5 standard deviations from the 50-period average, combined with RSI confirming oversold (below 25) or overbought (above 75) conditions.
 
-**When it works best:** Sideways/ranging markets. In strong trends, price can stay "stretched" for a long time, so this strategy gets less weight during trending conditions.
+**Why it works:** Markets tend to revert to their average. Extreme deviations are often temporary, and a return toward the mean provides a trading opportunity.
+
+**Best conditions:** Ranging markets where price oscillates between levels. Less effective in strong trends where price can stay extended.
 
 ---
 
 ### 3. Volatility Squeeze (Weight: 0.18)
 
-**What it looks for:** Periods of unusually low volatility -- when the market is "coiling up" like a compressed spring. It detects when Bollinger Bands contract inside Keltner Channels (called a "squeeze") and then waits for the breakout direction.
+**What it watches:** When Bollinger Bands tighten inside Keltner Channels (a "squeeze"), indicating compressed volatility that often precedes a big move.
 
-**Plain-language analogy:** Imagine shaking a can of soda. The pressure builds while the can is sealed (the squeeze), and when you pop the top, the energy releases in a burst. This strategy identifies the pressure build-up and positions for the explosive move.
+**When it signals:** After detecting a squeeze lasting at least 5 bars, it watches for the breakout direction using momentum. When the squeeze releases and momentum confirms, it signals.
 
-**When it works best:** Before major breakouts. It performs especially well in high-volatility environments after a brief consolidation period. Volatility Squeeze carries one of the highest weights because it has the strongest theoretical basis -- periods of compressed volatility are statistically followed by expansion.
+**Why it works:** Volatility tends to cycle between compression and expansion. A prolonged squeeze builds pressure, and the breakout is often directional and strong.
+
+**Best conditions:** Excellent in markets transitioning from calm to active. This is the TTM Squeeze concept, widely used by professional traders.
 
 ---
 
 ### 4. VWAP Momentum Alpha (Weight: 0.15)
 
-**What it looks for:** Price pulling back to the Volume-Weighted Average Price (VWAP) in a trending market. VWAP is the average price weighted by volume -- the price where most trading happened. Institutional traders use VWAP as a reference price.
+**What it watches:** Price pulling back to the Volume-Weighted Average Price (VWAP) during a trending market, with volume and slope confirming the trend.
 
-**Plain-language analogy:** Think of VWAP as the "center of gravity" for price. Like a ball on a string, price tends to snap back to VWAP before continuing. This strategy buys when price dips to VWAP in an uptrend and sells when price rises to VWAP in a downtrend.
+**When it signals:** When price is in an established trend (VWAP slope positive for longs, negative for shorts), pulls back to within a configurable distance of VWAP, and volume confirms interest.
 
-**When it works best:** Trending markets with strong institutional participation. Provides lower-slippage entries near high-liquidity zones.
+**Why it works:** VWAP is a key reference price used by institutional traders. Pullbacks to VWAP in a trending market often represent entry opportunities before the trend resumes.
+
+**Best conditions:** Trending markets with clear directional bias. Less useful in choppy, directionless markets.
 
 ---
 
 ### 5. Order Flow (Weight: 0.12)
 
-**What it looks for:** This strategy reads the actual order book -- the list of real buy and sell orders waiting to be filled on the exchange. It detects imbalances: if there are significantly more buy orders than sell orders, buying pressure is building (and vice versa).
+**What it watches:** The order book -- who is buying and who is selling, and how aggressively.
 
-**Plain-language analogy:** Imagine you are at an auction. If you can see that many people have their hands raised to bid but few are selling, you know the price is likely going up. Order Flow gives NovaPulse this "insider view" of supply and demand in real time.
+**When it signals:** When order book imbalance shows strong directional pressure (bid side much larger than ask, or vice versa), confirmed by tight spread (showing real interest) and a pattern of higher lows (for longs) or lower highs (for shorts).
 
-**When it works best:** When there is strong directional pressure from real market participants. This strategy is unique because it looks at live order data rather than historical price patterns.
+**Why it works:** The order book reveals the intentions of other traders before price moves. Heavy buy pressure with tight spreads suggests genuine demand.
+
+**Best conditions:** Markets with liquid order books. Requires active book data from the exchange.
 
 ---
 
 ### 6. Market Structure (Weight: 0.12)
 
-**What it looks for:** The basic pattern of higher highs and higher lows (uptrend) or lower highs and lower lows (downtrend). Enters when price pulls back to a previous swing point in the direction of the structure.
+**What it watches:** The pattern of swing highs and swing lows -- the fundamental building blocks of market structure.
 
-**Plain-language analogy:** Imagine a staircase. In an uptrend, each step up (high) is higher than the last, and each landing (low) is higher too. Market Structure watches for price to step back to the previous landing before climbing again. If the staircase pattern breaks, it stops trading.
+**When it signals:** When it detects a clear uptrend structure (higher highs and higher lows) and price pulls back to a previous swing level, or a clear downtrend structure (lower highs and lower lows) with a rally to a previous swing level.
 
-**When it works best:** Markets with clear directional structure. Provides a fundamentally different signal source since it reads raw price structure rather than mathematical indicators.
+**Why it works:** Market structure is the foundation of technical analysis. Higher highs and higher lows define an uptrend. Pullbacks to swing levels in a healthy trend are classic entry points.
+
+**Best conditions:** Markets with clear directional structure. RSI must be in the appropriate range (not too extended).
 
 ---
 
 ### 7. Supertrend (Weight: 0.12)
 
-**What it looks for:** An adaptive trend-following indicator that adjusts its sensitivity based on current volatility. It places a dynamic support/resistance line that flips between bullish and bearish based on price action, confirmed by above-average volume.
+**What it watches:** An ATR-based adaptive trend indicator that flips between bullish and bearish based on price relative to a dynamic support/resistance level.
 
-**Plain-language analogy:** Think of a thermostat that automatically adjusts to the temperature. Supertrend is a moving line that stays close to price during calm markets and gives it more room during volatile ones. When price crosses this line with strong volume, it signals a trend change.
+**When it signals:** When the Supertrend indicator flips direction (bearish to bullish, or vice versa) and volume confirms the flip (above 1.2x the 20-period average).
 
-**When it works best:** Trending markets with clear trend changes. Gets a boost in trending and high-volatility conditions.
+**Why it works:** Supertrend adapts to volatility through ATR, making it responsive in both calm and volatile markets. Volume confirmation filters out false flips.
+
+**Best conditions:** Markets that establish clear trends. The volume confirmation prevents signals in low-conviction moves.
 
 ---
 
 ### 8. Funding Rate (Weight: 0.10)
 
-**What it looks for:** Extreme funding rates in crypto perpetual futures. When leveraged traders are heavily positioned in one direction (paying high funding rates), the market tends to reverse. Extreme positive funding (longs paying shorts) suggests too many longs -- potential short. Extreme negative funding suggests too many shorts -- potential long.
+**What it watches:** The funding rate on perpetual futures contracts (from Kraken Futures public API).
 
-**Plain-language analogy:** Like a crowded room. When everyone rushes to one side, the floor becomes unstable and the crowd shifts the other way. Funding Rate catches these overcrowded positions and trades the expected correction.
+**When it signals:** When funding rates reach extreme levels (above 0.01% or below -0.01%), it signals a potential reversal in the opposite direction of the crowd. Extremely positive funding = too many longs = potential sell signal.
 
-**When it works best:** Crypto markets during periods of extreme leveraged positioning. This is a sentiment indicator rather than a technical one, providing a unique non-correlated signal.
+**Why it works:** Extreme funding rates indicate overcrowded positioning. When everyone is on one side of the trade, the market often reverses to "punish" the crowd.
 
----
-
-### 9. Ichimoku Cloud (Weight: 0.08)
-
-**What it looks for:** This strategy uses a Japanese charting system called the Ichimoku Cloud, which identifies trend direction, support/resistance levels, and momentum all in one view. It looks for price breaking above or below the "cloud" with confirming signals.
-
-**Plain-language analogy:** Imagine a weather forecast that shows a "cloud" of expected price ranges. When price breaks above the cloud, it is like the sun coming out -- bullish. When it drops below, storm clouds are forming -- bearish. The thicker the cloud, the stronger the support or resistance.
-
-**When it works best:** Trending markets with clear directional movement. It gets extra weight in trending conditions and less in choppy markets.
+**Best conditions:** After periods of sustained one-directional positioning. This is a sentiment-based strategy rather than purely price-based.
 
 ---
 
-### 10. Trend Following (Weight: 0.08)
+### 9. Trend Following (Weight: 0.08)
 
-**What it looks for:** Established trends with strong momentum. It uses moving averages to identify the trend direction and the ADX indicator to measure trend strength. It only signals when the trend is strong and clear. Importantly, Trend Following now requires a "fresh cross" of the moving averages -- it will not keep signaling throughout an entire trend. Once the crossover has been acknowledged, it stays quiet until a new crossover occurs.
+**What it watches:** EMA (Exponential Moving Average) crossovers -- when the fast EMA (20-period) crosses above or below the slow EMA (50-period).
 
-**Plain-language analogy:** "The trend is your friend." This strategy follows the crowd -- if prices have been going up consistently with strong momentum, it goes long. If they have been falling, it goes short. It sits out when there is no clear trend.
+**When it signals:** Only on a **fresh** EMA cross (the cross must have happened within the last few bars, preventing constant re-signaling throughout a trend), confirmed by strong ADX (above 30, indicating genuine trend strength).
 
-**When it works best:** Strong, sustained moves in one direction. Gets extra weight in trending markets, less in ranging conditions.
+**Why it works:** Moving average crossovers are one of the oldest and most reliable trend signals. The "fresh cross" requirement and ADX confirmation filter out the many false crossovers that happen in ranging markets.
+
+**Best conditions:** Markets transitioning from range to trend, or early in a new trend direction.
+
+---
+
+### 10. Ichimoku Cloud (Weight: 0.08)
+
+**What it watches:** The Ichimoku Cloud system -- a comprehensive Japanese charting method that analyzes support/resistance (the cloud), momentum (Tenkan/Kijun lines), and trend direction all in one framework.
+
+**When it signals:** When price and the Tenkan line cross above or below the Kijun line, with the cloud confirming the direction.
+
+**Why it works:** Ichimoku provides multiple confirmations in a single system. Its cloud component (Senkou spans) gives a visual representation of support/resistance zones.
+
+**Best conditions:** Trending markets. Ichimoku was designed for markets that move in clear directions.
 
 ---
 
 ### 11. Stochastic Divergence (Weight: 0.06)
 
-**What it looks for:** A disconnect between price and momentum. Specifically, when price makes a new high but the stochastic oscillator does not (or vice versa), it signals that the move is losing steam and a reversal may be coming.
+**What it watches:** Divergence between price and the stochastic oscillator -- when price makes a new low but the oscillator makes a higher low (bullish divergence), or when price makes a new high but the oscillator makes a lower high (bearish divergence).
 
-**Plain-language analogy:** Imagine a runner who keeps moving forward but is clearly slowing down. Their legs (price) are still carrying them, but their energy (momentum) is fading. Divergence catches this "tired runner" pattern, which often precedes a direction change.
+**When it signals:** When divergence is detected with the stochastic in extreme territory (below 20 for bullish, above 80 for bearish), suggesting exhaustion in the current move.
 
-**When it works best:** At the end of extended moves, when trends are exhausting themselves. Performs well in ranging markets.
+**Why it works:** Divergence between price and momentum is one of the strongest reversal signals in technical analysis. It indicates that the current move is losing steam.
+
+**Best conditions:** End-of-trend situations where momentum is fading. Less useful in strong, sustained trends.
 
 ---
 
 ### 12. Reversal (Weight: 0.06)
 
-**What it looks for:** Extreme market conditions that are ripe for a sharp reversal. It looks for RSI at extreme levels (very overbought or very oversold) combined with confirmation candles showing the reversal has actually begun.
+**What it watches:** Extreme RSI conditions (below 15 or above 85) followed by confirmation candles showing price reversing.
 
-**Plain-language analogy:** Markets sometimes overreact -- like a pendulum that swings too far. The Reversal strategy catches these overreactions and positions for the swing back, but only after seeing confirmation that the reversal is underway (not just hoping it will happen).
+**When it signals:** Only at extreme oversold/overbought readings (much more extreme than typical RSI levels), and only after price confirms the reversal with at least 5 candles of follow-through. Also requires the ATR percentage to exceed a minimum floor.
 
-**When it works best:** At extreme highs or lows, especially in ranging markets. Gets extra weight in ranging conditions, less in strong trends.
+**Why it works:** Extreme RSI readings (not the commonly used 30/70 levels) represent genuine panic or euphoria. Confirmation candles help avoid catching falling knives.
 
----
-
-## Strategy Family Diversity
-
-NovaPulse groups strategies into families based on the type of analysis they perform:
-
-- **Mean Reversion:** Keltner Channel, Mean Reversion, Reversal
-- **Trend Following:** Ichimoku Cloud, Trend Following, Supertrend
-- **Momentum:** Volatility Squeeze, Stochastic Divergence
-- **Microstructure:** Order Flow
-- **VWAP:** VWAP Momentum Alpha
-- **Structure:** Market Structure
-- **Sentiment:** Funding Rate
-
-Signals from diverse families receive a small confidence boost, while signals from only one family receive a small penalty. This encourages the bot to only trade when truly independent analysis methods agree. For example, if a mean-reversion strategy and a trend-following strategy both signal BUY, that is stronger evidence than two mean-reversion strategies agreeing, because the signal has been confirmed from fundamentally different perspectives.
+**Best conditions:** Sharp market drops or spikes that create genuine extreme conditions. This is deliberately the lowest-weighted strategy because extreme readings are rare.
 
 ---
 
-## How Confluence Works
+## How Confluence Scoring Works
 
-Confluence is NovaPulse's core principle: **multiple strategies must agree before any trade is placed.**
+When the bot scans a pair, all twelve strategies evaluate the data independently. The confluence engine then:
 
-Here is how it works:
+1. **Counts agreements:** How many strategies signal the same direction? This is the "confluence count."
 
-1. Every 60 seconds, NovaPulse runs all twelve strategies against each trading pair.
-2. Each strategy independently votes: BUY, SELL, or NO SIGNAL.
-3. The bot counts how many strategies agree on the same direction.
-4. **By default, at least 3 strategies must agree** for a signal to be actionable.
-5. The confidence score is calculated based on how strongly the agreeing strategies are aligned.
-6. If both the confluence threshold AND the confidence threshold (default 0.65) are met, the bot evaluates the trade for risk and may enter.
+2. **Calculates weighted strength:** Each strategy has a weight (shown above). The total weighted strength is the sum of agreeing strategy weights. For example, if Keltner (0.25) and Mean Reversion (0.20) both signal long, the weighted strength is 0.45.
 
-**Why confluence matters:** Any single strategy can produce false signals. But when three, four, or five independent strategies all see the same opportunity from different angles, the probability of a valid signal increases dramatically. It is like getting multiple expert opinions before making a big decision.
+3. **Applies regime multipliers:** Strategy weights are adjusted based on the current market regime. In trending markets, trend-following strategies get a boost. In ranging markets, mean-reversion strategies get boosted.
 
-```
-  Strategy 1  (Keltner):       BUY  ---+
-  Strategy 2  (Mean Rev):      ---     |
-  Strategy 3  (VolSqueeze):    BUY  ---+
-  Strategy 4  (VWAP Alpha):    ---     |
-  Strategy 5  (Order Flow):    BUY  ---+---> Confluence = 5 (meets threshold)
-  Strategy 6  (Mkt Structure): ---     |     Confidence = 0.82
-  Strategy 7  (Supertrend):    BUY  ---+     ==> SIGNAL GENERATED
-  Strategy 8  (Funding Rate):  ---
-  Strategy 9  (Ichimoku):      BUY  ---+
-  Strategy 10 (Trend):         ---
-  Strategy 11 (StochDiv):      ---
-  Strategy 12 (Reversal):      ---
-```
+4. **Checks opposition:** If some strategies disagree with the majority, a penalty is applied. This prevents the bot from entering when the signal is contested.
 
----
+5. **Applies family diversity bonus:** Strategies are grouped into "families" (mean_reversion, trend_following, momentum, microstructure, etc.). If three or more different families agree, a confidence bonus is added. If all agreeing strategies are from the same family, a penalty is applied. Diversity of viewpoints is rewarded.
 
-## How the AI Weighs Strategies
+6. **Adds OBI vote (optional):** If enabled, order book imbalance agreeing with the direction adds an extra confluence vote.
 
-Not all strategies are equal. NovaPulse uses **adaptive strategy weighting** that adjusts each strategy's influence based on two factors:
+7. **Final confidence:** The result is a confidence score between 0 and 1, and a confluence count. Both must exceed their minimum thresholds for a trade to be considered.
 
-### 1. Market Regime Detection
+### Minimum Requirements (Default)
 
-NovaPulse continuously analyzes the current market conditions and classifies them into regimes:
-
-| Regime | What It Means | Strategies That Get Boosted | Strategies That Get Reduced |
-|--------|--------------|---------------------------|---------------------------|
-| **Trending** | Strong directional movement | Trend, Ichimoku, Supertrend, Market Structure, VWAP Alpha | Mean Reversion, Stoch Divergence, Reversal |
-| **Ranging** | Sideways, back-and-forth | Mean Reversion, Stoch Divergence, Keltner, Reversal | Trend, Ichimoku, Supertrend, Market Structure |
-| **High Volatility** | Large, rapid price swings | Volatility Squeeze, Supertrend, Order Flow, Funding Rate | Mean Reversion, Stoch Divergence |
-| **Low Volatility** | Calm, quiet market | Mean Reversion, Stoch Divergence, Keltner | Volatility Squeeze, Supertrend, VWAP Alpha |
-
-This means the bot automatically adjusts which strategies have the most influence based on what the market is doing right now. Trend strategies matter more in trends; mean-reversion strategies matter more in ranges.
-
-### 2. Auto-Tuner (Weekly Performance Review)
-
-Every week, the **Auto-Tuner** reviews each strategy's performance over the last 50 trades and adjusts weights:
-
-- Strategies with strong results (good Sharpe ratio, high win rate) get their weight increased
-- Strategies with poor results get their weight decreased
-- If a strategy performs very poorly (negative Sharpe below -0.3 over 30+ trades), it may be temporarily disabled
-- Weights are bounded: no strategy can go below 0.05 or above 0.50
-
-This means the bot continuously learns from its own results and adapts. Strategies that work well in the current market environment are given more influence; those that do not are pulled back.
-
----
-
-## Strategy Guardrails
-
-As an additional safety measure, NovaPulse monitors each strategy's rolling performance and can temporarily disable a strategy if it becomes a consistent loser:
-
-- **Minimum win rate:** If a strategy's win rate drops below 35% over its last 30 trades, it is temporarily disabled for 2 hours
-- **Minimum profit factor:** If a strategy's profit factor drops below 0.85 over its last 30 trades, it is temporarily disabled
-- After the cooldown period, the strategy is re-enabled and given another chance
-
-This prevents a single malfunctioning strategy from dragging down overall performance.
+- Confluence count >= 2 (at least two strategies agree)
+- Confidence score >= 0.50
+- Risk/reward ratio >= 1.0
 
 ---
 
 ## Multi-Timeframe Analysis
 
-NovaPulse does not just look at one time frame. It analyzes multiple time frames simultaneously:
+Nova|Pulse does not just look at one timeframe. By default, it analyzes both 5-minute and 15-minute charts:
 
-- **1-minute candles:** Short-term price action
-- **5-minute candles:** Medium-term trend
-- **15-minute candles:** Longer-term trend
+- The **15-minute timeframe** is primary and drives the signal direction
+- The **5-minute timeframe** can boost confidence when it agrees
 
-For a trade to be taken, the signal typically needs agreement across at least two time frames. This provides an extra layer of confirmation: a buy signal on the 1-minute chart is much more reliable if the 5-minute and 15-minute charts also agree.
-
-The wider time frames also influence stop loss and take profit placement -- they tend to produce wider stops that are less likely to be hit by normal market noise.
+This prevents the bot from acting on very short-term noise while still being responsive to developing setups.
 
 ---
 
-## Session-Aware Trading
+## Adaptive Strategy Weighting
 
-NovaPulse adjusts its confidence thresholds based on historical performance at different times of day. If the bot has historically performed better during certain hours (e.g., during US market hours), it gives a slight confidence boost during those times. During historically poor hours (e.g., very late night/early morning UTC), it applies a penalty.
+The bot does not just use fixed strategy weights forever. Two systems adjust weights over time:
 
-This is a subtle adjustment (ranging from 0.70x to 1.15x confidence multiplier) but helps the bot be more selective during low-quality trading periods.
+### Regime Multipliers
 
----
+In different market conditions, different strategies get weight adjustments:
 
-## Frequently Asked Questions About Strategies
+- **Trending market:** Trend, Ichimoku, Supertrend get boosted; Mean Reversion, Stochastic Divergence get reduced
+- **Ranging market:** Mean Reversion, Stochastic Divergence, Keltner get boosted; Trend, Supertrend get reduced
+- **High volatility:** Volatility Squeeze, Supertrend get boosted
+- **Low volatility:** Mean Reversion, Keltner, VWAP get boosted
 
-**Can I disable a strategy?**
-Yes. You can disable any strategy from the settings panel. However, we recommend keeping all strategies enabled -- the confluence system means underperforming strategies simply get outvoted, and you might miss opportunities if they happen to be right.
+### Auto-Tuner
 
-**Can I change strategy weights?**
-The Auto-Tuner handles this automatically. Manual weight changes are possible via the configuration but are generally not recommended for most users.
-
-**Why did the bot not take a trade that one strategy was signaling?**
-Because confluence requires multiple strategies to agree. A single strategy signaling BUY while the others are silent or disagree does not meet the threshold. This is by design -- it keeps the bot selective and reduces false signals.
-
-**What if all twelve strategies agree?**
-This is extremely rare but would produce a very high-confidence signal. In such a case, the bot would likely enter the trade (assuming risk limits allow it). Twelve-strategy confluence would typically produce a confidence score well above the minimum threshold.
+The weekly auto-tuner analyzes strategy performance from the database:
+- Strategies with a Sharpe ratio below -0.3 (consistently losing) can be automatically disabled
+- Strategy weights are rebalanced within configured bounds (0.05 to 0.50)
+- A minimum number of trades is required before the tuner makes changes
 
 ---
 
-*For more on how NovaPulse protects you from losses, see [Risk and Safety](Risk-Safety.md).*
-*For detailed metric explanations, see [Understanding Metrics](Understanding-Metrics.md).*
+## Strategy Families
+
+The twelve strategies belong to these families, used for diversity scoring:
+
+| Family | Strategies |
+|--------|-----------|
+| **Mean Reversion** | Keltner, Mean Reversion |
+| **Trend Following** | Trend, Ichimoku, Supertrend |
+| **Momentum** | Volatility Squeeze, Stochastic Divergence, Reversal |
+| **Microstructure** | Order Flow |
+| **VWAP** | VWAP Momentum Alpha |
+| **Structure** | Market Structure |
+| **Sentiment** | Funding Rate |
+
+When strategies from three or more different families agree, the confidence score gets a bonus. This rewards genuine multi-perspective agreement.
+
+---
+
+## Strategy Cooldowns
+
+After a strategy contributes to a trade, it enters a cooldown period (default 60 seconds) before it can contribute to another trade on the same pair. This prevents rapid-fire signals from a single strategy dominating.
+
+---
+
+## Strategy Guardrails
+
+The bot monitors each strategy's ongoing performance:
+- After a minimum number of trades (default 20), if a strategy's win rate falls below 35% or profit factor below 1.0, it can be temporarily disabled for 2 hours
+- This prevents a strategy from continuing to lose money during conditions where it does not work
+- Strategies are automatically re-enabled after the cooldown to test if conditions have improved
+
+---
+
+## What You Can Configure
+
+While strategy tuning is typically handled by your operator, here are the key settings:
+
+- **Which strategies are enabled** -- any of the twelve can be turned on or off
+- **Confluence threshold** -- how many strategies must agree (default 2)
+- **Confidence threshold** -- minimum confidence score (default 0.50)
+- **Strategy weights** -- how much influence each strategy has
+- **Cooldown periods** -- minimum time between signals per strategy per pair
+- **Single strategy mode** -- for testing, you can run just one strategy in isolation
+
+See the [Configuration Guide](Configuration-Guide.md) for details.
+
+---
+
+*Nova|Pulse v5.0.0 -- Twelve perspectives, one decision.*

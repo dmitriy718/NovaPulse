@@ -118,9 +118,9 @@ class TestRegimePredictorUnit:
         )
         closes = np.array([100.0] * 60, dtype=float)
 
-        state = predictor.predict_transition(ic, closes)
+        state, conf = predictor.predict_transition(ic, closes)
         assert state == "emerging_trend"
-        assert predictor.get_transition_confidence() > 0.5
+        assert conf > 0.5
 
     def test_stable_range_detected(self):
         """Low ADX flat, no squeeze, high CI = stable range."""
@@ -147,7 +147,7 @@ class TestRegimePredictorUnit:
         )
         closes = np.array([100.0] * 60, dtype=float)
 
-        state = predictor.predict_transition(ic, closes)
+        state, _ = predictor.predict_transition(ic, closes)
         assert state == "stable_range"
 
     def test_stable_trend_detected(self):
@@ -175,7 +175,7 @@ class TestRegimePredictorUnit:
         )
         closes = np.array([100.0] * 60, dtype=float)
 
-        state = predictor.predict_transition(ic, closes)
+        state, _ = predictor.predict_transition(ic, closes)
         assert state == "stable_trend"
 
     def test_emerging_range_detected(self):
@@ -207,7 +207,7 @@ class TestRegimePredictorUnit:
         )
         closes = np.array([100.0] * 60, dtype=float)
 
-        state = predictor.predict_transition(ic, closes)
+        state, _ = predictor.predict_transition(ic, closes)
         assert state == "emerging_range"
 
     def test_squeeze_duration_counting(self):
@@ -253,10 +253,10 @@ class TestRegimePredictorUnit:
         ic = MagicMock()
         closes = np.array([100.0] * 10, dtype=float)  # Only 10 bars
 
-        state = predictor.predict_transition(ic, closes)
+        state, conf = predictor.predict_transition(ic, closes)
         # With 10 bars (< 30 threshold), returns stable_range
         assert state == "stable_range"
-        assert predictor.get_transition_confidence() == 0.0
+        assert conf == 0.0
 
     def test_high_confidence_when_all_agree(self):
         """When all indicators agree on emerging_trend, confidence should be high."""
@@ -283,8 +283,7 @@ class TestRegimePredictorUnit:
         )
         closes = np.array([100.0] * 60, dtype=float)
 
-        predictor.predict_transition(ic, closes)
-        conf = predictor.get_transition_confidence()
+        _, conf = predictor.predict_transition(ic, closes)
         assert conf >= 0.7, f"Expected high confidence when all agree, got {conf}"
 
     def test_low_confidence_when_mixed(self):
@@ -317,8 +316,7 @@ class TestRegimePredictorUnit:
         )
         closes = np.array([100.0] * 60, dtype=float)
 
-        predictor.predict_transition(ic, closes)
-        conf = predictor.get_transition_confidence()
+        _, conf = predictor.predict_transition(ic, closes)
         # ADX (0.8) + Volume (0.6) vote emerging_trend = 1.4
         # CI (0.4) votes stable_range = 0.4
         # Confidence = 1.4 / 1.8 = 0.78 — not unanimous

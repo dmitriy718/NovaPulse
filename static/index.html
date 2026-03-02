@@ -56,6 +56,7 @@
         <section class="glass-card pnl-card">
             <div class="card-header">
                 <h2>💰 PORTFOLIO</h2>
+                <button class="control-btn" type="button" id="shareStatsBtn" onclick="openStatsShareMenu()">📤 SHARE STATS</button>
             </div>
             <div class="pnl-display">
                 <div class="pnl-main">
@@ -350,6 +351,21 @@
                     <button class="settings-btn save" id="settingsSaveBtn" onclick="saveSettings()">SAVE</button>
                 </div>
             </div>
+        </div>
+    </div>
+
+    <!-- Stats Share Dropdown -->
+    <div id="statsShareOverlay" class="stats-share-overlay hidden" onclick="closeStatsShareMenu()">
+        <div class="stats-share-menu" onclick="event.stopPropagation()">
+            <div class="stats-share-title">Share Stats</div>
+            <div class="stats-share-row" id="statsShareRow">
+                <button class="chart-share-btn share-x" type="button" data-stats-share="x" aria-label="Share to X" title="Share to X"></button>
+                <button class="chart-share-btn share-discord" type="button" data-stats-share="discord" aria-label="Share to Discord" title="Share to Discord"></button>
+                <button class="chart-share-btn share-telegram" type="button" data-stats-share="telegram" aria-label="Share to Telegram" title="Share to Telegram"></button>
+                <button class="chart-share-btn share-reddit" type="button" data-stats-share="reddit" aria-label="Share to Reddit" title="Share to Reddit"></button>
+                <button class="stats-share-copy-btn" type="button" data-stats-share="copy" aria-label="Copy to Clipboard" title="Copy to Clipboard">📋 Copy</button>
+            </div>
+            <div class="stats-share-status" id="statsShareStatus"></div>
         </div>
     </div>
 

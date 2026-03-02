@@ -1,7 +1,7 @@
 # Confluence Engine Deep Dive
 
-**Version:** 4.5.0
-**Date:** 2026-02-24
+**Version:** 5.0.0
+**Date:** 2026-02-27
 **Source:** `src/ai/confluence.py` (~1214 lines)
 **Class:** `ConfluenceDetector`
 

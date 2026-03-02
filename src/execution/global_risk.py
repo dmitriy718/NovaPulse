@@ -34,8 +34,14 @@ class GlobalRiskAggregator:
             return
         self._initialized = True
         self._exposures: Dict[str, float] = {}
-        self._lock = asyncio.Lock()
+        self._lock: Optional[asyncio.Lock] = None
         self.max_total_exposure_usd = max(0.0, float(max_total_exposure_usd))
+
+    def _get_lock(self) -> asyncio.Lock:
+        """Lazily create the lock inside the running event loop."""
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        return self._lock
 
     def configure(self, max_total_exposure_usd: float) -> None:
         """Update the global exposure cap (called during engine init)."""
@@ -43,12 +49,12 @@ class GlobalRiskAggregator:
 
     async def register_exposure(self, engine_id: str, exposure_usd: float) -> None:
         """Register or update the current exposure for an engine."""
-        async with self._lock:
+        async with self._get_lock():
             self._exposures[engine_id] = max(0.0, float(exposure_usd))
 
     async def get_total_exposure(self) -> float:
         """Get the combined exposure across all engines."""
-        async with self._lock:
+        async with self._get_lock():
             return sum(self._exposures.values())
 
     async def get_remaining_capacity(self) -> float:
@@ -63,7 +69,7 @@ class GlobalRiskAggregator:
 
     async def unregister_engine(self, engine_id: str) -> None:
         """Remove an engine from tracking (on shutdown)."""
-        async with self._lock:
+        async with self._get_lock():
             self._exposures.pop(engine_id, None)
 
     def get_snapshot(self) -> Dict[str, float]:

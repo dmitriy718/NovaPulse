@@ -1,22 +1,30 @@
-# NovaPulse Architecture
+# Nova|Pulse Architecture
 
-**Version:** 4.5.0
-**Last Updated:** 2026-02-24
+**Version:** 5.0.0
+**Last Updated:** 2026-03-01
 
 ---
 
 ## System Overview
 
-NovaPulse is a Python asyncio multi-asset trading bot that runs 12 technical analysis strategies in parallel across crypto and stock markets, combines their signals through a confluence engine with family diversity scoring, validates them with AI/ML models, sizes positions using Kelly Criterion with correlation-based adjustment, and executes trades on Kraken, Coinbase, and Alpaca exchanges with adaptive exit management.
+Nova|Pulse is a Python asyncio multi-asset trading bot. It runs 12 technical analysis strategies in parallel across crypto and stock markets, combines their signals through a confluence engine with family diversity scoring, validates them with AI/ML models, sizes positions using Kelly Criterion with correlation adjustment, and executes trades on Kraken, Coinbase, and Alpaca with adaptive exit management.
+
+The system is designed as a single-process, multi-task asyncio application deployed in Docker. All persistence is via SQLite (WAL mode). An optional Elasticsearch pipeline provides analytics mirroring.
+
+---
+
+## High-Level Data Flow
 
 ```
 +-------------------------------------------------------------------+
 |                        MARKET DATA LAYER                           |
 |                                                                    |
-|   Kraken WS v2          Coinbase WS          REST Candle Poll      |
-|   (ticker, OHLC,        (ticker, candles)     (fallback for         |
-|    order book,                                 Coinbase)            |
-|    trade stream)                                                   |
+|   Kraken WS v2          Coinbase WS          Polygon REST          |
+|   (ticker, OHLC,        (ticker, candles)     (daily bars,         |
+|    order book,                                 grouped bars)        |
+|    trade stream)         Coinbase REST                              |
+|                          (candle polling                            |
+|                           every 60s)                                |
 +--------+-----------------+-------------------+--------------------+
          |                 |                   |
          v                 v                   v
@@ -24,28 +32,26 @@ NovaPulse is a Python asyncio multi-asset trading bot that runs 12 technical ana
 |                     MarketDataCache                                |
 |   RingBuffer arrays: closes, highs, lows, volumes, opens, times   |
 |   Per-pair ticker cache, order book cache, book analysis cache     |
+|   Stale detection, warmup tracking                                 |
 +-------------------------------------------------------------------+
          |
          v
 +-------------------------------------------------------------------+
-|                        BOT ENGINE                                  |
-|   main.py -> BotEngine (engine.py)                                 |
+|                    BOT ENGINE (engine.py)                          |
 |                                                                    |
-|   Background tasks:                                                |
-|     scan_loop          - Event-driven pair scanning                 |
-|     position_loop      - Stop/trailing/TP management (2s interval) |
-|     ws_loop            - WebSocket data streaming                  |
-|     health_monitor     - Data freshness + circuit breakers         |
-|     reconciliation     - DB vs exchange position sync (5min)       |
-|     cleanup_loop       - Old metrics/thoughts pruning (hourly)     |
-|     auto_retrainer     - ML model retraining                       |
-|     auto_tuner         - Weekly strategy weight tuning             |
-|     priority_schedule  - Crypto vs stocks session routing          |
-|     dashboard_server   - Uvicorn serving FastAPI                   |
-|     telegram/discord/  - Notification + command bots               |
-|     slack bots                                                     |
-|     es_collectors      - Fear/Greed, CoinGecko, CryptoPanic,      |
-|                          on-chain data                             |
+|   Background tasks (asyncio.create_task with _run_with_restart):   |
+|     _main_scan_loop       - Pair scanning (event + timer driven)   |
+|     _position_mgmt_loop   - SL/TP/trailing management (2s)        |
+|     _ws_data_loop         - WebSocket streaming                    |
+|     _health_monitor       - Data freshness, circuit breakers       |
+|     _reconciliation_loop  - DB vs exchange position sync (5min)    |
+|     _cleanup_loop         - Prune old metrics/thoughts (hourly)    |
+|     auto_retrainer        - ML model retraining                    |
+|     auto_tuner            - Weekly strategy weight tuning          |
+|     priority_schedule     - Crypto vs stocks session routing       |
+|     dashboard_server      - Uvicorn serving FastAPI                |
+|     telegram/discord/slack - Notification bots                     |
+|     es_collectors         - External data ingestion                |
 +-------------------------------------------------------------------+
          |
          v
@@ -53,311 +59,244 @@ NovaPulse is a Python asyncio multi-asset trading bot that runs 12 technical ana
 |                    CONFLUENCE DETECTOR                              |
 |   12 strategies run in parallel per pair per timeframe             |
 |                                                                    |
-|   +----------+  +---------------+  +-------------+  +-----------+ |
-|   | Keltner  |  | Mean Reversion|  | Vol Squeeze  |  | VWAP Mom  | |
-|   | (0.25)   |  | (0.20)        |  | (0.18)       |  | (0.15)    | |
-|   +----------+  +---------------+  +-------------+  +-----------+ |
-|   +-----------+  +------------------+  +-----------+               |
-|   | Order Flow|  | Market Structure  |  | Supertrend|              |
-|   | (0.12)    |  | (0.12)            |  | (0.12)    |              |
-|   +-----------+  +------------------+  +-----------+               |
-|   +-------------+  +----------+  +------------------+  +--------+ |
-|   | Funding Rate|  | Trend    |  | Stochastic Div   |  |Reversal| |
-|   | (0.10)      |  | (0.08)   |  | (0.06)           |  | (0.06) | |
-|   +-------------+  +----------+  +------------------+  +--------+ |
-|   +-----------+                                                    |
-|   | Ichimoku  |                                                    |
-|   | (0.08)    |                                                    |
-|   +-----------+                                                    |
+|   Keltner(0.25) MeanRev(0.20) VolSqueeze(0.18) VWAP(0.15)       |
+|   OrderFlow(0.12) MktStruct(0.12) Supertrend(0.12) FundRate(0.10)|
+|   Trend(0.08) Ichimoku(0.08) StochDiv(0.06) Reversal(0.06)       |
 |                                                                    |
-|   Multi-Timeframe: 1/5/15 min candles, 2/3 agreement required     |
-|   Regime Detection: Trend/Range x High/Mid/Low Vol (cap 2.0x)     |
-|   Family Diversity: 7 families, 3+ bonus, same-family penalty      |
-|   Session Analyzer: Per-hour confidence multiplier                 |
-|   Strategy Guardrails: Auto-disable underperformers                |
+|   -> Weighted scoring -> Regime multipliers -> Family diversity    |
+|   -> Opposition penalty -> OBI vote -> ConfluenceSignal           |
 +-------------------------------------------------------------------+
          |
          v
 +-------------------------------------------------------------------+
-|                      AI / ML LAYER                                 |
+|                    AI INTELLIGENCE LAYER                            |
 |                                                                    |
-|   TFLitePredictor: Pre-trained signal quality model                |
-|   ContinuousLearner: Online SGD updated after every closed trade   |
-|   Blended confidence: 60% TFLite + 40% online (when both active)  |
+|   TFLitePredictor    SessionAnalyzer    LeadLagTracker (v5.0)     |
+|   ContinuousLearner  RegimeTransitionPredictor (v5.0)             |
+|   EnsembleModel (v5.0)  OnChainDataClient (v5.0)                 |
+|   BayesianOptimizer (v5.0)  EventCalendar (v5.0)                 |
 +-------------------------------------------------------------------+
          |
          v
 +-------------------------------------------------------------------+
-|                     RISK MANAGER + GLOBAL RISK                     |
+|                    RISK MANAGEMENT                                  |
 |                                                                    |
-|   Position sizing: Fixed-fractional (primary) + Kelly cap          |
-|   Correlation-based sizing: Pearson corr > 0.7 → reduce size      |
-|   ATR-based SL/TP with percentage floors (2.5% SL, 5.0% TP)      |
-|   Drawdown scaling, volatility regime sizing, streak adjustment    |
-|   Max concurrent positions, correlation group limits               |
-|   Daily loss limit, risk of ruin check, global cooldown on loss    |
-|   GlobalRiskAggregator: cross-engine exposure cap (singleton)      |
+|   RiskManager           GlobalRiskAggregator (singleton)           |
+|   - Kelly Criterion     - Cross-engine exposure                    |
+|   - ATR stops           AnomalyDetector (v5.0)                    |
+|   - Correlation sizing  - Spread/volume/depth monitoring           |
+|   - Structural stops    - Auto-pause on anomaly                    |
+|   - Liquidity sizing                                               |
 +-------------------------------------------------------------------+
          |
          v
 +-------------------------------------------------------------------+
-|                     TRADE EXECUTOR                                 |
+|                    TRADE EXECUTOR                                   |
 |                                                                    |
-|   Entry: Limit order at best ask/bid, chase up to N attempts,     |
-|          fallback to market if limit fails                         |
-|   Exit:  Market order with 3-retry typed exception handling        |
-|   Stops: Software trailing + exchange-native stop backstop         |
-|   Smart Exit: Multi-tier partial closes (50%@1xTP, 30%@1.5xTP)   |
-|   Time-based tightening: stagnant positions get TP reduced        |
-|   Vol-regime stops: high_vol wider (1.5x), low_vol tighter (0.7x)|
+|   execute_signal -> validate -> size -> place_order                |
+|   Smart exit tiers -> trailing management -> position close        |
+|   Limit entry with chase -> market fallback                        |
+|   Paper mode simulation -> Live mode exchange orders               |
 +-------------------------------------------------------------------+
          |
          v
 +-------------------------------------------------------------------+
-|                   EXCHANGE REST API                                |
-|                                                                    |
-|   Kraken REST:  place_order, cancel_order, get_open_orders,       |
-|                 get_closed_orders, get_ohlc, get_order_info        |
-|   Coinbase REST: place_order, cancel_order, get_ohlc, etc.        |
+|                    EXCHANGE REST APIs                               |
+|   Kraken REST | Coinbase REST | Alpaca REST                       |
++-------------------------------------------------------------------+
+         |
+         v
++-------------------------------------------------------------------+
+|                    PERSISTENCE                                      |
+|   SQLite (WAL mode)        Elasticsearch (optional mirror)         |
+|   - trades, positions      - candles, order book, trades           |
+|   - thought_log            - Fear/Greed, CoinGecko, CryptoPanic   |
+|   - ml_features            - on-chain data                         |
+|   - strategy_attribution   Index lifecycle management              |
+|   - anomaly_events                                                 |
 +-------------------------------------------------------------------+
 ```
 
 ---
 
-## Component Map
+## Component Inventory
 
-### Core Components
+### Core (`src/core/`)
 
-| File | Class/Module | Responsibility |
-|------|-------------|----------------|
-| `main.py` | `main()`, `run_bot()` | Entry point. Preflight checks, instance lock, top-level supervisor with restart loop, signal handling, background task orchestration |
-| `src/core/engine.py` | `BotEngine` | Central orchestrator. Initializes all subsystems, runs scan/position/WS/health loops, coordinates shutdown |
-| `src/core/config.py` | `ConfigManager`, `BotConfig` | Pydantic-validated config from YAML + env overrides. Thread-safe singleton with hot-reload |
-| `src/core/database.py` | `DatabaseManager` | Async SQLite with WAL mode. Schema creation, migrations, tenant isolation, TTL caching |
-| `src/core/control_router.py` | `ControlRouter` | Unified pause/resume/close_all/kill/status interface used by Web, Telegram, Discord, Slack |
-| `src/core/logger.py` | `get_logger()`, `setup_logging()` | Structlog JSON logging with console + file + Telegram + dashboard alert sinks |
-| `src/core/structures.py` | `RingBuffer` | NumPy-backed circular buffer for O(1) candle append and zero-copy sliding windows |
-| `src/core/multi_engine.py` | `MultiEngineHub`, `MultiControlRouter` | Multi-exchange mode: wraps multiple BotEngine instances under one dashboard |
+| File | Class/Function | Purpose |
+|------|---------------|---------|
+| `engine.py` | `BotEngine` | Main orchestrator, owns all subsystems, manages lifecycle |
+| `config.py` | `ConfigManager`, Pydantic models | Typed config with validation, `get_config()`, `load_config_with_overrides()` |
+| `database.py` | `DatabaseManager` | SQLite WAL, async operations, schema migrations, TTL cache for perf stats |
+| `control_router.py` | `ControlRouter`, `EngineInterface` | Unified control plane (pause/resume/close_all/kill/status) |
+| `multi_engine.py` | `MultiEngineHub`, `MultiControlRouter` | Multi-exchange aggregation, `resolve_db_path()`, `resolve_trading_accounts()` |
+| `logger.py` | `get_logger()`, `setup_logging()` | Structlog JSON logging with rotation |
+| `structures.py` | `RingBuffer` | Fixed-size NumPy array buffer for OHLCV data |
+| `error_handler.py` | `GracefulErrorHandler` | Error classification (CRITICAL/DEGRADED/TRANSIENT) |
+| `runtime_safety.py` | Exception handlers | Global and asyncio exception handlers |
 
-### AI / Strategy Components
+### AI (`src/ai/`)
 
-| File | Class/Module | Responsibility |
-|------|-------------|----------------|
-| `src/ai/confluence.py` | `ConfluenceDetector` | Runs all 12 strategies in parallel, computes weighted confluence with family diversity, applies regime/session adjustments |
-| `src/ai/predictor.py` | `TFLitePredictor` | TFLite model inference for signal quality scoring |
-| `src/ai/order_book.py` | `OrderBookAnalyzer` | Microstructure analysis: OBI, book score, whale detection |
-| `src/ai/session_analyzer.py` | `SessionAnalyzer` | Per-hour confidence multiplier derived from historical win rates |
+| File | Class | Purpose |
+|------|-------|---------|
+| `confluence.py` | `ConfluenceDetector`, `ConfluenceSignal` | Runs all strategies, computes confluence, produces signals |
+| `predictor.py` | `TFLitePredictor` | TFLite model inference for trade scoring |
+| `order_book.py` | `OrderBookAnalyzer` | Order book imbalance, book score, whale detection |
+| `session_analyzer.py` | `SessionAnalyzer` | Per-hour win rate tracking, confidence multipliers |
+| `lead_lag.py` | `LeadLagTracker` | (v5.0) BTC/ETH leader move -> follower confidence adj |
+| `regime_predictor.py` | `RegimeTransitionPredictor` | (v5.0) Squeeze/ADX/vol/chop voting for transition state |
+| `ensemble_model.py` | `EnsembleModel` | (v5.0) LightGBM + TFLite weighted average |
+| `bayesian_optimizer.py` | `BayesianOptimizer` | (v5.0) Optuna TPE parameter search |
 
-### Execution Components
+### Execution (`src/execution/`)
 
-| File | Class/Module | Responsibility |
-|------|-------------|----------------|
-| `src/execution/executor.py` | `TradeExecutor` | Full trade lifecycle: signal validation, order placement, fill monitoring, position management, smart exit |
-| `src/execution/risk_manager.py` | `RiskManager` | Position sizing (Kelly + correlation), stop loss management (trailing/breakeven/vol-regime), daily loss limits, cooldowns |
-| `src/execution/global_risk.py` | `GlobalRiskAggregator` | Cross-engine total exposure tracking and cap enforcement (singleton) |
+| File | Class | Purpose |
+|------|-------|---------|
+| `executor.py` | `TradeExecutor` | Order placement, fill processing, smart exit, P&L recording |
+| `risk_manager.py` | `RiskManager`, `PositionSizeResult`, `StopLossState` | Kelly sizing, stops, trailing, breakeven, daily limits |
+| `global_risk.py` | `GlobalRiskAggregator` | Singleton cross-engine exposure cap |
+| `anomaly_detector.py` | `AnomalyDetector` | (v5.0) Spread/volume/depth anomaly detection + pause |
 
-### Exchange Components
+### Exchange (`src/exchange/`)
 
-| File | Class/Module | Responsibility |
-|------|-------------|----------------|
-| `src/exchange/kraken_ws.py` | `KrakenWebSocketClient` | Kraken WebSocket v2: ticker, OHLC, order book, trade subscriptions with auto-reconnect |
-| `src/exchange/kraken_rest.py` | `KrakenRESTClient` | Kraken REST: OHLC history, order placement, account queries. Rate-limited with retry |
-| `src/exchange/coinbase_rest.py` | `CoinbaseRESTClient` | Coinbase Advanced Trade REST API with JWT auth |
-| `src/exchange/coinbase_ws.py` | `CoinbaseWebSocketClient` | Coinbase WebSocket for real-time data |
-| `src/exchange/market_data.py` | `MarketDataCache` | In-memory OHLCV storage using RingBuffers, staleness tracking, spread calculation |
-| `src/exchange/funding_rates.py` | `FundingRateClient` | Kraken Futures public API funding rate fetcher with 5-min TTL cache |
-| `src/exchange/exceptions.py` | Exception hierarchy | `ExchangeError > TransientExchangeError > RateLimitError`, `PermanentExchangeError > AuthenticationError > InsufficientFundsError > InvalidOrderError` |
+| File | Class | Purpose |
+|------|-------|---------|
+| `kraken_ws.py` | `KrakenWebSocketClient` | Kraken WS v2: subscribe, reconnect, data dispatch |
+| `kraken_rest.py` | `KrakenRESTClient` | Kraken REST: candles, balances, orders, signed requests |
+| `coinbase_rest.py` | `CoinbaseRESTClient` | Coinbase Advanced Trade: candles, orders, balances |
+| `coinbase_ws.py` | `CoinbaseWebSocketClient` | Coinbase WS: ticker, order book |
+| `market_data.py` | `MarketDataCache` | RingBuffer OHLCV per pair, ticker cache, stale detection |
+| `funding_rates.py` | `FundingRateClient` | Kraken Futures public API, 5-min TTL cache, circuit breaker |
+| `exceptions.py` | `TransientExchangeError`, `PermanentExchangeError`, `RateLimitError` | Typed exception hierarchy |
+| `onchain_data.py` | `OnChainDataClient` | (v5.0) On-chain sentiment fetch (stub) |
 
----
+### Strategies (`src/strategies/`)
 
-## Data Flow: Market Tick to Trade Execution
+All inherit from `BaseStrategy` in `base.py`. Each implements `analyze(closes, highs, lows, volumes, opens, indicator_cache)` returning `Optional[StrategySignal]`.
 
-1. **Market data arrives** via Kraken WS v2 (ticker, OHLC candle, order book update)
-2. **WS handler** in `BotEngine` routes to `MarketDataCache`:
-   - Ticker updates: latest close price updated in-place on current bar
-   - OHLC updates: new bars appended to RingBuffer; completed bars enqueue the pair for scanning
-   - Book updates: order book cache refreshed; `OrderBookAnalyzer` computes OBI + book score
-3. **Event-driven scan** triggers when a bar closes or price moves more than `event_price_move_pct` (default 0.5%)
-4. **ConfluenceDetector.analyze_pair()** runs per timeframe (1/5/15 min):
-   - Resamples 1-min OHLCV to higher timeframes
-   - Detects regime (trend/range, high/mid/low vol) using ADX + Garman-Klass volatility
-   - Fetches funding rates from FundingRateClient (cached, passed via kwargs)
-   - Runs all 12 strategies in parallel with 5-second timeout per strategy
-   - Computes weighted confluence: strategy weights x regime multipliers (capped 2.0x) x adaptive performance factor
-   - Applies opposition penalty (0.07 per opposing, max 0.25)
-   - Applies strategy family diversity bonus/penalty (3+ families: +0.05, same family: -0.05)
-   - Applies session-aware multiplier from historical per-hour win rates
-   - Combines timeframe results (2/3 agreement required for multi-TF)
-5. **AI verification**: TFLite predictor + continuous online learner blend confidence
-6. **Signal filtering**: minimum confluence count (default 3), minimum confidence (default 0.55), minimum risk-reward ratio, spread check
-7. **RiskManager.calculate_position_size()**: fixed-fractional risk sizing, Kelly cap, drawdown scaling, volatility regime adjustment, correlation-based reduction (Pearson corr > 0.7 with open positions), global cross-engine exposure check via GlobalRiskAggregator
-8. **TradeExecutor.execute_signal()**: validates signal age, checks gates (quiet hours, rate throttle, duplicate pair, correlation group, cooldown), places limit order
-9. **Order fill**: limit chase with N attempts + market fallback; exchange-native stop-loss placed as crash-proof backstop
-10. **Position management loop** (every 2 seconds): updates trailing stops (vol-regime-aware step sizing), checks stop-out/take-profit, runs smart exit tiers, applies time-based exit tightening (30/60 min stagnation → TP reduction)
-11. **Trade closure**: market exit order with 3-retry typed exception handling, P&L calculation with entry+exit fees, ML label update, continuous learner feedback
+### ML (`src/ml/`)
+
+| File | Class | Purpose |
+|------|-------|---------|
+| `trainer.py` | `ModelTrainer`, `AutoRetrainer` | TFLite model training, periodic retraining loop |
+| `continuous_learner.py` | `ContinuousLearner` | Online SGD between full retraining cycles |
+| `strategy_tuner.py` | `StrategyTuner`, `AutoTuner` | Weekly performance analysis, weight rebalancing |
 
 ---
 
-## Multi-Timeframe Architecture
+## Lifecycle
 
-NovaPulse supports multi-timeframe analysis using 1-minute base candles:
+### Startup Sequence
 
-```
-1-min candles (base)
-    |
-    +-- Resample to 5-min  ---> Run all 12 strategies ---> Per-TF confluence signal
-    |
-    +-- Resample to 15-min ---> Run all 12 strategies ---> Per-TF confluence signal
-    |
-    +-- Use 1-min directly ---> Run all 12 strategies ---> Per-TF confluence signal
-    |
-    v
-Combine timeframes:
-  - Primary TF drives direction (default: 1-min)
-  - 2/3 agreement required (configurable via multi_timeframe_min_agreement)
-  - Confidence bonus scaled by TF weight (1-min: 1.0, 5-min: 1.3, 15-min: 1.5)
-  - SL/TP taken from highest agreeing TF (wider = more survivable)
-```
+1. `main.py:main()` -- Python version check, preflight checks, setup logging
+2. `preflight_checks()` -- Create dirs, verify config, acquire instance lock
+3. `run_bot()` -- Async entry point
+4. Resolve trading accounts (single or multi-exchange)
+5. Per engine: `BotEngine()` -> `initialize()` -> `warmup()`
+6. StockSwingEngine init (if stocks enabled)
+7. MultiEngineHub construction (if multi-exchange)
+8. Dashboard server setup (uvicorn)
+9. Signal handlers (SIGINT/SIGTERM -> shutdown event)
+10. Background tasks created via `_run_with_restart()`
+11. `shutdown_event.wait()` -- blocks until signal received
 
----
+### Shutdown Sequence
 
-## Multi-Engine Mode
+1. Signal handler sets `_running = False` on all engines
+2. `shutdown_event.set()` unblocks the main coroutine
+3. `engine.stop()` -- cancels tasks, closes WS, closes DB
+4. Stock engine stop
+5. Dashboard server `should_exit = True`
+6. Process exit
 
-When `TRADING_ACCOUNTS` or `TRADING_EXCHANGES` is set, NovaPulse runs multiple `BotEngine` instances:
+### `_run_with_restart()` Supervisor
 
-```
-Account Specs: "main:kraken,swing:coinbase"
-    |
-    +-- BotEngine (kraken, account=main, db=data/trading_kraken_main.db)
-    |
-    +-- BotEngine (coinbase, account=swing, db=data/trading_coinbase_swing.db)
-    |
-    v
-MultiEngineHub (wraps both engines for dashboard)
-MultiControlRouter (routes pause/resume to all engines)
-Single DashboardServer (shared uvicorn instance)
-```
-
-Each engine has its own:
-- Database file (isolated by exchange + account_id)
-- REST client with per-account API keys (resolved via `{ACCOUNT_PREFIX}_{KEY_NAME}` env vars)
-- WebSocket connection
-- Background task set
+Every background task runs through this supervisor:
+- Catches exceptions, logs, retries with exponential backoff (2s base, 30s max)
+- Quick exits (<30s) count as failures
+- After N failures (default 3) on critical tasks, auto-pauses trading instead of crashing
+- Failure counter resets after the task runs successfully for 10+ minutes
 
 ---
 
-## Dashboard Server Architecture
+## Deployment Model
 
-The dashboard is a FastAPI application served by uvicorn on port 8080 (container):
+### Docker Compose
 
-```
-Client Browser / API Consumer
-         |
-    [Reverse Proxy] (optional HTTPS termination)
-         |
-    Host port 8090 --> Container port 8080
-         |
-    FastAPI (DashboardServer in src/api/server.py)
-         |
-    +-- GET  /api/v1/health       (public, no auth)
-    +-- GET  /api/v1/status       (auth required)
-    +-- GET  /api/v1/trades       (auth required)
-    +-- GET  /api/v1/positions    (auth required)
-    +-- GET  /api/v1/performance  (auth required)
-    +-- GET  /api/v1/strategies   (auth required)
-    +-- GET  /api/v1/risk         (auth required)
-    +-- GET  /api/v1/thoughts     (auth required)
-    +-- GET  /api/v1/scanner      (auth required)
-    +-- POST /api/v1/control/*    (admin key required)
-    +-- POST /api/v1/signal       (webhook secret required)
-    +-- POST /api/v1/billing/*    (Stripe webhooks)
-    +-- WS   /ws/live             (auth via query param)
-    +-- POST /api/v1/login        (session-based web auth)
-    +-- GET  /                    (static HTML dashboard)
+```yaml
+services:
+  trading-bot:
+    build: .
+    container_name: novatrader-trading-bot-1
+    ports:
+      - "8090:8080"
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./models:/app/models
+      - ./config/config.yaml:/app/config/config.yaml:ro
+      - ./.secrets/env:/app/.secrets/env:ro
+    env_file:
+      - .env
+    restart: unless-stopped
 ```
 
-Authentication model:
-- `DASHBOARD_ADMIN_KEY` (or legacy `DASHBOARD_SECRET_KEY`): full admin access, required in live mode
-- `DASHBOARD_READ_KEY`: read-only access to data endpoints
-- Tenant API keys: per-tenant scoped access, resolved via hashed lookup in `tenant_api_keys` table
-- Session-based web auth: username/password login with CSRF protection, cookie-based sessions
+### Deploy via rsync
+
+```bash
+rsync -avz --exclude='.git' --exclude='data/' --exclude='logs/' \
+  ./ ops@165.245.143.68:/home/ops/novatrader/
+ssh -i ~/.ssh/horizon ops@165.245.143.68 \
+  "cd /home/ops/novatrader && docker compose up -d --build"
+```
+
+### Secrets Flow
+
+```
+.env.secrets.tpl          # op:// references (template)
+    |
+    v (scripts/resolve_secrets.sh + `op read`)
+.secrets/env              # Plain values (volume-mounted)
+    |
+    v (src/utils/secrets.py at Python startup)
+os.environ                # Available to all code
+```
 
 ---
 
 ## Database Architecture
 
-SQLite with WAL mode for concurrent read/write:
+- **SQLite WAL mode** -- concurrent reads, serialized writes
+- **One DB per engine** in multi-exchange: `trading_kraken_default.db`, `trading_coinbase_default.db`, `trading_stocks_default.db`
+- **Read semaphore** (8 concurrent reads) prevents Python-level serialization
+- **Write lock** with 30s timeout prevents deadlocks
+- **Performance stats cache** with 5s TTL reduces dashboard query load
+- **Schema migrations** run automatically on `initialize()`
 
-```
-data/trading.db
-  |
-  +-- trades              (all trade records with tenant_id)
-  +-- thought_log         (AI decision log for dashboard feed)
-  +-- metrics             (time-series performance metrics)
-  +-- ml_features         (feature vectors tied to trades)
-  +-- order_book_snapshots (book state at entry for ML)
-  +-- signals             (raw strategy signal log)
-  +-- daily_summary       (per-day aggregate stats, per-tenant unique)
-  +-- system_state        (key-value store for runtime state)
-  +-- tenants             (multi-tenant registry with Stripe IDs)
-  +-- tenant_api_keys     (hashed API key -> tenant_id mapping)
-  +-- stripe_webhook_events (idempotency for Stripe webhooks)
-  +-- signal_webhook_events (idempotency for signal webhooks)
-  +-- backtest_runs       (backtest/optimization history)
-  +-- copy_trading_providers (webhook signal provider registry)
-```
-
-WAL mode PRAGMAs applied at startup:
-- `journal_mode=WAL` (concurrent readers + single writer)
-- `synchronous=NORMAL` (durability vs performance tradeoff)
-- `cache_size=-16000` (16MB page cache)
-- `temp_store=MEMORY`
-- `mmap_size=67108864` (64MB memory-mapped I/O)
+Key tables: `trades`, `positions`, `thought_log`, `metrics`, `daily_summary`, `ml_features`, `system_state`, `order_book_snapshots`, `signals`, `strategy_attribution` (v5.0), `anomaly_events` (v5.0).
 
 ---
 
-## Docker Deployment Model
+## Error Handling Philosophy
 
-```
-docker-compose.yml
-  |
-  +-- trading-bot (novapulse)
-  |     Build: Dockerfile
-  |     Ports: 8090:8080 (configurable via HOST_PORT/DASHBOARD_PORT)
-  |     Volumes:
-  |       ./data -> /app/data       (SQLite DBs, instance lock)
-  |       ./logs -> /app/logs       (structlog output)
-  |       ./models -> /app/models   (TFLite models)
-  |       ./config -> /app/config:ro (config.yaml, read-only)
-  |       ./.secrets -> /app/.secrets:ro (Telegram secrets)
-  |     Resources: 2GB RAM, 2 CPUs (limits); 512MB, 0.5 CPU (reservations)
-  |     Health: curl /api/v1/health every 30s
-  |     Restart: unless-stopped
-  |
-  +-- elasticsearch (optional)
-        Health: cluster health check
-        Condition: service_healthy (soft dependency)
-```
+The **"Trade or Die"** principle: only fatal errors (exchange auth failure, database corruption) stop the bot. Everything else is classified and handled:
 
-The bot runs as UID/GID from `BOT_UID`/`BOT_GID` env vars (default 1000) for bind mount permission compatibility.
+| Severity | Examples | Action |
+|----------|---------|--------|
+| CRITICAL | DB init failure, exchange auth | Stop bot |
+| DEGRADED | WS disconnect, stale data | Auto-pause trading, keep monitoring |
+| TRANSIENT | Rate limit, network timeout | Retry with backoff |
+
+Background tasks never crash the bot. The `_run_with_restart()` supervisor catches all exceptions and retries. Critical tasks (scan_loop, position_loop, ws_loop) auto-pause trading after repeated failures.
 
 ---
 
-## Lifecycle and Restart Behavior
+## Performance Optimizations
 
-1. `main()` runs preflight checks (directories, config, instance lock)
-2. Top-level supervisor loop: up to 10 restarts with exponential backoff (2s-60s)
-3. `run_bot()` initializes subsystems in dependency order:
-   - Database (CRITICAL - failure aborts startup)
-   - Exchange clients (CRITICAL)
-   - Market data + session analyzer
-   - AI components (NON-CRITICAL - failure logged, skipped)
-   - Risk management + trade execution
-   - ML training components (NON-CRITICAL)
-   - Dashboard + billing (NON-CRITICAL)
-   - Notifications (NON-CRITICAL)
-   - Elasticsearch pipeline (NON-CRITICAL)
-4. Background tasks run with `_run_with_restart()` wrapper: auto-restart on error with exponential backoff, auto-pause trading after 3 consecutive critical task failures
-5. Shutdown on SIGINT/SIGTERM: cancel all tasks (15s timeout), close resources, flush ES buffer
-
-Instance lock (`data/instance.lock`) prevents duplicate bot processes on the same host/volume.
+- **Vectorized indicators** via NumPy (no Python loops for OHLCV math)
+- **RingBuffer** contiguous memory for O(1) append, O(1) slice
+- **Parallelized position management** via `asyncio.gather`
+- **O(1) trade lookup** via `get_trade_by_id` (indexed)
+- **Consolidated perf stats** -- 7 queries collapsed to 2, cached with 5s TTL
+- **IndicatorCache** -- per-scan cache prevents redundant calculation across strategies
+- **Read semaphore** -- 8 concurrent SQLite reads without write lock contention

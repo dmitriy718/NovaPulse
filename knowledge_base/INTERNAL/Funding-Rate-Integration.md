@@ -1,7 +1,7 @@
 # Funding Rate Integration
 
-**Version:** 4.5.0
-**Date:** 2026-02-24
+**Version:** 5.0.0
+**Date:** 2026-02-27
 **Sources:**
 - `src/exchange/funding_rates.py` (FundingRateClient)
 - `src/strategies/funding_rate.py` (FundingRateStrategy)

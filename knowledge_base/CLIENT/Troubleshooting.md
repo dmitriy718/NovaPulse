@@ -1,262 +1,289 @@
 # Troubleshooting
 
-**Last updated:** 2026-02-24
+**Last updated:** 2026-03-02
 
-This guide covers the most common issues you might encounter with NovaPulse and how to resolve them. If your issue is not covered here, please [contact support](Contact-Support.md).
+This guide covers the most common issues you might encounter with Nova|Pulse and the Horizon platform, and how to resolve them. If your issue is not covered here, please [contact support](Contact-Support.md).
 
 ---
 
 ## Bot Is Not Placing Trades
 
-This is the most common question. There are several reasons why the bot might not be trading:
+This is the most common concern, especially for new users. There are many legitimate reasons the bot may not trade for a period.
 
-### 1. Check the Mode
+### Check the Thought Feed
 
-**Symptom:** No trades at all, even after days of running.
+The thought feed (AI reasoning log on the dashboard) tells you exactly what the bot is seeing. Look for these messages:
 
-**Check:** Look at the status area on your dashboard. Is the mode set to "paper" or "live"?
+| Message | Meaning | Action |
+|---------|---------|--------|
+| "Warming up..." | Bot is loading historical data | Wait 15 minutes for warmup to complete |
+| "No signal for [pair]" | Strategies did not find a setup | Normal -- the bot is selective by design |
+| "Confluence below threshold" | Strategies partially agree but not enough | Normal -- wait for stronger agreement |
+| "Risk rejected: [reason]" | Signal passed confluence but failed risk check | Check the reason (daily loss, exposure cap, etc.) |
+| "Paused" or "Auto-paused" | Trading is paused | Check the pause reason and resume if appropriate |
+| "Priority schedule PAUSED" | Crypto paused during stock hours (or vice versa) | Normal -- automatic scheduling. Wait for the session change. |
+| "Quiet hours" | Currently in a quiet hour | Normal -- no trades during configured quiet hours |
+| "Cooldown active" | Post-loss cooldown | Wait for cooldown to expire (default 30 seconds) |
 
-**If paper mode:** The bot IS trading -- but trades are simulated. Check the trade history panel to see if simulated trades are being recorded. If trades appear in the history, everything is working correctly.
+### Common Causes of Low Trade Frequency
 
-### 2. Check the Status
-
-**Symptom:** Status shows PAUSED, STOPPED, or STALE FEED.
-
-**Fix:**
-- **PAUSED:** Someone (you, a team member, or an auto-pause circuit breaker) paused trading. Check the AI Thought Feed for the reason. If it was manual, use Resume. If it was automatic, check the Risk Shield panel for which circuit breaker triggered.
-- **STOPPED:** The bot was killed. Use Resume to restart, or contact support.
-- **STALE FEED:** Market data is stale. Wait for automatic reconnection (usually resolves within minutes). If it persists for more than 15 minutes, contact support.
-
-### 3. Check Confidence and Confluence
-
-**Symptom:** Status shows RUNNING but no trades are being placed.
-
-**Check:** Look at the Scanner view. Are any signals appearing? What are the confidence scores and confluence counts?
-
-**Common reasons:**
-- **Confidence too low:** All signals are below the 0.65 threshold. The market may be choppy or unclear. This is the bot being appropriately cautious.
-- **Confluence too low:** Strategies are not agreeing. Only 1-2 strategies see a signal, which is below the 3-strategy threshold. Again, this is protective behavior.
-- **Solution:** Wait for clearer market conditions. Do NOT lower the thresholds to force trades -- that defeats the purpose of the safeguards.
-
-### 4. Check Circuit Breakers
-
-**Symptom:** The Risk Shield panel shows an active circuit breaker.
-
-**Common triggers:**
-- **Daily loss limit:** You have hit the daily loss cap. Trading will resume the next day (or when you manually resume after review).
-- **Consecutive losses:** Four or more losses in a row. Review recent trades to understand why, then resume.
-- **Drawdown limit:** Account drawdown exceeds the threshold. Review and resume when ready.
-- **Trade cooldown:** A recent loss triggered a 30-minute cooldown. Wait for it to expire.
-
-### 5. Check Exchange Connection
-
-**Symptom:** Integrations panel shows exchange as disconnected.
-
-**Fix:** See "Exchange Connection Issues" below.
-
-### 6. Check Quiet Hours
-
-**Symptom:** Bot runs normally at some times but not during certain hours.
-
-**Check:** Are quiet hours configured? During quiet hours, no new trades are opened. Existing positions are still managed.
+1. **Low-volatility market**: When markets are range-bound, fewer signals meet confluence requirements
+2. **High confluence threshold**: The default threshold (2) requires at least 2 strategies to agree
+3. **Quiet hours**: Default quiet hours (3 AM UTC) suppress trading during low-liquidity periods
+4. **Priority scheduling**: Crypto pauses during US market hours, stocks pause outside market hours
+5. **Post-loss cooldowns**: After losses, brief cooldowns prevent re-entry
 
 ---
 
-## Dashboard Will Not Load
+## Horizon Dashboard Issues
 
-### Symptom: Blank page or loading spinner that never finishes
+### "Bot Unreachable" or "No Bot Connected"
 
-**Try these steps in order:**
+**Symptoms**: Dashboard shows a gray status indicator with "Unreachable" or a prompt to connect a bot.
 
-1. **Refresh the page** (F5 or Ctrl+R)
-2. **Try a different browser** (Chrome, Firefox, Safari, Edge)
-3. **Clear your browser cache:**
-   - Chrome: Settings > Privacy > Clear browsing data > Cached images and files
-   - Firefox: Settings > Privacy > Clear Data > Cached Web Content
-   - Safari: Develop > Empty Caches
-4. **Try incognito/private mode** to rule out browser extensions
-5. **Check your internet connection** -- can you reach other websites?
-6. If none of the above work, contact support with your browser name and version
+**Solutions**:
 
-### Symptom: 401 Unauthorized
+1. **No bot connection configured**: Go to Settings > Bot Connection and enter your bot URL, API key, and hosting type
 
-Your login credentials are incorrect or expired.
+2. **Bot is not running**:
+   - Self-hosted: Check that your Docker container is running (`docker ps`)
+   - Horizon-hosted: Contact support -- your instance may need to be restarted
 
-**Fix:**
-1. Double-check your username and password (case-sensitive)
-2. Try an incognito/private window (in case old credentials are cached)
-3. Clear saved site credentials in your browser settings
-4. If you have forgotten your password, contact support for a credential reset
+3. **Incorrect bot URL**: Verify the URL in Settings matches your bot's actual address. Include the protocol and port (e.g., `https://your-server.com:8080`). Remove trailing slashes
 
-### Symptom: 502 Bad Gateway or 503 Service Unavailable
+4. **Firewall blocking connections**: Ensure your bot's port (default 8080) is open to inbound connections from the internet
 
-The server may be restarting or temporarily unavailable.
+5. **API key mismatch**: Verify you are using the correct read key or admin key from your bot's `.secrets/env`
 
-**Fix:**
-1. Wait 30-60 seconds and refresh
-2. If it persists for more than 5 minutes, contact support
+6. **SSL/TLS issues**: If your bot uses HTTPS, ensure the certificate is valid
 
----
+### Dashboard Shows Stale Data
 
-## Telegram Bot Not Responding
+**Solutions**:
+- Click the refresh button in the dashboard header
+- Check that your bot is running and responsive
+- Try logging out and back in to refresh your Firebase token
+- Clear browser cache and reload the page
 
-### Bot does not reply to any commands
+### Email Verification Modal Will Not Dismiss
 
-**Check these in order:**
+**Solutions**:
+- Wait a few seconds -- the system polls verification status every 3 seconds
+- If it persists, try refreshing the page
+- Click "Resend Verification Email" and use the new link
+- Try logging out, clearing cookies, and logging back in
 
-1. **Is Telegram enabled?** Verify with support that Telegram is configured for your instance.
-2. **Is polling enabled?** The bot needs polling enabled to receive your messages. Confirm with support.
-3. **Is your Chat ID in the allowlist?** Send `/whoami` to get your chat ID and confirm it matches what is configured. If you get no response at all, your chat ID may not be on the allowlist.
-4. **Is the bot token correct?** If the token was rotated or is invalid, the bot cannot connect to Telegram. Contact support to verify.
-5. **Wait a moment and try again.** The bot polls for messages periodically -- there may be a short delay.
+### Dashboard Loads but Shows No Data
 
-### Bot sends notifications but does not respond to commands
-
-Polling may be disabled (the bot is in send-only mode). This happens when multiple instances share a bot token -- only one can poll at a time. Contact support to enable polling for your instance.
+**Solutions**:
+- Verify your bot connection in Settings > Bot Connection
+- Check that the bot is actually trading (it may be freshly started with no trade history)
+- Ensure your bot has the API server running (port 8080 accessible)
+- Check browser console for API errors (F12 > Console)
 
 ---
 
-## Trade Closed at a Loss
+## Bot Dashboard Issues
 
-**This is normal.** Even the best trading systems have losing trades. Here is what to understand:
+### Dashboard Shows "CONNECTING..." or Does Not Load
 
-### Why losses happen
+**Solutions**:
+1. Verify the bot container is healthy: `docker ps | grep novatrader`
+2. Check container logs: `docker logs novatrader-trading-bot-1 --tail 50`
+3. Verify port mapping (8090 host to 8080 container): `docker port novatrader-trading-bot-1`
+4. Try accessing `/api/v1/health` directly in your browser
+5. Check if another process is using port 8090
 
-- The market moved against the trade faster than expected
-- The stop loss was hit -- this is the system working as designed (limiting your loss)
-- A sudden news event or market shift caused a rapid move
+### "403 Forbidden" on Dashboard
 
-### What to check
-
-1. **Was the loss within the expected stop-loss range?** Check the trade details. If entry was $64,000 and stop was $62,800, a close at $62,800 is a normal stop-loss exit.
-2. **Look at the bigger picture.** One losing trade does not define performance. Check your win rate, profit factor, and total P&L over at least 20-50 trades.
-3. **Check for patterns.** If many recent trades are losing, look at:
-   - Market conditions (is the market very choppy?)
-   - Whether circuit breakers have activated (the bot may have auto-paused itself already)
-   - Strategy performance (is one strategy dragging things down? The auto-tuner will handle this.)
-
-### When to be concerned
-
-- Win rate drops below 35% over 30+ trades
-- Max drawdown exceeds 10%
-- Daily loss limit is being hit frequently
-- Multiple circuit breakers are triggering regularly
-
-If you see these patterns, contact support for a review of your configuration.
+**Solutions**:
+- Verify your login credentials
+- Check that the `DASHBOARD_ADMIN_KEY` or password hash in `.secrets/env` is correct
+- Ensure bcrypt hashes are in `.secrets/env` (not `.env` -- Docker Compose mangles `$` characters)
 
 ---
 
-## "Stale Data" Warning
+## Bot Connection Issues
 
-**What it means:** NovaPulse has not received fresh market data from your exchange for several consecutive health checks.
+### "Could not reach your bot. Make sure the URL is correct and the bot is running."
 
-**Why it matters:** Trading on old data is dangerous -- the real price may have moved significantly. NovaPulse automatically pauses trading when data is stale.
+**Solutions**:
+- Verify the bot URL is accessible from the internet (not just your local network)
+- Test the URL: open `https://your-bot-url:8080/api/v1/status` in a browser
+- Check that the bot container is running: `docker ps | grep novatrader`
+- Verify port forwarding if behind NAT
+- Check firewall rules: `sudo ufw status` or cloud provider security groups
 
-**Common causes:**
-- Temporary exchange maintenance or outage
-- Internet connectivity issues between NovaPulse's server and the exchange
-- Exchange API rate limiting
+### "Authentication failed. Double-check your API key."
 
-**What to do:**
-1. **Wait.** Most stale data events resolve automatically within 1-5 minutes as the connection re-establishes.
-2. If it persists for more than 15 minutes, check the exchange's status page:
-   - Kraken: [status.kraken.com](https://status.kraken.com)
-   - Coinbase: [status.coinbase.com](https://status.coinbase.com)
-3. If the exchange is fine, contact support.
+**Solutions**:
+- The API key should be the read key or admin key from your NovaPulse `.secrets/env`
+- API keys are case-sensitive -- copy-paste to avoid typos
+- Make sure the key has not been rotated since you last configured it
 
----
+### "Bot URL cannot point to internal network addresses"
 
-## "Auto-Paused" Notification
-
-**What it means:** The bot paused itself because a circuit breaker was triggered.
-
-**How to diagnose:**
-
-| Check | What to Look For |
-|-------|-----------------|
-| **Risk Shield panel** | Shows which circuit breaker is active |
-| **AI Thought Feed** | Shows the exact message and timestamp |
-| **Notification message** | Should state the reason (daily loss, consecutive losses, drawdown, stale data, etc.) |
-
-**What to do:**
-
-1. **Read the reason.** The notification and dashboard will tell you why.
-2. **Review recent trades.** Understand what happened -- was it a bad market day, or is there a deeper issue?
-3. **Decide whether to resume.** If it was just a normal bad day, you can resume. If something looks wrong, contact support.
-4. **To resume:** Use the Resume button on the dashboard, or send `/resume` via Telegram.
+**Solutions**:
+- This is SSRF protection. Your bot URL must be a public IP or hostname
+- Private IPs (10.x.x.x, 172.16-31.x.x, 192.168.x.x, localhost) are blocked
+- Use your server's public IP or domain name instead
 
 ---
 
-## Unexpected Fees
+## Authentication Issues
 
-**Where fees come from:**
+### Cannot Log In to Horizon Dashboard
 
-| Fee Type | Typical Rate | When It Applies |
-|----------|-------------|----------------|
-| **Maker fee** | ~0.16% | When your order adds liquidity (limit orders) |
-| **Taker fee** | ~0.26% | When your order takes liquidity (market orders, stop triggers) |
+**Solutions**:
+1. Check that you are using the correct email address
+2. Try the "Forgot Password" link to reset your password
+3. Check if your account is locked (after 3 failed attempts in 30 minutes)
+4. Wait 30 minutes if locked, then try again
+5. Clear browser cookies and try again
+6. Try a different browser or incognito mode
+7. Check that JavaScript is enabled in your browser
 
-**Both entry and exit incur fees.** A round-trip trade (buy + sell) costs approximately 0.32-0.52% in fees, depending on order type.
+### Account Locked
 
-**Fee impact on P&L:** NovaPulse deducts estimated fees from your P&L calculations, so the numbers you see on the dashboard are net of fees. There should be no surprises.
+**Solutions**:
+- Account locks expire automatically after 30 minutes
+- Check your email for the lock notification (it includes the IP that triggered it)
+- If you did not make those login attempts, change your password immediately after the lock expires
+- Contact support if you believe your account is compromised
 
-**Why a trade might show a small loss even though the price barely moved:** If the entry-to-exit price move was smaller than the round-trip fees, the trade results in a net loss. NovaPulse's risk/reward calculations account for fees, but in rare cases a trade may close near breakeven and end up slightly negative.
+### Google SSO Not Working
 
----
+**Solutions**:
+- Ensure third-party cookies are not blocked (required for Google sign-in)
+- Try using a different browser
+- Clear cookies for horizonsvc.com and google.com
+- Try the email/password login as a fallback
 
-## API Key Errors
+### "Email not verified" Error When Subscribing
 
-### "Invalid API key" or "Permission denied"
-
-**Common causes:**
-- The API key was revoked or expired on the exchange
-- Permissions were changed on the exchange side
-- A typo in the key or secret during setup
-
-**How to fix:**
-1. Log in to your exchange and check your API keys
-2. Verify that the correct permissions are enabled (see [Getting Started](Getting-Started.md))
-3. Generate new API keys if needed
-4. Contact support to update the keys in NovaPulse
-
-### "Rate limit exceeded"
-
-**What it means:** Too many API requests were sent to the exchange in a short period.
-
-**How NovaPulse handles it:** The bot has built-in rate limiting and will automatically back off and retry. This usually resolves on its own within a few seconds.
-
-**If it persists:** Contact support -- the rate limits may need adjustment.
+**Solutions**:
+- You must verify your email before subscribing
+- Check your inbox and spam folder for the verification email from support@horizonsvc.com
+- Go to the dashboard -- the verification modal has a "Resend Verification Email" button
 
 ---
 
-## General Health Check Steps
+## Exchange Connection Issues
 
-When something does not seem right, run through this checklist:
+### Kraken "WS 1013" Errors
 
-1. **Check the status indicator** -- Is it RUNNING, PAUSED, STOPPED, STALE FEED, or OFFLINE?
-2. **Check the Risk Shield** -- Are any circuit breakers active?
-3. **Check the AI Thought Feed** -- Look for error or warning messages
-4. **Check the Integrations panel** -- Is the exchange connected?
-5. **Check the Scanner** -- Are signals being generated? What are the confidence/confluence levels?
-6. **Check recent trade history** -- Has anything unusual happened?
-7. **Send `/health` on Telegram** (if configured) for a quick health report
-8. **Take a screenshot** of the dashboard and contact support with your observations
+**Meaning**: Kraken WebSocket server sent a reconnect-requested close code. This is normal.
 
----
+**Resolution**: The bot handles this automatically with retry backoff. No action needed.
 
-## When to Contact Support
+### Coinbase "Invalid Pair" Messages
 
-Contact support if:
+**Meaning**: Some pairs on Coinbase are not available for trading.
 
-- A problem persists for more than 30 minutes despite troubleshooting
-- You see error messages you do not understand
-- The bot's behavior seems wrong (unexpected trades, wrong position sizes, etc.)
-- You suspect a security issue (contact immediately and use Kill if needed)
-- You want help interpreting your performance data
+**Resolution**: The bot automatically excludes invalid pairs via the `_invalid_pairs` set. No action needed.
 
-See [Contact Support](Contact-Support.md) for how to reach us and what to include in your message.
+### "Exchange Auth Failed" Error
+
+**Solutions**:
+1. Re-check your exchange API keys
+2. Ensure the keys have not been revoked or expired
+3. Verify the correct permissions are enabled (View + Trade)
+4. For Kraken: ensure both API Key and Private Key are provided
+5. For Coinbase: ensure both API Key and API Secret are provided
 
 ---
 
-*For dashboard features, see [Dashboard Walkthrough](Nova-Dashboard-Walkthrough.md).*
-*For control options, see [Controls](Controls-Pause-Resume-Kill.md).*
+## Billing Issues
+
+### Subscription Not Activating After Payment
+
+**Solutions**:
+- Wait 1-2 minutes for the Stripe webhook to process
+- Refresh the pricing page -- it should show "Subscription activated!"
+- Check Settings for your subscription status
+- If status still shows "free", contact support with your payment confirmation email
+
+### "You already have an active subscription" Error
+
+**Solutions**:
+- Check Settings to verify your current subscription status
+- If you recently canceled, your subscription may still be active until the end of the billing period
+- Contact support to check your subscription record
+
+### Payment Failed
+
+**Solutions**:
+- Stripe retries failed payments automatically
+- Update your payment method in the Stripe Customer Portal (Settings > Manage Subscription)
+- Check with your bank if the transaction is being blocked
+- Try a different payment card
+
+---
+
+## Email Issues
+
+### Not Receiving Emails from Horizon
+
+**Solutions**:
+1. Check your spam/junk folder
+2. Add these sender addresses to your contacts:
+   - support@horizonsvc.com
+   - alerts@horizonsvc.com
+   - security@horizonsvc.com
+   - marketing@horizonsvc.com
+3. Check your notification preferences in Settings > Notifications
+4. Verify that Global Unsubscribe is not enabled
+5. Some email providers delay delivery -- wait 5-10 minutes
+
+### Getting Too Many Emails
+
+**Solutions**:
+- Go to Settings > Notifications to disable specific categories
+- Turn off Trade Executed and Trade Closed notifications (high frequency)
+- Use the unsubscribe link in any email to disable that category
+- Enable Global Unsubscribe to stop all non-security emails
+
+### Unsubscribe Link Not Working
+
+**Solutions**:
+- Unsubscribe tokens expire after 90 days -- request a fresh email and use its link
+- Go to Settings > Notifications to manually disable categories instead
+- Contact support if you cannot unsubscribe by any method
+
+---
+
+## Performance Issues
+
+### Dashboard Loading Slowly
+
+**Solutions**:
+- Check your internet connection
+- The Horizon dashboard proxies API calls to your bot -- slow bot response slows the dashboard
+- For self-hosted: check your bot server's CPU and memory usage
+- Try a different browser or disable browser extensions
+- Clear browser cache
+
+### High Memory Usage on Bot Server
+
+**Solutions**:
+- Check container memory: `docker stats novatrader-trading-bot-1`
+- Consider reducing the number of trading pairs
+- Reduce `lookback_bars` in config (default 120)
+- Restart the container if memory usage is abnormally high
+
+---
+
+## Getting More Help
+
+If none of the above solutions resolve your issue:
+
+1. **Check the FAQ**: [FAQ](FAQ.md) for answers to common questions
+2. **Submit a ticket**: [horizonsvc.com/support](https://horizonsvc.com/support)
+3. **Email support**: support@horizonsvc.com
+4. **Settings ticket system**: Settings > Support tab to create and track tickets
+
+Pro and Elite members receive priority support with faster response times.
+
+---
+
+*Nova|Pulse v5.0.0 by Horizon Services -- Most issues have a simple solution.*

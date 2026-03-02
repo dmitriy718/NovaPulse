@@ -1,7 +1,7 @@
 # NovaPulse Risk Management
 
-**Version:** 4.5.0
-**Last Updated:** 2026-02-24
+**Version:** 5.0.0
+**Last Updated:** 2026-02-27
 
 ---
 
@@ -12,6 +12,15 @@ The NovaPulse risk management system provides multi-layered capital preservation
 **Files:**
 - `src/execution/risk_manager.py` — `RiskManager` (per-engine risk controls)
 - `src/execution/global_risk.py` — `GlobalRiskAggregator` (cross-engine exposure cap)
+
+### v5.0.0 Additions
+- **Structural stop loss placement** (optional): places stops behind recent swing highs/lows; config `risk.structural_stop`; `GET /api/v1/structural-stops`.
+- **Liquidity-aware position sizing** (optional): reduces size when order book depth is thin; config `risk.liquidity_sizing`; `GET /api/v1/liquidity`.
+- **Anomaly detection circuit breaker** (optional): spread/volume/correlation/depth checks; auto-pause with cooldown; config `monitoring.anomaly_detector`; `GET /api/v1/anomalies`.
+
+### v5.0.0 Additions
+- **Structural stop loss placement** (optional): places stops behind recent swing highs/lows via MarketStructureStrategy swing detection; configurable buffer (ATR mult) and max distance; `risk.structural_stop` section.
+- **Liquidity-aware position sizing** (optional): reduces position size when order book depth is thin; `risk.liquidity_sizing` with `max_impact_pct` and `min_depth_ratio`.
 
 ### v4.5.0 Additions
 - **Correlation-based position sizing**: Pearson correlation with open positions; corr > 0.7 → automatic size reduction (min 50%)

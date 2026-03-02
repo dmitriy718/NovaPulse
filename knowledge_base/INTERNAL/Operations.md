@@ -1,7 +1,7 @@
 # NovaPulse Operations Guide
 
-**Version:** 4.5.0
-**Last Updated:** 2026-02-24
+**Version:** 5.0.0
+**Last Updated:** 2026-02-27
 
 ---
 
@@ -404,6 +404,96 @@ docker compose --profile debug up -d kibana
 ```
 
 Access at http://localhost:5601
+
+---
+
+## Caddy Reverse Proxy (nova.horizonsvc.com)
+
+### Overview
+
+The NovaPulse bot's API is exposed to the internet via a Caddy reverse proxy at `nova.horizonsvc.com`. This is how the horizonsvc.com customer dashboard reaches the bot — the bot's port 8080 is only bound to `127.0.0.1:8090` on the host and is not directly accessible from the internet.
+
+### Architecture
+
+```
+Internet (HTTPS)
+     |
+     v
+Caddy container (ports 80, 443)
+     |  nova.horizonsvc.com → reverse_proxy trading-bot:8080
+     |  agent.horizonsvc.com → agent-api:8000
+     v
+trading-bot container (port 8080, Docker network only)
+```
+
+Caddy and the trading bot communicate over the shared Docker network `novatrader_trading-net`.
+
+### Caddy Configuration
+
+The Caddyfile is at `/home/ops/agent-stack/Caddyfile`:
+
+```
+nova.horizonsvc.com {
+    encode zstd gzip
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "no-referrer"
+        -Server
+    }
+    reverse_proxy trading-bot:8080
+}
+```
+
+### Common Operations
+
+```bash
+# View Caddy logs
+docker logs caddy --tail 50
+
+# Reload Caddy config (zero-downtime)
+docker exec caddy caddy reload --config /etc/caddy/Caddyfile
+
+# Test bot reachability through Caddy
+curl -s https://nova.horizonsvc.com/api/v1/health
+
+# Test bot reachability from inside Caddy container
+docker exec caddy curl -s http://trading-bot:8080/api/v1/health
+
+# Test authenticated request through Caddy
+curl -H "X-API-Key: $DASHBOARD_READ_KEY" https://nova.horizonsvc.com/api/v1/status
+
+# Check TLS certificate
+echo | openssl s_client -servername nova.horizonsvc.com -connect 165.245.143.68:443 2>/dev/null | openssl x509 -noout -dates
+```
+
+### DNS
+
+`nova.horizonsvc.com` resolves to `165.245.143.68` (the ops server). This A record must be maintained in the domain registrar's DNS settings.
+
+### Firewall (UFW)
+
+The ops server's firewall allows ports 22 (SSH), 80 (HTTP), and 443 (HTTPS). Port 8080 is intentionally **not** open — all API access goes through Caddy on 443.
+
+```bash
+# Verify firewall rules
+ufw status
+
+# Expected output includes:
+# 80/tcp    ALLOW  Anywhere
+# 443/tcp   ALLOW  Anywhere
+# OpenSSH   ALLOW  Anywhere
+```
+
+### Troubleshooting
+
+| Problem | Diagnosis | Fix |
+|---------|-----------|-----|
+| `nova.horizonsvc.com` returns 502 | Bot container is down | `cd /home/ops/novatrader && docker compose up -d trading-bot` |
+| Caddy returns connection refused | Caddy container is down | `cd /home/ops/agent-stack && docker compose up -d caddy` |
+| TLS cert expired | Caddy ACME renewal failed | Check Caddy logs; ensure port 80 is open for ACME challenges |
+| Bot not on network | Docker network mismatch | Verify `novatrader_trading-net` exists and both containers are on it |
 
 ---
 

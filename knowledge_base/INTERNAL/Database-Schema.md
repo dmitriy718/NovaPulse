@@ -1,7 +1,7 @@
 # NovaPulse Database Schema and Persistence
 
-**Version:** 4.5.0
-**Last Updated:** 2026-02-24
+**Version:** 5.0.0
+**Last Updated:** 2026-02-27
 
 ---
 
@@ -234,7 +234,7 @@ Common keys:
 | `stats_reset_ts` | ISO 8601 timestamp | When stats were last zeroed |
 | `last_retrain_ts` | ISO 8601 timestamp | Last ML model training time |
 | `last_tuner_run_ts` | ISO 8601 timestamp | Last strategy tuner execution |
-| `bot_version` | `"4.5.0"` | Running version |
+| `bot_version` | `"5.0.0"` | Running version |
 | `startup_ts` | ISO 8601 timestamp | Container start time |
 
 ### Multi-Tenant Tables

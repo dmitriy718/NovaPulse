@@ -128,6 +128,9 @@ class TradeExecutor:
         self._liquidity_max_impact_pct = float(liquidity_max_impact_pct)
         self._liquidity_min_depth_ratio = float(liquidity_min_depth_ratio)
 
+        # Per-pair locks to prevent duplicate entries from concurrent signals
+        self._pair_entry_locks: Dict[str, asyncio.Lock] = {}
+
         # Per-trade locks to prevent concurrent management of the same position
         self._position_locks: Dict[str, asyncio.Lock] = {}
 
@@ -341,7 +344,7 @@ class TradeExecutor:
                             "status": "closed",
                             "exit_price": entry_price,
                             "pnl": 0.0,
-                            "close_reason": "ghost_reconciliation",
+                            "notes": "ghost_reconciliation",
                         })
                         self.risk_manager.close_position(trade_id, 0.0)
                         auto_closed += 1
@@ -416,36 +419,38 @@ class TradeExecutor:
         if effective_confidence is None:
             return None
 
-        # Stage 2: Pre-trade gates
+        # Stage 2: Pre-trade gates (under per-pair lock to prevent duplicate entries)
         side = "buy" if signal.direction == SignalDirection.LONG else "sell"
         primary_strategy = self._primary_strategy(signal)
 
-        if not await self._check_gates(signal, side, primary_strategy):
-            return None
+        pair_lock = self._pair_entry_locks.setdefault(signal.pair, asyncio.Lock())
+        async with pair_lock:
+            if not await self._check_gates(signal, side, primary_strategy):
+                return None
 
-        # Stage 3: Position sizing and order fill
-        fill = await self._size_and_fill(signal, side)
-        if fill is None:
-            return None
-        trade_id, fill_price, filled_units, partial_fill, entry_fee, size_result, adjusted_sl, adjusted_tp = fill
+            # Stage 3: Position sizing and order fill
+            fill = await self._size_and_fill(signal, side)
+            if fill is None:
+                return None
+            trade_id, fill_price, filled_units, partial_fill, entry_fee, size_result, adjusted_sl, adjusted_tp = fill
 
-        # Stage 4: Register with risk manager FIRST (before DB insert) so a
-        # crash between DB write and registration can't leave phantom positions.
-        slippage = abs(fill_price - signal.entry_price) / signal.entry_price if signal.entry_price > 0 else 0.0
-        filled_size_usd = filled_units * fill_price
+            # Stage 4: Register with risk manager FIRST (before DB insert) so a
+            # crash between DB write and registration can't leave phantom positions.
+            slippage = abs(fill_price - signal.entry_price) / signal.entry_price if signal.entry_price > 0 else 0.0
+            filled_size_usd = filled_units * fill_price
 
-        self.risk_manager.initialize_stop_loss(trade_id, fill_price, adjusted_sl, side)
-        self.risk_manager.register_position(
-            trade_id, signal.pair, side,
-            fill_price, filled_size_usd, strategy=primary_strategy,
-        )
+            self.risk_manager.initialize_stop_loss(trade_id, fill_price, adjusted_sl, side)
+            self.risk_manager.register_position(
+                trade_id, signal.pair, side,
+                fill_price, filled_size_usd, strategy=primary_strategy,
+            )
 
-        # Stage 5: Record trade in DB
-        trade_record = await self._record_trade(
-            signal, trade_id, side, primary_strategy,
-            fill_price, filled_units, partial_fill, entry_fee,
-            size_result, adjusted_sl, adjusted_tp, slippage, filled_size_usd,
-        )
+            # Stage 5: Record trade in DB
+            trade_record = await self._record_trade(
+                signal, trade_id, side, primary_strategy,
+                fill_price, filled_units, partial_fill, entry_fee,
+                size_result, adjusted_sl, adjusted_tp, slippage, filled_size_usd,
+            )
 
         # Stage 6: Entry telemetry (best-effort, non-blocking)
         await self._capture_entry_telemetry(signal, trade_id)
@@ -502,16 +507,26 @@ class TradeExecutor:
             sig_ts = datetime.fromisoformat(signal.timestamp.replace("Z", "+00:00"))
             signal_age_seconds = (datetime.now(timezone.utc) - sig_ts).total_seconds()
         except Exception:
-            pass
+            logger.warning("Failed to parse signal timestamp", pair=signal.pair, ts=signal.timestamp)
 
         effective_confidence = signal.confidence
         if signal_age_seconds > 5:
             decay = min((signal_age_seconds - 5) * 0.02, 0.30)
             effective_confidence = max(signal.confidence - decay, 0.0)
         if signal_age_seconds > 60:
+            logger.debug("Signal too old", pair=signal.pair, age_s=round(signal_age_seconds, 1))
             return None
 
-        return effective_confidence if effective_confidence >= 0.50 else None
+        if effective_confidence < 0.50:
+            logger.debug(
+                "Signal confidence decayed below floor",
+                pair=signal.pair,
+                original=round(signal.confidence, 3),
+                effective=round(effective_confidence, 3),
+                age_s=round(signal_age_seconds, 1),
+            )
+            return None
+        return effective_confidence
 
     async def _check_gates(
         self, signal: ConfluenceSignal, side: str, primary_strategy: str,
@@ -536,7 +551,15 @@ class TradeExecutor:
 
         # Quiet hours filter
         if self.quiet_hours_utc:
-            if datetime.now(timezone.utc).hour in self.quiet_hours_utc:
+            current_hour = datetime.now(timezone.utc).hour
+            if current_hour in self.quiet_hours_utc:
+                await self.db.log_thought(
+                    "filter",
+                    f"Trade blocked: quiet hours (UTC hour {current_hour})",
+                    severity="info",
+                    metadata={"pair": signal.pair, "hour_utc": current_hour},
+                    tenant_id=self.tenant_id,
+                )
                 return False
 
         # Trade-rate throttle
@@ -554,21 +577,39 @@ class TradeExecutor:
                 )
                 return False
 
-        # Fetch open trades once for duplicate and correlation checks
-        all_open = await self.db.get_open_trades(tenant_id=self.tenant_id)
+        # Use in-memory _open_positions for duplicate and correlation checks.
+        # This dict is updated synchronously in register_position() (before any
+        # await), so it's safe from TOCTOU races between concurrent coroutines
+        # for different pairs in the same correlation group.
+        rm_positions = self.risk_manager._open_positions
 
         # Block duplicate pair
-        if any(t["pair"] == signal.pair for t in all_open):
+        if any(p["pair"] == signal.pair for p in rm_positions.values()):
+            await self.db.log_thought(
+                "filter",
+                f"Trade blocked: already have open position for {signal.pair}",
+                severity="info",
+                metadata={"pair": signal.pair},
+                tenant_id=self.tenant_id,
+            )
             return False
 
         # Correlation guard
         group = self._correlation_groups.get(signal.pair)
         if group:
             group_count = sum(
-                1 for t in all_open
-                if self._correlation_groups.get(t.get("pair")) == group
+                1 for p in rm_positions.values()
+                if self._correlation_groups.get(p.get("pair")) == group
             )
             if group_count >= self._max_per_correlation_group:
+                await self.db.log_thought(
+                    "filter",
+                    f"Trade blocked: correlation group '{group}' at limit "
+                    f"({group_count}/{self._max_per_correlation_group})",
+                    severity="info",
+                    metadata={"pair": signal.pair, "group": group, "count": group_count},
+                    tenant_id=self.tenant_id,
+                )
                 return False
 
         # Strategy cooldown
@@ -1171,11 +1212,35 @@ class TradeExecutor:
                     tp_tightened = True
 
             if tp_tightened:
-                await self.db.update_trade(trade_id, {
-                    "take_profit": new_tp,
-                }, tenant_id=self.tenant_id)
-                # Use tightened TP for the rest of this cycle
-                trade["take_profit"] = new_tp
+                # Ensure tightened TP is always fee-profitable; if not, use stagnation_exit
+                taker_fee = 0.001
+                if meta and isinstance(meta, dict):
+                    taker_fee = float(meta.get("exit_fee_rate", self.taker_fee) or self.taker_fee)
+                _stagnation_exit = False
+                if side == "buy":
+                    min_tp = entry_price * (1 + taker_fee * 2 + 0.001)
+                    if new_tp < min_tp:
+                        _stagnation_exit = True
+                else:
+                    min_tp = entry_price * (1 - taker_fee * 2 - 0.001)
+                    if new_tp > min_tp:
+                        _stagnation_exit = True
+
+                if _stagnation_exit:
+                    # TP would close at a loss — close now as stagnation_exit
+                    await self._close_position(
+                        trade_id, pair, side, entry_price,
+                        current_price, quantity, "stagnation_exit",
+                        metadata=trade.get("metadata"),
+                        strategy=trade.get("strategy"),
+                    )
+                    return
+                else:
+                    await self.db.update_trade(trade_id, {
+                        "take_profit": new_tp,
+                    }, tenant_id=self.tenant_id)
+                    # Use tightened TP for the rest of this cycle
+                    trade["take_profit"] = new_tp
 
         # Hold-duration optimization: if the trade has been open longer than
         # 2x the strategy's average winning hold time, tighten the trailing
@@ -1700,11 +1765,18 @@ class TradeExecutor:
         })
         meta["partial_exits"] = partial_exits
         meta["exit_tier"] = tier_idx + 1
-        accumulated = float(meta.get("partial_pnl_accumulated", 0.0))
-        meta["partial_pnl_accumulated"] = round(accumulated + partial_pnl, 4)
 
         # Update remaining quantity
         remaining = max(0.0, quantity - partial_qty)
+
+        # When this is the final tier (remaining ≈ 0), do NOT add this
+        # partial's P&L to partial_pnl_accumulated because _close_position
+        # will compute the P&L for the last chunk fresh and then add the
+        # accumulated total on top.  Adding it here would double-count both
+        # the P&L and the exit fee for the final tier.
+        if remaining >= 1e-8:
+            accumulated = float(meta.get("partial_pnl_accumulated", 0.0))
+            meta["partial_pnl_accumulated"] = round(accumulated + partial_pnl, 4)
 
         # Persist to DB
         await self.db.update_trade(trade_id, {

@@ -1,253 +1,267 @@
 # Risk and Safety
 
-**Last updated:** 2026-02-24
+**Last updated:** 2026-03-01
 
-NovaPulse is built with safety as its foundation. Multiple layers of protection work together to guard your capital against large losses. This guide explains every safety feature in detail, so you can trade with confidence knowing how your money is protected.
+Nova|Pulse is built with safety as its foundation. Multiple layers of protection work together to guard your capital against large losses. This guide explains every safety feature in detail, so you can trade with confidence knowing how your money is protected.
 
 ---
 
 ## The Safety Philosophy
 
-No trading system can guarantee profits -- markets are inherently unpredictable. What NovaPulse can do is **manage risk meticulously** so that:
+No trading system can guarantee profits. Markets are unpredictable, and losses are a normal part of trading. Nova|Pulse's approach is: **accept that losses will happen, but make sure no single loss -- or sequence of losses -- can cause devastating damage to your account.**
 
-- No single trade can seriously damage your account
-- Losing streaks are detected and contained
-- The bot pauses itself when conditions are unsafe
-- Your capital is preserved so you live to trade another day
-
-Think of it like layers of armor. Any one layer might have a gap, but together they provide comprehensive protection.
+Every trade has a defined maximum loss before it is entered. Every day has a loss limit. Every position is sized relative to your bankroll. And multiple circuit breakers stand ready to pause the system if things go wrong.
 
 ---
 
-## Layer 1: Paper Trading (Risk-Free Testing)
+## Layer 1: Position Sizing
 
-Before risking real money, NovaPulse lets you run in **paper trading mode** -- full simulation using real market data but zero real money.
+### How Size Is Calculated
 
-**What happens in paper mode:**
-- The bot watches real markets and generates real signals
-- Trades are simulated internally -- no orders are sent to your exchange
-- All metrics (P&L, win rate, Sharpe ratio) are tracked as if they were real
-- The dashboard looks and works identically to live mode
+Every trade's position size is calculated using the **Kelly Criterion** -- a mathematical formula originally developed for gambling that optimizes growth while managing ruin risk. Nova|Pulse uses a conservative "Quarter-Kelly" approach:
 
-**Why this matters:** You can verify that NovaPulse's behavior matches your expectations, test different settings, and build confidence -- all without any financial risk. We recommend at least 1-2 weeks of paper trading before going live.
+1. The Kelly formula calculates the optimal bet size based on your win rate and average win/loss ratio
+2. This is then divided by 4 (quarter-Kelly) for extra conservatism
+3. The result is capped at 10% of your bankroll (absolute maximum per trade)
+4. The position is further limited by the maximum USD position size (default $350 for crypto, $500 for stocks)
 
----
+**What this means in practice:** A typical position might be 1-3% of your bankroll. Even a string of losing trades will not significantly deplete your account because each loss is small relative to the whole.
 
-## Layer 2: Position Sizing (Kelly Criterion)
+### Risk Per Trade
 
-Before every trade, NovaPulse calculates the right position size using the **Kelly Criterion** -- a mathematical formula that determines how much to invest based on:
+The maximum risk per trade is 1% of your bankroll by default. This means:
+- On a $5,000 bankroll, the maximum loss on any single trade is $50
+- On a $10,000 bankroll, the maximum loss is $100
+- The stop loss is placed to enforce this limit
 
-- Your recent win rate (how often trades are profitable)
-- Your average win vs. average loss (how big the wins are vs. the losses)
-- Your overall bankroll (how much capital you have)
+### Correlation-Based Sizing
 
-**How it protects you:**
+If you have an existing position in a correlated pair (e.g., SOL/USD when you already hold ADA/USD -- both are Layer 1 altcoins), the new position size is reduced. Specifically:
+- The bot calculates the Pearson correlation between the two pairs over recent prices
+- If correlation exceeds 0.7, position size is reduced proportionally
+- At correlation 1.0, size is halved
 
-- NovaPulse uses **quarter Kelly** (25% of the formula's suggestion), which is deliberately conservative
-- Maximum position size is capped (default: $500 per trade or 10% of bankroll, whichever is smaller)
-- If the bot is on a losing streak, the Kelly formula automatically suggests smaller positions
-- If the risk/reward on a particular trade is poor, the position size is reduced further
-
-**Plain-language analogy:** Imagine you are placing bets at a casino. Kelly sizing is like a mathematically calculated bet size that ensures you never bet so much that a losing streak could wipe you out, while still betting enough to grow your bankroll when you are winning.
+This prevents concentrated risk in assets that move together.
 
 ---
 
-## Layer 3: Stop Losses (Automatic Loss Limits)
+## Layer 2: Stop Losses
 
-Every single trade placed by NovaPulse has a **stop loss** -- a predetermined price at which the trade will be automatically closed to limit the loss.
+Every position opened by Nova|Pulse has a stop loss -- a price level at which the position is automatically closed to limit loss.
 
-**How stops are calculated:**
-- NovaPulse uses the **ATR (Average True Range)** indicator to measure recent volatility
-- Stop losses are placed at a distance that accounts for normal market noise
-- The default stop distance is 2x ATR from entry (with a minimum floor of 2.5%)
-- This means stops are far enough that normal fluctuations do not trigger them, but close enough to limit damage
+### ATR-Based Stops
 
-**Example:**
-- You buy BTC at $64,000
-- Recent volatility (ATR) suggests normal moves of about $600
-- Stop loss is set at $62,800 (about 1.9% below entry)
-- If BTC drops to $62,800, the trade closes automatically -- you lose about 1.9% on this trade
-- Your overall account impact is much smaller because position sizing limits how much capital is in the trade
+Stop loss distance is calculated using the Average True Range (ATR), which measures recent volatility:
+- Default stop loss = 2x ATR from entry price
+- In volatile markets, the stop is wider (giving the trade room to breathe)
+- In calm markets, the stop is tighter
 
----
+### Percentage Floors
 
-## Layer 4: Trailing Stops (Locking In Profits)
+To prevent stops from being too tight (which causes premature exits), minimum percentage floors are enforced:
+- Stop loss: at least 2.5% from entry
+- Take profit: at least 5.0% from entry
 
-Once a trade moves in your favor by a certain amount, the **trailing stop** activates. This is a stop loss that moves up (for long trades) or down (for short trades) as the price moves favorably.
+### Structural Stops (v5.0, Optional)
 
-**How it works:**
-
-1. A trade is opened with a fixed stop loss (Layer 3).
-2. When the trade is profitable by 1.5% or more, the trailing stop activates.
-3. From that point, as the price continues moving in your favor, the stop loss follows behind by 0.5%.
-4. The stop loss never moves backward -- it only tightens.
-5. If the price reverses, the trailing stop catches it and closes the trade with a profit.
-
-**Plain-language analogy:** Imagine you are climbing a mountain with a safety rope. As you climb higher, someone below pulls the rope tighter so that if you slip, you only fall a short distance. You can never fall back to the bottom.
-
-```
-Price:   $100 -> $102 -> $104 -> $106 -> $104 -> $102
-Stop:    $97  -> $97  -> $101.5-> $103.5-> $103.5-> CLOSED at $103.5
-                         ^trailing activates    ^trailing catches reversal
-                                                  Profit: +$3.50
-```
+When enabled, stop losses are placed behind recent swing highs or swing lows (actual support/resistance levels) rather than arbitrary ATR multiples. This is more intelligent because:
+- Stops are placed where the market has shown it does not want to go
+- A minimum 0.5x ATR buffer is added below the swing level
+- Maximum distance is capped at 4x ATR to prevent absurdly wide stops
 
 ---
 
-## Layer 5: Breakeven Protection
+## Layer 3: Trailing Stops and Breakeven
 
-Once a trade reaches a profit of 1% from entry, the stop loss is moved to the **entry price** (breakeven). This means the trade can no longer result in a loss (ignoring fees).
+Once a trade moves in your favor, the protection system adapts:
 
-**How it works:**
-1. You enter a trade at $64,000 with a stop at $62,800.
-2. Price rises to $64,640 (1% above entry).
-3. Stop loss is automatically moved from $62,800 up to $64,000 (breakeven).
-4. Now, even if price reverses all the way back down, you exit at $64,000 -- no loss.
-5. If price continues higher, the trailing stop takes over and you capture the gain.
+### Breakeven Activation
 
-This protection kicks in before the trailing stop activates, providing an additional safety layer.
+When a trade reaches 3% profit (default), the stop loss is moved to the entry price. This means:
+- If the market reverses back to your entry, you exit at breakeven (no loss, minus small fees)
+- You have locked in a "free trade" -- the downside is eliminated
 
----
+### Trailing Stop
 
-## Layer 6: Daily Loss Limit
+When profit reaches 4% (default), a trailing stop activates:
+- The trailing stop follows the price upward (for longs) or downward (for shorts)
+- It never moves backward -- only forward in the profitable direction
+- The trailing distance is 0.8% by default
+- In high-volatility regimes, the distance is widened (1.5x) to give the trade room
+- In low-volatility regimes, the distance is tightened (0.7x) to capture profit sooner
 
-NovaPulse tracks your total realized losses for each day. If daily losses reach **5% of your bankroll** (default), the bot **automatically pauses** and stops placing new trades.
-
-**Why this matters:** Even good systems have bad days. The daily loss limit prevents a bad day from becoming a devastating one. Think of it as a "circuit breaker" for bad days.
-
-**What happens when it triggers:**
-- No new trades are opened
-- Existing positions continue to be managed (stop losses still work)
-- You receive a notification explaining what happened
-- Trading resumes the next day (or when you manually resume after reviewing)
+This lets winning trades run while systematically protecting profits as they grow.
 
 ---
 
-## Layer 7: Drawdown Protection
+## Layer 4: Smart Exit System
 
-If your account experiences a drawdown (decline from its peak value) exceeding **8%** (default), the bot auto-pauses.
+Instead of using a single take-profit level, the Smart Exit System closes positions in tiers:
 
-**What it does:** Prevents compounding losses during extended rough patches. When your account drops significantly from its high point, it is often better to step back and reassess rather than keep trading.
+| Tier | Action | When |
+|------|--------|------|
+| **Tier 1** | Close 50% of the position | At 1x the original take-profit distance |
+| **Tier 2** | Close 60% of the remaining (30% of original) | At 1.5x the take-profit distance |
+| **Tier 3** | Close remaining 20% | Via trailing stop only (no fixed target) |
 
-**Additionally:** During periods of elevated drawdown (even below the auto-pause threshold), NovaPulse automatically reduces position sizes. This means the bot trades more conservatively when it is in a tough stretch.
+**Why this works:**
+- Tier 1 locks in profit on the majority of the position early
+- Tier 2 captures additional profit if the move extends
+- Tier 3 lets the final portion ride as far as the trend goes, protected by the trailing stop
+
+### Time-Based Exit Tightening
+
+Positions that linger without making progress get tighter exits:
+- After 30 minutes with less than 0.5% profit: take profit is reduced to 60% of original
+- After 60 minutes with less than 1.0% profit: take profit is reduced to 40% of original
+
+This prevents capital from being tied up in stale trades that are not going anywhere.
+
+See the [Smart Exit System guide](Smart-Exit-System.md) for the full breakdown.
+
+---
+
+## Layer 5: Daily Loss Limit
+
+Nova|Pulse enforces a maximum loss per day (UTC boundary):
+
+- Default: 5% of bankroll per day
+- When the limit is reached, **all new trading is paused** for the rest of the day
+- Existing positions continue to be managed (stops still work)
+- Trading automatically resumes at the next UTC midnight
+
+**Example:** On a $5,000 bankroll, the daily loss limit is $250. If losses for the day reach $250, the bot stops opening new trades.
+
+---
+
+## Layer 6: Exposure Caps
+
+The bot limits how much capital can be at risk simultaneously:
+
+- **Maximum total exposure:** Default 50% of bankroll. Even if every trade passes all filters, the bot will not deploy more than half your capital at once.
+- **Maximum concurrent positions:** Default 10 for crypto, 6 for stocks.
+- **Correlation group limits:** Default 2 positions per correlation group. You cannot have 5 altcoin positions at the same time if they are all in the same correlation group.
+
+---
+
+## Layer 7: Cross-Engine Risk Aggregation
+
+If you trade on multiple exchanges (Kraken + Coinbase + Stocks), the **Global Risk Aggregator** tracks total exposure across all engines:
+
+- Each engine reports its current exposure to the aggregator
+- Before opening a new position, the engine checks global remaining capacity
+- This prevents the combined exposure across all exchanges from exceeding the global cap
 
 ---
 
 ## Layer 8: Circuit Breakers
 
-NovaPulse has several automatic circuit breakers that pause trading when conditions are unsafe:
+Multiple automatic pause mechanisms stand ready:
 
-| Circuit Breaker | Trigger | What Happens |
-|----------------|---------|-------------|
-| **Stale Data** | No fresh market data for 3+ consecutive checks | Trading pauses until data recovers. Prevents trading on outdated prices. |
-| **Exchange Disconnect** | WebSocket connection lost for 5+ minutes | Trading pauses until reconnected. Prevents "blind" trading. |
-| **Consecutive Losses** | 4 losses in a row (default) | Trading pauses for review. A losing streak may indicate changed market conditions. |
-| **Daily Loss Limit** | 5% of bankroll lost in one day | Trading pauses until next day. Prevents catastrophic single-day losses. |
-| **Drawdown Limit** | 8% decline from peak account value | Trading pauses for review. |
+### Consecutive Loss Pause
+After 5 losing trades in a row (default), trading pauses automatically. This prevents "tilt" behavior and gives the market time to change.
 
-**After a loss-triggered pause:** A 30-minute cooldown period is applied before any new trades can be taken (even after resuming). This prevents emotional re-entry after a loss.
+### Drawdown Pause
+If peak-to-trough drawdown reaches 8% (default), trading pauses. This catches situations where losses are accumulating even if they are not consecutive.
 
----
+### Stale Data Pause
+If market data stops updating for more than 3 consecutive health checks, trading pauses. You cannot make good decisions with bad data.
 
-## Layer 9: Maximum Concurrent Positions
+### WebSocket Disconnect Pause
+If the exchange WebSocket stays disconnected for more than 5 minutes, trading pauses until reconnection.
 
-NovaPulse limits the number of trades that can be open at the same time -- **5 by default**. This prevents the bot from overcommitting capital across too many trades.
+### Anomaly Detection Pause (v5.0, Optional)
+The anomaly detector monitors for:
+- **Spread spikes** (3x normal) -- unusual widening suggests unstable conditions
+- **Volume anomalies** (5x normal) -- extreme volume may indicate manipulation or news
+- **Correlation anomalies** (>60% of positions in the same direction) -- concentrated risk
+- **Depth drops** (>50% of normal) -- thin order books increase execution risk
 
-**Why this matters:** If you had 20 trades open at once and the market moved sharply against you, the losses could compound. By limiting concurrent positions, NovaPulse keeps your overall exposure manageable.
-
----
-
-## Layer 10: Total Exposure Cap
-
-Beyond limiting the number of positions, NovaPulse also caps the total dollar value of all open positions. By default, no more than **50% of your bankroll** can be deployed at any time.
-
-**Example:** If your bankroll is $10,000, the bot will never have more than $5,000 in open positions combined. This ensures you always have reserves and are never "all in."
+If detected, trading pauses for a cooldown period (default 5 minutes).
 
 ---
 
-## Layer 11: Trade Rate Throttle
+## Layer 9: Exchange-Native Stop Orders
 
-NovaPulse limits how many new trades can be opened per hour. This prevents runaway overtrading, which can happen if market conditions create rapid signals.
-
-**The cooldown system:**
-- After a trade is placed, a 5-minute cooldown prevents immediate re-entry in the same pair
-- A global trades-per-hour limit can be configured
-- After a losing trade, a 30-minute global cooldown applies before any new trades
+For crash-proof protection, Nova|Pulse can place stop-loss orders directly on the exchange. This means:
+- Even if the bot process crashes or loses connectivity, the exchange will execute the stop
+- This is a backstop of last resort -- the bot normally manages stops itself
 
 ---
 
-## Layer 12: Exchange-Native Stop Orders
+## Layer 10: Trade Quality Filters
 
-In addition to monitoring stop losses internally, NovaPulse can place **stop-loss orders directly on the exchange**. This provides a critical backup:
+Before any trade is placed, multiple filters must pass:
 
-- If NovaPulse's server crashes, restarts, or loses connection, the exchange's own stop order is already in place
-- The exchange will execute the stop regardless of what happens to NovaPulse
-- This means your positions are protected even in the worst-case scenario
-
----
-
-## Layer 13: Smart Exits (Optional)
-
-When enabled, the Smart Exit system takes partial profits at multiple levels instead of waiting for a single take-profit target:
-
-| Level | Action |
-|-------|--------|
-| **1x TP distance** | Close 50% of the position, locking in half the profit |
-| **1.5x TP distance** | Close 30% of the remaining position |
-| **Beyond 1.5x** | Trailing stop manages the final 20% |
-
-**Why this helps:** It locks in guaranteed profit early while still leaving a portion open to capture larger moves. The trade-off is that you may capture less on big winners, but you are much less likely to watch a winning trade turn into a loser.
-
-Smart Exits are **disabled by default** and can be enabled through the settings panel.
+| Filter | What It Checks |
+|--------|---------------|
+| **Confluence threshold** | At least 2 strategies must agree |
+| **Confidence threshold** | Overall confidence must exceed 0.50 |
+| **Risk/reward ratio** | Must be at least 1.0 (potential profit >= potential loss) |
+| **Spread gate** | The bid-ask spread must not be too wide (default max 0.30%) |
+| **Quiet hours** | No trading during configured quiet hours (default UTC 3:00) |
+| **Trade rate limit** | Maximum 20 trades per hour to prevent churn |
+| **Pair cooldown** | At least 20 seconds between trades on the same pair |
+| **Strategy cooldown** | At least 60 seconds between the same strategy signaling |
+| **Canary mode** | If enabled, restricts to 2 pairs and tiny positions for testing |
 
 ---
 
-## Layer 14: Confluence Requirement
+## Layer 11: Macro Event Calendar (v5.0, Optional)
 
-This is not strictly a risk feature, but it is a powerful form of protection. By requiring **at least 3 of 9 strategies** to agree before entering a trade, NovaPulse avoids acting on weak or ambiguous signals. This dramatically reduces the number of false entries.
+When enabled, the event calendar prevents new trades during high-impact economic events:
+- FOMC interest rate decisions
+- CPI (Consumer Price Index) releases
+- NFP (Non-Farm Payrolls) reports
+- Earnings announcements (if configured)
 
-See [Trading Strategies](Trading-Strategies.md) for more details.
-
----
-
-## Summary: Your Multi-Layer Protection
-
-```
-+-----------------------------------------------------------+
-|                    YOUR CAPITAL                            |
-|                                                           |
-|  Layer 1:  Paper Trading (test risk-free)                 |
-|  Layer 2:  Position Sizing (Kelly Criterion, 1/4 Kelly)   |
-|  Layer 3:  Stop Losses (ATR-based, every trade)           |
-|  Layer 4:  Trailing Stops (lock in profits)               |
-|  Layer 5:  Breakeven Protection (eliminate risk early)     |
-|  Layer 6:  Daily Loss Limit (5% auto-pause)               |
-|  Layer 7:  Drawdown Protection (8% auto-pause)            |
-|  Layer 8:  Circuit Breakers (stale data, disconnects)     |
-|  Layer 9:  Max Positions (5 concurrent)                   |
-|  Layer 10: Exposure Cap (50% of bankroll max)             |
-|  Layer 11: Trade Throttle (prevent overtrading)           |
-|  Layer 12: Exchange-Native Stops (survive bot crashes)    |
-|  Layer 13: Smart Exits (partial profit-taking)            |
-|  Layer 14: Confluence (multi-strategy agreement)          |
-|                                                           |
-+-----------------------------------------------------------+
-```
+A configurable blackout window (default 30 minutes before and after) surrounds each event. Existing positions are still managed.
 
 ---
 
-## Risk Disclosure
+## Layer 12: Liquidity-Aware Sizing (v5.0, Optional)
 
-While NovaPulse implements comprehensive risk management, it is important to understand:
-
-- **Trading cryptocurrency involves risk.** You can lose money, and past performance does not guarantee future results.
-- **No system is perfect.** Black swan events, flash crashes, exchange outages, or extreme market conditions can cause losses that exceed stop-loss levels.
-- **Slippage can occur.** In fast-moving markets, the actual execution price may differ slightly from the intended stop-loss price.
-- **Only trade with money you can afford to lose.** NovaPulse helps you trade more systematically and with better risk management, but it does not eliminate risk entirely.
-
-We believe in transparency: NovaPulse cannot promise profits, but it can promise disciplined, systematic risk management that gives you the best chance of long-term success.
+When enabled, the bot checks order book depth before sizing a position:
+- If the order book is thin relative to the desired position size, the position is reduced
+- This prevents large orders from moving the market against you
+- Configurable maximum market impact (default 10%) and minimum depth ratio (default 3x)
 
 ---
 
-*For default settings and how to adjust them, see [Configuration Guide](Configuration-Guide.md).*
-*For emergency controls, see [Controls](Controls-Pause-Resume-Kill.md).*
+## What Nova|Pulse Cannot Protect Against
+
+While the safety system is comprehensive, you should understand its limitations:
+
+- **Extreme flash crashes or exchange outages:** If the exchange itself goes down or prices gap violently past your stop, losses may exceed the stop level.
+- **Black swan events:** Unprecedented events (exchange hack, regulatory action) are impossible to model.
+- **Guaranteed profits:** No amount of safety engineering can make a trading system profitable in all conditions. Safety reduces the severity of losses, not their occurrence.
+- **Slow bleeds:** A strategy portfolio that is slightly negative over time will produce losses that are individually small but cumulative. The auto-tuner works to prevent this.
+
+---
+
+## Summary of Default Safety Settings
+
+| Protection | Default Value |
+|-----------|--------------|
+| Risk per trade | 1% of bankroll |
+| Maximum position size | $350 (crypto), $500 (stocks) |
+| Stop loss distance | 2x ATR (minimum 2.5%) |
+| Take profit distance | 3x ATR (minimum 5%) |
+| Breakeven activation | 3% profit |
+| Trailing stop activation | 4% profit |
+| Trailing step | 0.8% |
+| Daily loss limit | 5% of bankroll |
+| Total exposure cap | 50% of bankroll |
+| Max concurrent positions | 10 (crypto), 6 (stocks) |
+| Positions per correlation group | 2 |
+| Consecutive loss pause | 5 losses |
+| Drawdown pause | 8% |
+| Kelly fraction | 0.25 (quarter-Kelly) |
+| Max Kelly size | 10% of bankroll |
+| Max spread | 0.30% |
+| Quiet hours | UTC 3:00 |
+| Trade rate limit | 20 per hour |
+
+---
+
+*Nova|Pulse v5.0.0 -- Safety is not a feature; it is the foundation.*

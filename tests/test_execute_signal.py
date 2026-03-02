@@ -150,10 +150,16 @@ async def test_confidence_decay_pushes_below_threshold():
 
 @pytest.mark.asyncio
 async def test_duplicate_pair_rejected():
-    """When the DB already has an open trade for the same pair, returns None."""
+    """When there is already an open position for the same pair, returns None."""
     db = StubDB()
     db._open_trades = [{"pair": "BTC/USD", "side": "buy", "trade_id": "existing"}]
-    executor = _make_test_executor(db=db)
+    rm = RiskManager(**_DEFAULT_RM)
+    # Populate in-memory positions (gate now uses rm._open_positions, not DB)
+    rm._open_positions["existing"] = {
+        "pair": "BTC/USD", "side": "buy", "entry_price": 50000.0,
+        "size_usd": 500.0, "strategy": "keltner", "opened_at": 0.0,
+    }
+    executor = _make_test_executor(db=db, risk_manager=rm)
     signal = make_signal(pair="BTC/USD")
 
     result = await executor.execute_signal(signal)
@@ -167,7 +173,12 @@ async def test_different_pair_not_rejected():
     """An open trade on a different pair does not block entry on a new pair."""
     db = StubDB()
     db._open_trades = [{"pair": "ETH/USD", "side": "buy", "trade_id": "existing"}]
-    executor = _make_test_executor(db=db)
+    rm = RiskManager(**_DEFAULT_RM)
+    rm._open_positions["existing"] = {
+        "pair": "ETH/USD", "side": "buy", "entry_price": 3000.0,
+        "size_usd": 500.0, "strategy": "keltner", "opened_at": 0.0,
+    }
+    executor = _make_test_executor(db=db, risk_manager=rm)
     signal = make_signal(pair="BTC/USD")
 
     result = await executor.execute_signal(signal)
@@ -266,18 +277,24 @@ async def test_trade_rate_throttle_disabled_when_zero():
 # 8. Correlation group limit
 # ---------------------------------------------------------------------------
 
+def _pos(pair, side="buy"):
+    """Helper to create a minimal _open_positions entry."""
+    return {"pair": pair, "side": side, "entry_price": 100.0,
+            "size_usd": 500.0, "strategy": "keltner", "opened_at": 0.0}
+
+
 @pytest.mark.asyncio
 async def test_correlation_group_limit_blocks():
     """When the correlation group has max positions, the new signal is rejected."""
     db = StubDB()
-    # SOL/USD and AVAX/USD are both in the "alt_l1" group.
-    # Pre-fill with 2 open trades in the same group (max is 2).
     db._open_trades = [
         {"pair": "SOL/USD", "side": "buy", "trade_id": "t1"},
         {"pair": "AVAX/USD", "side": "buy", "trade_id": "t2"},
     ]
-    executor = _make_test_executor(db=db)
-    # DOT/USD is also in "alt_l1".
+    rm = RiskManager(**_DEFAULT_RM)
+    rm._open_positions["t1"] = _pos("SOL/USD")
+    rm._open_positions["t2"] = _pos("AVAX/USD")
+    executor = _make_test_executor(db=db, risk_manager=rm)
     signal = make_signal(pair="DOT/USD")
 
     result = await executor.execute_signal(signal)
@@ -290,11 +307,12 @@ async def test_correlation_group_limit_blocks():
 async def test_correlation_group_allows_under_limit():
     """When the correlation group has room, the signal proceeds."""
     db = StubDB()
-    # Only 1 position in the "alt_l1" group, max is 2.
     db._open_trades = [
         {"pair": "SOL/USD", "side": "buy", "trade_id": "t1"},
     ]
-    executor = _make_test_executor(db=db)
+    rm = RiskManager(**_DEFAULT_RM)
+    rm._open_positions["t1"] = _pos("SOL/USD")
+    executor = _make_test_executor(db=db, risk_manager=rm)
     signal = make_signal(pair="DOT/USD")
 
     result = await executor.execute_signal(signal)
@@ -311,8 +329,10 @@ async def test_uncorrelated_pair_not_blocked():
         {"pair": "SOL/USD", "side": "buy", "trade_id": "t1"},
         {"pair": "AVAX/USD", "side": "buy", "trade_id": "t2"},
     ]
-    executor = _make_test_executor(db=db)
-    # BTC/USD is in the "btc" group -- only one member, so it cannot be blocked.
+    rm = RiskManager(**_DEFAULT_RM)
+    rm._open_positions["t1"] = _pos("SOL/USD")
+    rm._open_positions["t2"] = _pos("AVAX/USD")
+    executor = _make_test_executor(db=db, risk_manager=rm)
     signal = make_signal(pair="BTC/USD")
 
     result = await executor.execute_signal(signal)

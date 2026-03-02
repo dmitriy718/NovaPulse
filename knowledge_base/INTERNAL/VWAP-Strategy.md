@@ -1,7 +1,7 @@
 # VWAP Momentum Alpha Strategy
 
-**Version:** 4.5.0
-**Date:** 2026-02-24
+**Version:** 5.0.0
+**Date:** 2026-02-27
 **Source:** `src/strategies/vwap_momentum_alpha.py`
 **Class:** `VWAPMomentumAlphaStrategy(BaseStrategy)`
 

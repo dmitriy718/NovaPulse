@@ -122,7 +122,8 @@ class VolatilitySqueezeStrategy(BaseStrategy):
         mom_falling = curr_mom < prev_mom
         long_mom_slope = curr_mom > prev_mom > prev_mom2
         short_mom_slope = curr_mom < prev_mom < prev_mom2
-        mom_accelerating = (curr_mom - prev_mom) > (prev_mom - prev_mom2)
+        mom_accel_up = (curr_mom - prev_mom) > (prev_mom - prev_mom2)
+        mom_accel_down = (curr_mom - prev_mom) < (prev_mom - prev_mom2)
 
         direction = SignalDirection.NEUTRAL
         strength = 0.0
@@ -149,8 +150,8 @@ class VolatilitySqueezeStrategy(BaseStrategy):
                 strength += 0.08
                 confidence += 0.05
 
-            # Momentum acceleration
-            if mom_accelerating:
+            # Momentum acceleration (upward)
+            if mom_accel_up:
                 strength += 0.10
                 confidence += 0.08
 
@@ -178,7 +179,7 @@ class VolatilitySqueezeStrategy(BaseStrategy):
                 strength += 0.08
                 confidence += 0.05
 
-            if mom_accelerating:  # Momentum accelerating to downside
+            if mom_accel_down:  # Momentum accelerating to downside
                 strength += 0.10
                 confidence += 0.08
 

@@ -1,164 +1,240 @@
 # Security and Privacy
 
-**Last updated:** 2026-02-24
+**Last updated:** 2026-03-02
 
-Your security is a top priority for NovaPulse. This guide explains how your data, API keys, and access are protected.
+Your security is a top priority for Nova|Pulse by Horizon Services. This guide explains how your account, data, API keys, and access are protected across both the NovaPulse trading bot and the Horizon web platform.
+
+---
+
+## Account Security (Horizon Platform)
+
+### Authentication
+
+Nova by Horizon uses **Google Firebase Authentication** for all account management:
+
+- Your password is never stored on our servers -- Firebase handles all credential storage and hashing
+- Password hashing uses industry-standard bcrypt via Firebase
+- Session tokens are Firebase ID tokens (JWT format) verified server-side on every request
+
+### Sign-In Methods
+
+Two sign-in methods are supported:
+1. **Email and Password**: Create an account with your email and a strong password
+2. **Google SSO**: Sign in with your Google account for one-click authentication
+
+### Email Verification
+
+Email verification is required before you can access the trading dashboard, subscribe to a plan, use the Pro scanner, or submit authenticated support tickets. Verification emails are sent from `support@horizonsvc.com`.
+
+### Failed Login Detection
+
+The system monitors failed login attempts and takes protective action:
+
+| Failed Attempts (30 min) | Action |
+|---|---|
+| 1 | No action |
+| 2 | Warning email sent to account owner |
+| 3+ | Account temporarily locked for 30 minutes |
+
+When locked, you receive an email notification from `security@horizonsvc.com`. The lock expires automatically -- you can try logging in again after 30 minutes.
+
+### Security Notifications
+
+When security-relevant events occur, you receive email notifications that **cannot be disabled**:
+- **Password Changed**: Includes IP address and timestamp
+- **Failed Login Warning**: After 2 failures, includes attempt count and IP
+- **Account Locked**: Includes IP address and timestamp
+- **Personal Info Changed**: When profile name is updated, includes changed fields and IP
 
 ---
 
 ## Exchange API Key Security
 
-### How Your Keys Are Stored
+### Key Permissions
 
-- Your exchange API keys are stored **encrypted on our servers** using industry-standard encryption.
-- Keys are never stored in plain text.
-- Keys are never exposed in logs, dashboard views, or API responses.
-- Only the NovaPulse trading engine has access to the decrypted keys at runtime.
+When you create API keys for your exchange, we recommend enabling only the minimum necessary permissions:
+- **View** (balances, orders, trades) -- Required
+- **Trade** (place and cancel orders) -- Required
+- **Withdraw** -- **Never enable this.** Nova|Pulse does not need withdrawal access.
 
-### What NovaPulse Can Do With Your Keys
+With these permissions, even if your API keys were compromised, an attacker could not withdraw funds from your exchange account.
 
-When you set up API keys with the recommended permissions, NovaPulse can:
+### Key Storage
 
-- **View your balances** -- to calculate position sizes and exposure
-- **Place orders** -- to execute trades (buy, sell, set stop losses)
-- **Cancel orders** -- to manage and adjust existing orders
-- **View order history** -- to track trade results
+API keys are never stored in plain text:
 
-### What NovaPulse Cannot Do
+- **Horizon-managed deployments:** Keys are stored in `.secrets/env`, a file volume-mounted into the Docker container. This file is not part of the codebase, not in version control, and not accessible via the API.
+- **Self-hosted deployments:** You manage your own `.secrets/env` file. Follow the same practices: keep it outside version control, restrict file permissions, and never commit it to Git.
+- **Horizon web platform:** Bot connection API keys (for dashboard proxy access) are stored in the `bot_connections` database table, transmitted only over TLS.
 
-With properly configured API keys (following the [Getting Started](Getting-Started.md) instructions):
+### SSRF Protection
 
-- **Cannot withdraw funds** -- withdrawal permission is not enabled
-- **Cannot transfer funds** between accounts
-- **Cannot access other exchange features** (staking, lending, etc.)
-- **Cannot change your exchange account settings**
-
-> **Important:** When generating API keys, always ensure that withdrawal permissions are **disabled**. This is your primary protection -- even in the worst-case scenario, your funds cannot be moved off the exchange.
+When you connect a bot URL through the Horizon dashboard, the system prevents Server-Side Request Forgery (SSRF) attacks:
+- Only HTTP and HTTPS protocols are allowed
+- Private/internal IP addresses are blocked (127.0.0.1, 10.x.x.x, 172.16-31.x.x, 192.168.x.x, localhost)
+- DNS resolution is checked to prevent DNS rebinding attacks
+- Redirects are never followed on bot proxy requests
 
 ---
 
-## Dashboard Authentication
-
-### Login Security
-
-- **Username and password** authentication for the web dashboard
-- **Session-based login** with secure, signed session cookies
-- Sessions expire after **12 hours** by default -- you will need to log in again
-- In live mode, passwords are stored as **secure hashes** (never plain text)
-
-### CSRF Protection
-
-- The dashboard uses **CSRF (Cross-Site Request Forgery) tokens** to prevent unauthorized actions
-- Every state-changing request (pause, resume, close all, kill) includes a CSRF token
-- This prevents malicious websites from tricking your browser into executing commands
+## Bot Dashboard Security
 
 ### API Key Authentication
 
-For programmatic access (and for notification bots), NovaPulse uses API keys:
+The NovaPulse bot dashboard uses API key authentication:
 
-| Key Type | What It Can Do |
-|----------|---------------|
-| **Admin Key** | Full access: read data AND control the bot (pause, resume, close all) |
-| **Read Key** | Read-only access: view data but cannot control the bot |
-| **Tenant API Key** | Per-subscription access: read data, optionally control (based on plan) |
+| Key Type | Access Level |
+|---|---|
+| Admin Key | Full control + all read endpoints |
+| Read Key | Data endpoints only |
 
-- API keys are passed via the `X-API-Key` header
-- Admin keys are required for all control operations by default
-- Keys are never logged or exposed in API responses
+Keys are sent in the `X-API-Key` header. They are stored in `.secrets/env` (never in the config file or version control).
 
----
+### Login Protection
 
-## Rate Limiting
+- Passwords are hashed with bcrypt (never stored in plain text)
+- After 5 failed login attempts in 5 minutes, the account locks temporarily (brute-force protection)
+- CSRF protection is enabled on all form submissions
 
-NovaPulse protects against abuse and brute-force attacks with rate limiting:
+### Dashboard Access
 
-- **Dashboard API:** 240 requests per minute per client (with burst allowance of 60)
-- **Login endpoint:** Protected against brute-force attempts
-- **Control endpoints:** Rate-limited to prevent rapid-fire commands
-
-If you are rate-limited, you will receive a `429 Too Many Requests` response. Wait a moment and try again.
+- The bot dashboard runs on port 8080 inside the container (mapped to 8090 on the host by default)
+- For managed deployments, access is through a Caddy reverse proxy with HTTPS
+- Rate limiting prevents API abuse
 
 ---
 
-## Multi-Tenant Isolation
+## Data Protection
 
-If you are using NovaPulse in a shared or multi-tenant environment:
+### Data in Transit
 
-- **Your data is isolated** from other tenants. You cannot see or access another tenant's trades, positions, or configuration.
-- **Tenant API keys are pinned** to your specific tenant ID. A tenant key cannot access data from a different tenant.
-- **Billing and subscription status** are tracked per tenant. An inactive subscription blocks access.
+- All traffic between your browser and both dashboards is encrypted via TLS 1.2+
+- HTTPS is enforced site-wide with HTTP to HTTPS redirects
+- HSTS (HTTP Strict Transport Security) is enabled with a 2-year max-age
 
----
+### Content Security Policy
 
-## What Data NovaPulse Collects
+The Horizon platform enforces a strict Content Security Policy (CSP):
+- Only resources from approved origins can be loaded
+- `frame-ancestors 'none'` prevents the site from being embedded in iframes (clickjacking protection)
+- Additional headers: X-Content-Type-Options: nosniff, X-Frame-Options: DENY
 
-NovaPulse collects and stores the following data to operate the trading system:
+### Data at Rest
 
-| Data Type | Why It Is Collected | Retention |
-|-----------|-------------------|-----------|
-| **Trade records** | Track performance, calculate metrics, manage positions | Indefinite (your trading history) |
-| **Market data** | Run trading strategies, calculate indicators | 90 days (candles), 30 days (order book) |
-| **AI thought log** | Debugging, transparency, support troubleshooting | 200 most recent entries |
-| **System logs** | Monitor health, diagnose issues, track errors | 72 hours |
-| **Configuration** | Run the bot with your settings | Until you change it |
-| **Session tokens** | Maintain your dashboard login | 12 hours |
-
-### What NovaPulse Does NOT Collect
-
-- Your exchange account password
-- Your exchange withdrawal credentials
-- Personal information beyond what is needed for account management
-- Browsing history or activity outside the NovaPulse dashboard
-- Data from other applications on your device
+- **NovaPulse bot**: All trade data, logs, and metrics are stored in SQLite with WAL mode on the bot server
+- **Horizon platform**: User accounts, subscriptions, and bot connections are stored in PostgreSQL
+- Both systems use parameterized queries to prevent SQL injection
 
 ---
 
-## How to Revoke Access
+## API Security
 
-If you want to stop NovaPulse from accessing your exchange account:
+### Horizon Platform API
 
-### Immediate (Exchange-Side)
+- Firebase tokens are verified server-side on every authenticated request
+- Global rate limit: 120 requests per minute per IP
+- Per-endpoint rate limits for login attempts, newsletter subscriptions, and contact forms
+- CORS restricts allowed origins to horizonsvc.com and localhost (development)
+- All inputs are validated using Zod schemas
 
-1. Log in to your exchange (Kraken or Coinbase).
-2. Go to API settings.
-3. **Delete or disable** the API key used by NovaPulse.
-4. This takes effect immediately -- NovaPulse will no longer be able to view balances or place orders.
+### NovaPulse Bot API
 
-> **Important:** If you have open positions, use the **Close All** or **Kill** command before revoking API keys. Otherwise, your positions will remain open without NovaPulse managing them.
-
-### NovaPulse-Side
-
-1. Contact support to deactivate your NovaPulse account.
-2. Your configuration and stored keys will be deleted.
-3. Your trade history can be exported before deletion upon request.
+- X-API-Key header authentication on all endpoints
+- CORS restricted to configured origins
+- Rate limiting on sensitive endpoints
 
 ---
 
-## Security Best Practices
+## Privacy Practices
 
-1. **Use strong, unique passwords** for both your exchange account and NovaPulse dashboard.
-2. **Enable two-factor authentication (2FA)** on your exchange account.
-3. **Never share your API keys** in chat messages, emails, or support tickets (support will never ask for your full secret key).
-4. **Never enable withdrawal permissions** on API keys used by NovaPulse.
-5. **Regularly review** your exchange API key list and remove any keys you no longer use.
-6. **Use a password manager** to store your API keys and credentials securely.
-7. **Log out of the dashboard** when using a shared or public computer.
-8. **Monitor your exchange account** directly for any unexpected activity.
+### What Data We Collect
+
+- **Account information**: Name, email, age, zip code (optional: address)
+- **Authentication data**: Firebase UID, login timestamps, IP addresses (for security)
+- **Subscription data**: Plan type, billing period (payment details handled entirely by Stripe)
+- **Bot connection data**: Bot URL, API key (for dashboard proxy)
+- **Trading data**: Proxied from your bot for dashboard display (not stored long-term on Horizon servers)
+- **Email logs**: Template sent, timestamp, recipient (for deduplication and audit)
+
+### What We Do NOT Collect
+
+- Exchange credentials with withdrawal permissions
+- Actual trade execution data on Horizon servers (this stays on your bot/exchange)
+- Payment card numbers (handled entirely by Stripe)
+- Browser fingerprints
+- Location data beyond zip code
+
+### Data Retention
+
+- Account data is retained until account deletion
+- Login attempts are retained for security review
+- Email logs are retained for deduplication and audit
+- Bot connection data is retained while the account is active
+- Trade history on the bot is retained until stats are zeroed (user-initiated)
+
+### Third-Party Services
+
+| Service | Purpose |
+|---|---|
+| Firebase (Google) | Authentication and email verification |
+| Stripe | Payment processing |
+| PostHog | Product analytics (optional) |
+| SMTP (SiteProtect) | Email delivery |
 
 ---
 
-## Reporting Security Concerns
+## Email Security
 
-If you suspect any security issue -- unauthorized access, unexpected trades, or suspicious activity:
+### Unsubscribe Token Security
 
-1. **Immediately press Kill** on the dashboard or send `/kill` via Telegram.
-2. **Revoke your exchange API keys** directly on the exchange.
-3. **Contact NovaPulse support immediately** with details of what you observed.
-4. **Change your passwords** for both NovaPulse and your exchange account.
+Email unsubscribe links use HMAC-signed stateless tokens:
+- Tokens are signed with HMAC-SHA256
+- Tokens expire after 90 days
+- Token verification uses timing-safe comparison to prevent timing attacks
+- Security notification emails (password changes, failed logins, lockouts, profile changes) **cannot be unsubscribed** -- this is enforced at every level
 
-We take security reports seriously and will investigate promptly.
+### Email Sender Addresses
+
+| Category | From Address |
+|---|---|
+| Support | support@horizonsvc.com |
+| Trading Alerts | alerts@horizonsvc.com |
+| Marketing | marketing@horizonsvc.com |
+| Security | security@horizonsvc.com |
 
 ---
 
-*For emergency controls, see [Controls](Controls-Pause-Resume-Kill.md).*
-*For general support, see [Contact Support](Contact-Support.md).*
+## Cookie Policy
+
+The Horizon platform uses cookies for:
+- Firebase authentication session management
+- PostHog analytics (if enabled)
+- Cookie consent preferences
+
+A cookie banner is displayed to new visitors. The full cookie policy is available at [horizonsvc.com/cookies](https://horizonsvc.com/cookies).
+
+---
+
+## Legal Pages
+
+- [Privacy Policy](https://horizonsvc.com/privacy)
+- [Terms of Service](https://horizonsvc.com/terms)
+- [Cookie Policy](https://horizonsvc.com/cookies)
+- [Trust and Safety](https://horizonsvc.com/trust-safety)
+- [Email Security (DMARC)](https://horizonsvc.com/dmarc)
+
+---
+
+## Best Practices for Users
+
+1. **Never enable withdrawal permissions** on your exchange API keys
+2. **Use a strong, unique password** for your Horizon account
+3. **Enable 2FA on your exchange accounts** (Kraken, Coinbase, Alpaca)
+4. **Use Google SSO** if you prefer not to manage another password
+5. **Restrict API keys by IP** on your exchange if you have a static server IP
+6. **Verify the URL** when logging in -- always use `horizonsvc.com` or your known bot URL
+7. **Report suspicious activity** immediately to support@horizonsvc.com
+
+---
+
+*Nova|Pulse v5.0.0 by Horizon Services -- Your security is our foundation.*

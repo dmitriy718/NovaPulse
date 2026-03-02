@@ -83,19 +83,46 @@ class ControlRouter:
         return {"ok": True, "status": "paused"}
 
     async def resume(self, tenant_id: Optional[str] = None) -> Dict[str, Any]:
-        """Resume trading. Returns status dict."""
+        """Resume trading. Returns status dict.
+
+        Clears ALL auto-pause state and sets a grace period so circuit
+        breakers (consecutive losses, drawdown, stale data, WS disconnect)
+        don't immediately re-pause the engine.
+        """
         if not self._engine:
             return {"ok": False, "error": "engine not set"}
         if not self._is_tenant_match(tenant_id):
             return {"ok": False, "error": "tenant mismatch"}
         tid = self._resolve_tenant(tenant_id)
         self._engine._trading_paused = False
+        # Reset auto-pause state so circuit breakers don't immediately re-pause
+        if hasattr(self._engine, "_auto_pause_reason"):
+            self._engine._auto_pause_reason = ""
+        if hasattr(self._engine, "_stale_check_count"):
+            self._engine._stale_check_count = 0
+        if hasattr(self._engine, "_ws_disconnected_since"):
+            self._engine._ws_disconnected_since = None
+        # 10-minute grace period: skip ALL circuit breakers after resume.
+        # This prevents the common scenario where resume is immediately
+        # followed by re-pause because the condition (drawdown, WS down,
+        # stale data) hasn't cleared yet.
+        grace_until = time.time() + 600
+        if hasattr(self._engine, "_auto_pause_cooldown_until"):
+            self._engine._auto_pause_cooldown_until = grace_until
+        # Reset ALL risk manager auto-pause state
+        rm = getattr(self._engine, "risk_manager", None)
+        if rm:
+            rm._consecutive_losses = 0
+            rm._global_cooldown_until = 0.0
+            rm._circuit_breaker_active = False
         if self._engine.db:
             await self._engine.db.log_thought(
-                "system", "Trading RESUMED via control", severity="info",
+                "system",
+                "Trading RESUMED via control (all auto-pause state cleared, 10-min grace period active)",
+                severity="info",
                 tenant_id=tid,
             )
-        logger.info("Trading resumed via control router")
+        logger.info("Trading resumed via control router (auto-pause state cleared, 10-min grace)")
         return {"ok": True, "status": "resumed"}
 
     async def close_all(
@@ -163,6 +190,8 @@ class ControlRouter:
         stats = await self._engine.db.get_performance_stats(
             tenant_id=getattr(self._engine, "tenant_id", "default")
         )
+        if not getattr(self._engine, "risk_manager", None):
+            return stats
         risk = self._engine.risk_manager.get_risk_report()
         return {**stats, **risk}
 
@@ -174,12 +203,14 @@ class ControlRouter:
             tenant_id=getattr(self._engine, "tenant_id", "default")
         )
         for pos in positions:
-            cp = self._engine.market_data.get_latest_price(pos.get("pair", ""))
-            pos["current_price"] = cp
+            md = getattr(self._engine, "market_data", None)
+            pos["current_price"] = md.get_latest_price(pos.get("pair", "")) if md else None
         return positions
 
     def get_risk(self) -> Dict[str, Any]:
         """Get risk report."""
         if not self._engine:
+            return {}
+        if not getattr(self._engine, "risk_manager", None):
             return {}
         return self._engine.risk_manager.get_risk_report()

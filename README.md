@@ -1,4 +1,4 @@
-# NovaPulse (v4.5.0)
+# NovaPulse (v5.0.0)
 
 Operator-grade AI trading system: multi-strategy signal engine across crypto and stocks, risk-first execution with adaptive exits, hardened control plane, and continuous self-improvement.
 
@@ -251,7 +251,45 @@ Startup logs now print:
 
 ## Full Changelog
 
-See [CHANGELOG.md](CHANGELOG.md) for complete version history from v3.0.0 through v4.5.0.
+See [CHANGELOG.md](CHANGELOG.md) for complete version history from v3.0.0 through v5.0.0.
+
+## Horizon Web Platform (horizonsvc.com)
+
+NovaPulse is the trading engine. [horizonsvc.com](https://horizonsvc.com) is the customer-facing SaaS platform that sells and manages NovaPulse bot subscriptions under the brand **Nova by Horizon**.
+
+```
+Customer Browser
+    |
+    v
+horizonsvc.com (Next.js + Fastify)
+    |  Firebase Auth, Stripe billing,
+    |  PostgreSQL user/entitlement DB
+    |
+    |--- GET /bot/performance ---> nova.horizonsvc.com (Caddy TLS)
+    |                                     |
+    |                                     v
+    |                              NovaPulse Bot (:8080)
+    |                              GET /api/v1/performance
+    v
+Dashboard shows real bot stats
+```
+
+**How it works:**
+
+- Each customer gets their own NovaPulse instance (separate Docker container, separate exchange keys)
+- horizonsvc.com stores each user's bot connection info (`bot_url` + `api_key`) in PostgreSQL
+- The Fastify API acts as an authenticated proxy — it verifies the user's Firebase token, looks up their bot connection, and forwards requests to the bot's REST API
+- Caddy on the ops VPS provides TLS termination at `nova.horizonsvc.com` and reverse-proxies to the bot container
+- The web dashboard polls the proxy endpoints every 5s (positions/performance) and 15s (trades/strategies)
+
+**Repos:**
+
+| Repo | Purpose | VPS |
+|------|---------|-----|
+| **NovaPulse** (this repo) | Trading engine, strategies, risk, execution | `165.245.143.68` (ops) |
+| **horizonalerts** | Web platform, auth, billing, bot proxy, dashboard | `74.208.153.193` (web) |
+
+See [`knowledge_base/INTERNAL/Dashboard-Integration.md`](knowledge_base/INTERNAL/Dashboard-Integration.md) for the full technical integration guide.
 
 ## Documentation
 

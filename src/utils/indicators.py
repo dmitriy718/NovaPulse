@@ -676,13 +676,7 @@ def ichimoku(
     tenkan_sen = np.full(n, np.nan)
     kijun_sen = np.full(n, np.nan)
 
-    def _midpoint(arr: np.ndarray, start: int, end: int) -> float:
-        segment = arr[start:end]
-        return (np.max(segment) + np.min(segment)) / 2.0
-
     for i in range(tenkan - 1, n):
-        tenkan_sen[i] = _midpoint(highs, i - tenkan + 1, i + 1) / 2.0 + _midpoint(lows, i - tenkan + 1, i + 1) / 2.0
-        # Simpler: (highest_high + lowest_low) / 2
         hh = np.max(highs[i - tenkan + 1:i + 1])
         ll = np.min(lows[i - tenkan + 1:i + 1])
         tenkan_sen[i] = (hh + ll) / 2.0

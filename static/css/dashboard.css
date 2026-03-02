@@ -2130,3 +2130,70 @@ body {
 }
 .settings-item.api-key-item input::placeholder { color: rgba(255, 255, 255, 0.25); }
 .settings-item.api-key-item button { padding: 8px 10px; font-size: 11px; }
+
+/* Stats Share Overlay */
+.stats-share-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 9000;
+    background: rgba(0, 0, 0, 0.55);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    backdrop-filter: blur(4px);
+}
+.stats-share-overlay.hidden { display: none; }
+.stats-share-menu {
+    background: linear-gradient(135deg, #1A2236 0%, #101625 100%);
+    border: 1px solid rgba(255, 255, 255, 0.10);
+    border-radius: 16px;
+    padding: 24px 28px 20px;
+    min-width: 280px;
+    box-shadow: 0 12px 48px rgba(0, 0, 0, 0.5);
+}
+.stats-share-title {
+    font-family: 'Chakra Petch', sans-serif;
+    font-weight: 600;
+    font-size: 16px;
+    color: #F0C942;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    margin-bottom: 16px;
+    text-align: center;
+}
+.stats-share-row {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-bottom: 12px;
+}
+.stats-share-copy-btn {
+    height: 36px;
+    padding: 0 14px;
+    border: 1px solid rgba(255, 255, 255, 0.10);
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.04);
+    color: #D1D5DB;
+    cursor: pointer;
+    font-family: 'Chakra Petch', sans-serif;
+    font-size: 13px;
+    font-weight: 500;
+    transition: transform 0.15s ease, border-color 0.18s ease, background 0.18s ease;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+}
+.stats-share-copy-btn:hover {
+    transform: translateY(-1px);
+    border-color: rgba(255, 255, 255, 0.25);
+    background: rgba(255, 255, 255, 0.10);
+}
+.stats-share-status {
+    text-align: center;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    color: var(--neon-green, #34d399);
+    min-height: 16px;
+}

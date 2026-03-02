@@ -4,6 +4,82 @@ All notable changes to NovaPulse are documented in this file.
 
 ---
 
+## v5.0.2 (2026-03-01) — Stability & Correctness Sweep
+
+Three-round deep review fixing the all-day auto-pause problem, smart exit accounting errors, strategy signal bugs, and security hardening. The bot had been unable to stay resumed due to circuit breakers ignoring grace periods and clean WS reconnections being counted as failures.
+
+### Critical — Engine Stability (Root Cause of All-Day Pausing)
+
+- **Resume no longer triggers immediate re-pause** — `_apply_circuit_breakers()` now checks the post-resume grace period before evaluating any breaker; drawdown breaker no longer fires on the first health check after manual resume
+- **Resume grace period increased** from 5 minutes (300s) to 10 minutes (600s), giving the operator adequate time to address the underlying condition
+- **Resume clears all risk manager state** — `_global_cooldown_until` and `_circuit_breaker_active` are now reset alongside `_consecutive_losses` so leftover cooldowns no longer block trades after resume
+- **Clean task exits no longer counted as failures** — `_run_with_restart` now only increments the failure counter when a task ran for less than 30 seconds (startup crash); normal WS reconnection cycles (ran >30s) restart without penalty, preventing the supervisor from auto-pausing after routine reconnections
+- **Startup grace period for circuit breakers** — 5-minute cooldown set at the end of `initialize()` so stale-data and other breakers cannot fire before warmup data has populated
+
+### Critical — Execution & Accounting
+
+- **Smart exit final tier no longer double-counts fees** — partial P&L is only accumulated for non-final tiers; the final tier is handled fresh by `_close_position` with only prior tiers' accumulated P&L
+- **Performance stats cache is now per-tenant** — `_perf_stats_cache_ts` changed from a single `float` to `Dict[str, float]` so each tenant's cache expiry is tracked independently; prevents stale stats from reaching the position sizer in multi-tenant mode
+
+### Critical — Strategy Correctness
+
+- **Funding rate strategy threshold fixed** — removed erroneous `/100.0` division on `funding_extreme_pct` (already a decimal); the strategy was firing on nearly every non-zero funding rate instead of only extreme events
+- **GlobalRiskAggregator asyncio.Lock compatibility** — lock is now created lazily on first async use via `_get_lock()` instead of in `__init__`, fixing Python 3.10+ deprecation and 3.12+ RuntimeError
+
+### Security
+
+- **XSS fix in dashboard** — `thought.category` is now escaped with `escHtml()` in the CSS class attribute to prevent attribute breakout injection
+
+### Bug Fixes — Strategies
+
+- **Market structure LONG pullback** — added lower bound so the signal only fires when price is near the swing low, not breaking down through support
+- **Market structure SHORT pullback** — added upper bound so the signal only fires when price is near the swing high, not continuing far above it
+- **Volatility squeeze SHORT momentum** — split `mom_accelerating` into directional variants; SHORT signals now correctly reward downward acceleration instead of upward
+- **Regime transition confidence** — added `regime_transition_confidence` parameter to `_compute_confluence()` and wired it from `analyze_pair()`; the entire regime transition boost feature was previously dead code due to a silently caught NameError
+- **RegimeTransitionPredictor race condition** — `predict_transition()` now returns a `(state, confidence)` tuple instead of storing per-pair state on `self`, eliminating cross-pair overwrites in concurrent calls
+
+### Bug Fixes — Risk & Monitoring
+
+- **Liquidity adjustment on zero book data** — returns position size unchanged when depth is zero instead of forcing a $10 floor; prevents silent 90% size reduction when liquidity sizing is enabled with the known Kraken WS book data issue
+- **Correlation group TOCTOU race** — replaced DB query with in-memory `_open_positions` dict (updated synchronously in `register_position()`) so two concurrent signals for correlated pairs cannot both pass the check simultaneously
+- **Anomaly detector volume checks** — `check_volume_anomaly()` is now called inside `run_all_checks()`; volume spike detection was previously dead code (1/3 of anomaly detection disabled)
+- **OnChain data cache retry storm** — `_cache_ts` is now always updated regardless of whether sentiments are empty, preventing re-fetch attempts on every call after TTL expiry
+
+### Bug Fixes — ML & AI
+
+- **EnsembleModel overfitting** — early stopping now validates against a proper 80/20 train/val split instead of the training set
+- **EnsembleModel asyncio.Lock** — lazy creation on first async use (same fix as GlobalRiskAggregator)
+- **EnsembleModel blocking training** — `lgb.train()` now runs via `loop.run_in_executor()` to avoid blocking the event loop
+
+### Code Cleanup
+
+- **Ichimoku dead code removed** — incorrect `tenkan_sen` computation (immediately overwritten by correct one) and unused `_midpoint` helper function removed from `indicators.py`
+
+### Files Modified (18)
+
+| File | Changes |
+|------|---------|
+| `src/core/engine.py` | Startup grace period, circuit breaker grace period check |
+| `src/core/control_router.py` | Resume clears risk manager state, 10-min grace period |
+| `main.py` | `_run_with_restart` only counts quick exits (<30s) as failures |
+| `src/execution/executor.py` | Smart exit fee fix, correlation TOCTOU fix |
+| `src/core/database.py` | Per-tenant performance stats cache timestamps |
+| `src/execution/risk_manager.py` | Liquidity adjustment returns unchanged on zero depth |
+| `src/strategies/funding_rate.py` | Remove double percentage conversion |
+| `static/js/dashboard.js` | XSS fix: escHtml on thought.category |
+| `src/execution/global_risk.py` | Lazy asyncio.Lock creation |
+| `src/strategies/market_structure.py` | LONG/SHORT pullback bounds |
+| `src/execution/anomaly_detector.py` | Wire up volume anomaly checks |
+| `src/exchange/onchain_data.py` | Always update cache timestamp |
+| `src/ai/confluence.py` | Pass regime_transition_confidence to _compute_confluence |
+| `src/ai/regime_predictor.py` | Return (state, confidence) tuple |
+| `src/ai/ensemble_model.py` | Train/val split, lazy lock, run_in_executor |
+| `src/strategies/volatility_squeeze.py` | Directional momentum acceleration for SHORT |
+| `src/utils/indicators.py` | Remove dead Ichimoku tenkan_sen code |
+| `tests/` | Updated tests for regime predictor, execute_signal, liquidity sizing |
+
+---
+
 ## v5.0.0 (2026-02-25) — Advanced Intelligence Suite
 
 Major release adding 10 new advanced features: macro event calendar, cross-pair lead-lag intelligence, regime transition prediction, on-chain data integration, structural stop loss placement, liquidity-aware position sizing, anomaly detection circuit breaker, P&L attribution dashboard, ensemble ML model, and Bayesian hyperparameter optimization. All features default to `enabled: false` for backward compatibility.

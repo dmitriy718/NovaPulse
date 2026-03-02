@@ -1,7 +1,7 @@
 # NovaPulse Config Reference
 
-**Version:** 4.5.0
-**Last Updated:** 2026-02-24
+**Version:** 5.0.0
+**Last Updated:** 2026-02-27
 
 ---
 
@@ -22,7 +22,7 @@ NovaPulse configuration is loaded from `config/config.yaml` and overlaid with en
 | Key | Type | Default | Env Override | Description |
 |-----|------|---------|-------------|-------------|
 | `name` | str | "AI Crypto Trading Bot" | -- | Display name |
-| `version` | str | "4.5.0" | -- | Software version |
+| `version` | str | "5.0.0" | -- | Software version |
 | `mode` | str | "paper" | `TRADING_MODE` | Trading mode: `paper` or `live` |
 | `log_level` | str | "INFO" | `LOG_LEVEL` | Logging level: DEBUG/INFO/WARNING/ERROR |
 | `db_path` | str | "data/trading.db" | `DB_PATH` | SQLite database file path |
@@ -313,6 +313,104 @@ Each strategy has `enabled` (bool) and `weight` (float) plus strategy-specific p
 | `db_path` | str | "data/stocks.db" | `STOCKS_DB_PATH` | Stock DB path |
 
 See `src/core/config.py` for additional stock and Alpaca/Polygon configuration fields.
+
+---
+
+## v5.0 Advanced Features Config
+
+All v5.0 feature blocks default to `enabled: false`. Enable per feature in `config/config.yaml`.
+
+### `event_calendar` - Macro Event Blackout
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `enabled` | bool | false | Enable event calendar and blackout windows |
+| `blackout_minutes` | int | 30 | Minutes before/after event to block new entries |
+| `events_file` | str | "data/events/macro_events.json" | Path to static macro events JSON |
+| `fetch_earnings` | bool | false | Fetch earnings from Polygon (optional) |
+| `earnings_refresh_hours` | int | 24 | Refresh interval for earnings data |
+
+### `ai.lead_lag` - Cross-Pair Lead-Lag
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `enabled` | bool | false | Enable lead-lag confidence adjustment |
+| `leader_pairs` | list | ["BTC/USD", "ETH/USD"] | Pairs used as leaders |
+| `atr_multiplier` | float | 1.0 | ATR multiplier for move magnitude |
+| `lookback_minutes` | int | 5 | Lookback window for leader returns |
+| `boost_confidence` | float | 0.15 | Max confidence boost when aligned |
+| `penalize_confidence` | float | 0.10 | Max confidence penalty when opposing |
+| `min_correlation` | float | 0.5 | Min correlation to apply adjustment |
+
+### `ai.regime_predictor` - Regime Transition Prediction
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `enabled` | bool | false | Enable regime transition prediction |
+| `squeeze_duration_threshold` | int | 8 | Bars in squeeze before emerging trend considered |
+| `adx_slope_period` | int | 5 | Period for ADX slope |
+| `adx_emerging_threshold` | float | 20.0 | ADX level for emerging trend |
+| `volume_ratio_threshold` | float | 1.3 | Volume ratio for confirmation |
+| `emerging_trend_boost` | float | 0.10 | Confidence boost in emerging_trend |
+
+### `ai.onchain` - On-Chain Sentiment
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `enabled` | bool | false | Enable on-chain confidence adjustment |
+| `cache_ttl_seconds` | int | 900 | TTL for on-chain data cache |
+| `weight` | float | 0.08 | Max confidence adjustment magnitude |
+| `min_abs_score` | float | 0.3 | Min absolute sentiment score to apply |
+
+### `ai.ensemble_ml` - Ensemble ML (TFLite + LightGBM)
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `enabled` | bool | false | Enable ensemble predictor |
+| `lgbm_weight` | float | 0.4 | Weight for LightGBM score |
+| `tflite_weight` | float | 0.6 | Weight for TFLite score |
+| `min_training_samples` | int | 100 | Min samples before using ensemble |
+| `retrain_interval_hours` | float | 24.0 | Hours between LightGBM retrains |
+| `feature_names` | list | (see config.py) | Feature list for LightGBM |
+
+### `ai.bayesian_optimizer` - Bayesian Hyperparameter Optimization
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `enabled` | bool | false | Enable Optuna optimizer (suggestions only) |
+| `n_trials` | int | 50 | Trials per optimization run |
+| `optimization_interval_hours` | float | 48.0 | Hours between runs |
+| `min_trades_for_optimization` | int | 200 | Min closed trades to run |
+| `metric` | str | "sharpe_ratio" | Target: sharpe_ratio, profit_factor, calmar_ratio |
+
+### `risk.structural_stop` - Structural Stop Loss
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `enabled` | bool | false | Place stops at swing structure |
+| `lookback` | int | 5 | Swing lookback bars |
+| `buffer_atr_mult` | float | 0.5 | Min ATR buffer beyond swing |
+| `max_distance_atr` | float | 4.0 | Max stop distance in ATR |
+
+### `risk.liquidity_sizing` - Liquidity-Aware Sizing
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `enabled` | bool | false | Reduce size when depth is thin |
+| `max_impact_pct` | float | 0.10 | Max allowed market impact % |
+| `min_depth_ratio` | float | 3.0 | Min order book depth ratio |
+
+### `monitoring.anomaly_detector` - Anomaly Circuit Breaker
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `enabled` | bool | false | Enable anomaly detection and auto-pause |
+| `spread_threshold_mult` | float | 3.0 | Spread spike multiple (vs baseline) |
+| `volume_threshold_mult` | float | 5.0 | Volume anomaly multiple |
+| `correlation_threshold` | float | 0.60 | Correlation anomaly threshold |
+| `depth_drop_threshold` | float | 0.50 | Book depth drop ratio to trigger |
+| `pause_seconds` | int | 300 | Cooldown pause duration |
+| `min_history_samples` | int | 20 | Min samples before enabling |
 
 ---
 

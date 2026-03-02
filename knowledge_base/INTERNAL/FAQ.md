@@ -1,7 +1,7 @@
 # NovaPulse Internal FAQ
 
-**Version:** 4.5.0
-**Last Updated:** 2026-02-24
+**Version:** 5.0.0
+**Last Updated:** 2026-02-27
 
 ---
 
@@ -58,7 +58,7 @@ The bot uses a chase mechanism:
 
 ### Q: How does multi-timeframe work?
 
-NovaPulse stores 1-minute candles as its base data. For multi-timeframe analysis, it resamples these to 5-minute and 15-minute candles using numpy `reduceat` operations. All 9 strategies run independently on each timeframe. The results are combined:
+NovaPulse stores 1-minute candles as its base data. For multi-timeframe analysis, it resamples these to 5-minute and 15-minute candles using numpy `reduceat` operations. All 12 strategies run independently on each timeframe. The results are combined:
 - The primary timeframe (default: 1-min) drives the direction
 - A minimum number of timeframes must agree (default: 2 of 3)
 - SL/TP come from the highest agreeing timeframe (wider stops)
