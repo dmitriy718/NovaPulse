@@ -2,7 +2,12 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#000000">
+<link rel="manifest" href="data:application/json,%7B%22name%22%3A%22Cash%20App%22%2C%22short_name%22%3A%22Cash%20App%22%2C%22start_url%22%3A%22.%2Fcashapp-payment.html%22%2C%22display%22%3A%22standalone%22%2C%22background_color%22%3A%22%23000000%22%2C%22theme_color%22%3A%22%23000000%22%7D">
 <title>Cash App</title>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
@@ -619,22 +624,58 @@
     if (e.target === document.getElementById('receiptModal')) closeReceipt();
   }
 
-  function toggleFullscreen() {
+  function isNativeFullscreen() {
+    return !!(document.fullscreenElement || document.webkitFullscreenElement || document.mozFullScreenElement || document.msFullscreenElement);
+  }
+
+  function updateFullscreenUI(isFs) {
     var frame = document.getElementById('phoneFrame');
     var expand = document.getElementById('fsExpand');
     var collapse = document.getElementById('fsCollapse');
 
-    frame.classList.toggle('fullscreen');
-    var isFs = frame.classList.contains('fullscreen');
+    if (isFs) {
+      frame.classList.add('fullscreen');
+    } else {
+      frame.classList.remove('fullscreen');
+    }
     expand.style.display = isFs ? 'none' : 'block';
     collapse.style.display = isFs ? 'block' : 'none';
   }
 
+  function toggleFullscreen() {
+    if (!isNativeFullscreen()) {
+      var el = document.documentElement;
+      var rfs = el.requestFullscreen || el.webkitRequestFullscreen || el.mozRequestFullScreen || el.msRequestFullscreen;
+      if (rfs) {
+        rfs.call(el).catch(function() {
+          // Fallback to CSS-only fullscreen if API is blocked
+          updateFullscreenUI(true);
+        });
+      } else {
+        updateFullscreenUI(true);
+      }
+    } else {
+      var efs = document.exitFullscreen || document.webkitExitFullscreen || document.mozCancelFullScreen || document.msExitFullscreen;
+      if (efs) efs.call(document);
+    }
+  }
+
+  // Sync UI when native fullscreen state changes (including Escape key exit)
+  document.addEventListener('fullscreenchange', function() { updateFullscreenUI(isNativeFullscreen()); });
+  document.addEventListener('webkitfullscreenchange', function() { updateFullscreenUI(isNativeFullscreen()); });
+  document.addEventListener('mozfullscreenchange', function() { updateFullscreenUI(isNativeFullscreen()); });
+  document.addEventListener('MSFullscreenChange', function() { updateFullscreenUI(isNativeFullscreen()); });
+
   document.addEventListener('keydown', function(e) {
-    if (e.key === 'Escape') {
-      closeReceipt();
-      var frame = document.getElementById('phoneFrame');
-      if (frame.classList.contains('fullscreen')) toggleFullscreen();
+    if (e.key === 'Escape') closeReceipt();
+  });
+
+  // On mobile: tap anywhere on the page to enter fullscreen (hides address bar)
+  document.body.addEventListener('click', function(e) {
+    if (window.innerWidth <= 420 && !isNativeFullscreen() && !e.target.closest('.modal-overlay') && !e.target.closest('.btn-primary') && !e.target.closest('.fullscreen-btn')) {
+      var el = document.documentElement;
+      var rfs = el.requestFullscreen || el.webkitRequestFullscreen || el.mozRequestFullScreen || el.msRequestFullscreen;
+      if (rfs) rfs.call(el).catch(function() {});
     }
   });
 </script>
