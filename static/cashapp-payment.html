@@ -1,0 +1,675 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#000000">
+<link rel="manifest" href="data:application/json,%7B%22name%22%3A%22Cash%20App%22%2C%22short_name%22%3A%22Cash%20App%22%2C%22start_url%22%3A%22.%2Fcashapp-payment.html%22%2C%22display%22%3A%22standalone%22%2C%22background_color%22%3A%22%23000000%22%2C%22theme_color%22%3A%22%23000000%22%7D">
+<title>Cash App</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    background: #000;
+    color: #fff;
+    min-height: 100vh;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .phone-frame {
+    width: 393px;
+    min-height: 852px;
+    background: #000;
+    position: relative;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    transition: all 0.3s ease;
+  }
+
+  .phone-frame.fullscreen {
+    width: 100vw;
+    min-height: 100vh;
+    position: fixed;
+    top: 0;
+    left: 0;
+    z-index: 1000;
+  }
+
+  .status-bar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 12px 24px 8px;
+    font-size: 15px;
+    font-weight: 600;
+    position: relative;
+    z-index: 10;
+  }
+
+  .status-bar .time { letter-spacing: 0.5px; }
+
+  .status-icons {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .status-icons svg { width: 18px; height: 18px; fill: #fff; }
+
+  .battery {
+    width: 27px;
+    height: 13px;
+    border: 1.5px solid #fff;
+    border-radius: 3px;
+    position: relative;
+    display: flex;
+    align-items: center;
+    padding: 1.5px;
+  }
+
+  .battery::after {
+    content: '';
+    position: absolute;
+    right: -5px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 2.5px;
+    height: 6px;
+    background: #fff;
+    border-radius: 0 1px 1px 0;
+  }
+
+  .battery-fill {
+    width: 72%;
+    height: 100%;
+    background: #fff;
+    border-radius: 1.5px;
+  }
+
+  .top-nav {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 20px 12px;
+  }
+
+  .back-btn {
+    width: 36px;
+    height: 36px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+  }
+
+  .back-btn svg { width: 22px; height: 22px; }
+
+  .nav-dots {
+    width: 36px;
+    height: 36px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .nav-dots svg { width: 22px; height: 22px; }
+
+  .content {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 30px 24px 0;
+  }
+
+  .amount {
+    font-size: 72px;
+    font-weight: 800;
+    letter-spacing: -2px;
+    margin-bottom: 16px;
+    line-height: 1;
+  }
+
+  .status-label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 40px;
+  }
+
+  .check-circle {
+    width: 22px;
+    height: 22px;
+    background: #00D632;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .check-circle svg { width: 13px; height: 13px; }
+
+  .status-text {
+    font-size: 17px;
+    font-weight: 500;
+    color: #ffffffcc;
+  }
+
+  .recipient-section {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    margin-bottom: 32px;
+  }
+
+  .avatar {
+    width: 72px;
+    height: 72px;
+    background: linear-gradient(135deg, #00D632 0%, #00B82E 100%);
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 30px;
+    font-weight: 700;
+    color: #fff;
+    margin-bottom: 14px;
+    text-transform: uppercase;
+  }
+
+  .recipient-name {
+    font-size: 20px;
+    font-weight: 700;
+    margin-bottom: 4px;
+  }
+
+  .recipient-handle {
+    font-size: 15px;
+    color: #ffffff88;
+    font-weight: 500;
+  }
+
+  .details {
+    width: 100%;
+    border-top: 1px solid #1a1a1a;
+    padding-top: 20px;
+    margin-top: 8px;
+  }
+
+  .detail-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 14px 0;
+  }
+
+  .detail-label {
+    font-size: 15px;
+    color: #ffffff88;
+    font-weight: 500;
+  }
+
+  .detail-value {
+    font-size: 15px;
+    font-weight: 600;
+    color: #fff;
+  }
+
+  .detail-value.green { color: #00D632; }
+
+  .bottom-section {
+    padding: 20px 24px 40px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .btn-primary {
+    width: 100%;
+    padding: 18px;
+    border-radius: 28px;
+    border: none;
+    font-size: 17px;
+    font-weight: 700;
+    cursor: pointer;
+    font-family: inherit;
+    letter-spacing: -0.2px;
+  }
+
+  .btn-green {
+    background: #00D632;
+    color: #000;
+  }
+
+  .btn-outline {
+    background: transparent;
+    color: #fff;
+    border: 1.5px solid #333;
+    transition: background 0.2s;
+  }
+
+  .btn-outline:hover { background: #111; }
+
+  .home-indicator {
+    width: 134px;
+    height: 5px;
+    background: #fff;
+    border-radius: 100px;
+    margin: 0 auto 8px;
+    opacity: 0.3;
+  }
+
+  .signal-bars {
+    display: flex;
+    align-items: flex-end;
+    gap: 1.5px;
+    height: 12px;
+  }
+
+  .signal-bars .bar {
+    width: 3px;
+    background: #fff;
+    border-radius: 1px;
+  }
+
+  .signal-bars .bar:nth-child(1) { height: 4px; }
+  .signal-bars .bar:nth-child(2) { height: 6px; }
+  .signal-bars .bar:nth-child(3) { height: 9px; }
+  .signal-bars .bar:nth-child(4) { height: 12px; }
+
+  .fullscreen-btn {
+    position: fixed;
+    bottom: 20px;
+    right: 20px;
+    width: 48px;
+    height: 48px;
+    background: #1a1a1a;
+    border: 1px solid #333;
+    border-radius: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    z-index: 2000;
+    transition: background 0.2s;
+  }
+
+  .fullscreen-btn:hover { background: #222; }
+  .fullscreen-btn svg { width: 22px; height: 22px; stroke: #fff; fill: none; }
+
+  /* Modal overlay */
+  .modal-overlay {
+    display: none;
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.85);
+    z-index: 3000;
+    justify-content: center;
+    align-items: center;
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+  }
+
+  .modal-overlay.active { display: flex; }
+
+  .modal {
+    width: 370px;
+    max-width: 92vw;
+    max-height: 88vh;
+    background: #141414;
+    border-radius: 20px;
+    overflow-y: auto;
+    animation: modalIn 0.25s ease;
+  }
+
+  @keyframes modalIn {
+    from { opacity: 0; transform: scale(0.92) translateY(20px); }
+    to { opacity: 1; transform: scale(1) translateY(0); }
+  }
+
+  .modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 20px 24px 16px;
+    border-bottom: 1px solid #1f1f1f;
+  }
+
+  .modal-header h2 {
+    font-size: 18px;
+    font-weight: 700;
+  }
+
+  .modal-close {
+    width: 32px;
+    height: 32px;
+    background: #2a2a2a;
+    border: none;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: background 0.2s;
+  }
+
+  .modal-close:hover { background: #3a3a3a; }
+  .modal-close svg { width: 16px; height: 16px; stroke: #fff; }
+
+  .receipt-body { padding: 24px; }
+
+  .receipt-logo {
+    text-align: center;
+    margin-bottom: 24px;
+  }
+
+  .receipt-logo svg { width: 40px; height: 40px; fill: #00D632; }
+
+  .receipt-logo span {
+    display: block;
+    font-size: 13px;
+    color: #ffffff66;
+    margin-top: 6px;
+    font-weight: 500;
+  }
+
+  .receipt-amount {
+    text-align: center;
+    font-size: 42px;
+    font-weight: 800;
+    letter-spacing: -1px;
+    margin-bottom: 6px;
+  }
+
+  .receipt-status {
+    text-align: center;
+    color: #00D632;
+    font-size: 14px;
+    font-weight: 600;
+    margin-bottom: 28px;
+  }
+
+  .receipt-divider {
+    border: none;
+    border-top: 1px dashed #2a2a2a;
+    margin: 0 0 20px;
+  }
+
+  .receipt-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 10px 0;
+  }
+
+  .receipt-row .label {
+    color: #ffffff66;
+    font-size: 14px;
+    font-weight: 500;
+  }
+
+  .receipt-row .value {
+    color: #fff;
+    font-size: 14px;
+    font-weight: 600;
+    text-align: right;
+  }
+
+  .receipt-id {
+    margin-top: 20px;
+    padding-top: 16px;
+    border-top: 1px solid #1f1f1f;
+    text-align: center;
+  }
+
+  .receipt-id .label {
+    font-size: 12px;
+    color: #ffffff44;
+    font-weight: 500;
+    margin-bottom: 4px;
+  }
+
+  .receipt-id .value {
+    font-size: 12px;
+    color: #ffffff66;
+    font-weight: 500;
+    font-family: 'SF Mono', 'Courier New', monospace;
+    letter-spacing: 0.5px;
+  }
+
+  .receipt-footer {
+    text-align: center;
+    padding: 16px 24px 24px;
+    font-size: 12px;
+    color: #ffffff44;
+    line-height: 1.5;
+  }
+
+  @media (max-width: 420px) {
+    .phone-frame {
+      width: 100%;
+      min-height: 100vh;
+      border-radius: 0;
+    }
+    .fullscreen-btn { display: none; }
+  }
+</style>
+</head>
+<body>
+
+<div class="phone-frame" id="phoneFrame">
+
+  <div class="top-nav">
+    <div class="back-btn">
+      <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+        <polyline points="15 18 9 12 15 6"/>
+      </svg>
+    </div>
+    <div class="nav-dots">
+      <svg viewBox="0 0 24 24" fill="#fff">
+        <circle cx="12" cy="5" r="2"/>
+        <circle cx="12" cy="12" r="2"/>
+        <circle cx="12" cy="19" r="2"/>
+      </svg>
+    </div>
+  </div>
+
+  <div class="content">
+    <div class="amount">$1,400</div>
+
+    <div class="status-label">
+      <div class="check-circle">
+        <svg viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="20 6 9 17 4 12"/>
+        </svg>
+      </div>
+      <span class="status-text">Completed</span>
+    </div>
+
+    <div class="recipient-section">
+      <div class="avatar">R</div>
+      <div class="recipient-name">Russell</div>
+      <div class="recipient-handle">$Russellthelovemuscel</div>
+    </div>
+
+    <div class="details">
+      <div class="detail-row">
+        <span class="detail-label">To</span>
+        <span class="detail-value">$Russellthelovemuscel</span>
+      </div>
+      <div class="detail-row">
+        <span class="detail-label">Status</span>
+        <span class="detail-value green">Completed</span>
+      </div>
+      <div class="detail-row">
+        <span class="detail-label">Date</span>
+        <span class="detail-value" id="detailDate"></span>
+      </div>
+      <div class="detail-row">
+        <span class="detail-label">From</span>
+        <span class="detail-value">Cash balance</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="bottom-section">
+    <button class="btn-primary btn-green">Refund</button>
+    <button class="btn-primary btn-outline" id="receiptBtn" onclick="openReceipt()">Web Receipt</button>
+    <div class="home-indicator"></div>
+  </div>
+</div>
+
+<!-- Fullscreen toggle button -->
+<button class="fullscreen-btn" id="fullscreenBtn" onclick="toggleFullscreen()" title="Toggle fullscreen">
+  <svg id="fsExpand" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/>
+    <line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/>
+  </svg>
+  <svg id="fsCollapse" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none">
+    <polyline points="4 14 10 14 10 20"/><polyline points="20 10 14 10 14 4"/>
+    <line x1="14" y1="10" x2="21" y2="3"/><line x1="3" y1="21" x2="10" y2="14"/>
+  </svg>
+</button>
+
+<!-- Web Receipt Modal -->
+<div class="modal-overlay" id="receiptModal" onclick="closeReceiptOutside(event)">
+  <div class="modal">
+    <div class="modal-header">
+      <h2>Web Receipt</h2>
+      <button class="modal-close" onclick="closeReceipt()">
+        <svg viewBox="0 0 24 24" fill="none" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+        </svg>
+      </button>
+    </div>
+    <div class="receipt-body">
+      <div class="receipt-logo">
+        <svg viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1.41 16.09v.58c0 .73-.6 1.33-1.33 1.33h-.08c-.73 0-1.33-.6-1.33-1.33v-.6c-1.33-.28-2.51-1.01-3.01-2.22l1.48-.59c.38.94 1.23 1.41 2.53 1.41 1.54 0 2.06-.72 2.06-1.3 0-.67-.45-1.3-2.29-1.83-2.04-.59-3.41-1.5-3.41-3.24 0-1.52 1.22-2.7 2.64-3.03v-.6c0-.73.6-1.33 1.33-1.33h.08c.73 0 1.33.6 1.33 1.33v.62c1.18.33 2.1 1.13 2.45 2.28l-1.52.61c-.31-.88-.99-1.38-1.93-1.38-1.02 0-1.87.47-1.87 1.37 0 .78.58 1.18 2.29 1.71 2.04.63 3.41 1.54 3.41 3.35 0 1.67-1.27 2.79-2.83 3.09z"/></svg>
+        <span>Cash App Receipt</span>
+      </div>
+      <div class="receipt-amount">$1,400</div>
+      <div class="receipt-status">Payment Completed</div>
+      <hr class="receipt-divider">
+      <div class="receipt-row">
+        <span class="label">To</span>
+        <span class="value">Russell ($Russellthelovemuscel)</span>
+      </div>
+      <div class="receipt-row">
+        <span class="label">From</span>
+        <span class="value">Cash balance</span>
+      </div>
+      <div class="receipt-row">
+        <span class="label">Date</span>
+        <span class="value" id="receiptDate"></span>
+      </div>
+      <div class="receipt-row">
+        <span class="label">Time</span>
+        <span class="value" id="receiptTime"></span>
+      </div>
+      <div class="receipt-row">
+        <span class="label">Status</span>
+        <span class="value" style="color:#00D632">Completed</span>
+      </div>
+      <div class="receipt-row">
+        <span class="label">Note</span>
+        <span class="value">—</span>
+      </div>
+      <div class="receipt-id">
+        <div class="label">Transaction ID</div>
+        <div class="value">#7X4K9R2M-WPL3-0305</div>
+      </div>
+    </div>
+    <div class="receipt-footer">
+      Cash App &bull; Block, Inc.<br>
+      1455 Market Street, Suite 600, San Francisco, CA 94103
+    </div>
+  </div>
+</div>
+
+<script>
+  document.getElementById('detailDate').textContent = 'Mar 5 at 1:07 AM';
+  document.getElementById('receiptDate').textContent = 'Mar 5, 2026';
+  document.getElementById('receiptTime').textContent = '1:07 AM';
+
+  function openReceipt() {
+    document.getElementById('receiptModal').classList.add('active');
+  }
+
+  function closeReceipt() {
+    document.getElementById('receiptModal').classList.remove('active');
+  }
+
+  function closeReceiptOutside(e) {
+    if (e.target === document.getElementById('receiptModal')) closeReceipt();
+  }
+
+  function isNativeFullscreen() {
+    return !!(document.fullscreenElement || document.webkitFullscreenElement || document.mozFullScreenElement || document.msFullscreenElement);
+  }
+
+  function updateFullscreenUI(isFs) {
+    var frame = document.getElementById('phoneFrame');
+    var expand = document.getElementById('fsExpand');
+    var collapse = document.getElementById('fsCollapse');
+
+    if (isFs) {
+      frame.classList.add('fullscreen');
+    } else {
+      frame.classList.remove('fullscreen');
+    }
+    expand.style.display = isFs ? 'none' : 'block';
+    collapse.style.display = isFs ? 'block' : 'none';
+  }
+
+  function toggleFullscreen() {
+    if (!isNativeFullscreen()) {
+      var el = document.documentElement;
+      var rfs = el.requestFullscreen || el.webkitRequestFullscreen || el.mozRequestFullScreen || el.msRequestFullscreen;
+      if (rfs) {
+        rfs.call(el).catch(function() {
+          // Fallback to CSS-only fullscreen if API is blocked
+          updateFullscreenUI(true);
+        });
+      } else {
+        updateFullscreenUI(true);
+      }
+    } else {
+      var efs = document.exitFullscreen || document.webkitExitFullscreen || document.mozCancelFullScreen || document.msExitFullscreen;
+      if (efs) efs.call(document);
+    }
+  }
+
+  // Sync UI when native fullscreen state changes (including Escape key exit)
+  document.addEventListener('fullscreenchange', function() { updateFullscreenUI(isNativeFullscreen()); });
+  document.addEventListener('webkitfullscreenchange', function() { updateFullscreenUI(isNativeFullscreen()); });
+  document.addEventListener('mozfullscreenchange', function() { updateFullscreenUI(isNativeFullscreen()); });
+  document.addEventListener('MSFullscreenChange', function() { updateFullscreenUI(isNativeFullscreen()); });
+
+  document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') closeReceipt();
+  });
+
+  // On mobile: tap anywhere on the page to enter fullscreen (hides address bar)
+  document.body.addEventListener('click', function(e) {
+    if (window.innerWidth <= 420 && !isNativeFullscreen() && !e.target.closest('.modal-overlay') && !e.target.closest('.btn-primary') && !e.target.closest('.fullscreen-btn')) {
+      var el = document.documentElement;
+      var rfs = el.requestFullscreen || el.webkitRequestFullscreen || el.mozRequestFullScreen || el.msRequestFullscreen;
+      if (rfs) rfs.call(el).catch(function() {});
+    }
+  });
+</script>
+
+</body>
+</html>
