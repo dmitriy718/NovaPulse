@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Cash App</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    background: #000;
+    color: #fff;
+    min-height: 100vh;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .phone-frame {
+    width: 393px;
+    min-height: 852px;
+    background: #000;
+    position: relative;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .status-bar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 12px 24px 8px;
+    font-size: 15px;
+    font-weight: 600;
+    position: relative;
+    z-index: 10;
+  }
+
+  .status-bar .time { letter-spacing: 0.5px; }
+
+  .status-icons {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .status-icons svg { width: 18px; height: 18px; fill: #fff; }
+
+  .battery {
+    width: 27px;
+    height: 13px;
+    border: 1.5px solid #fff;
+    border-radius: 3px;
+    position: relative;
+    display: flex;
+    align-items: center;
+    padding: 1.5px;
+  }
+
+  .battery::after {
+    content: '';
+    position: absolute;
+    right: -5px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 2.5px;
+    height: 6px;
+    background: #fff;
+    border-radius: 0 1px 1px 0;
+  }
+
+  .battery-fill {
+    width: 72%;
+    height: 100%;
+    background: #fff;
+    border-radius: 1.5px;
+  }
+
+  .top-nav {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 20px 12px;
+  }
+
+  .back-btn {
+    width: 36px;
+    height: 36px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .back-btn svg { width: 22px; height: 22px; }
+
+  .nav-dots {
+    width: 36px;
+    height: 36px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .nav-dots svg { width: 22px; height: 22px; }
+
+  .content {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 30px 24px 0;
+  }
+
+  .amount {
+    font-size: 72px;
+    font-weight: 800;
+    letter-spacing: -2px;
+    margin-bottom: 16px;
+    line-height: 1;
+  }
+
+  .status-label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 40px;
+  }
+
+  .check-circle {
+    width: 22px;
+    height: 22px;
+    background: #00D632;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .check-circle svg { width: 13px; height: 13px; }
+
+  .status-text {
+    font-size: 17px;
+    font-weight: 500;
+    color: #ffffffcc;
+  }
+
+  .recipient-section {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    margin-bottom: 32px;
+  }
+
+  .avatar {
+    width: 72px;
+    height: 72px;
+    background: linear-gradient(135deg, #00D632 0%, #00B82E 100%);
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 30px;
+    font-weight: 700;
+    color: #fff;
+    margin-bottom: 14px;
+    text-transform: uppercase;
+  }
+
+  .recipient-name {
+    font-size: 20px;
+    font-weight: 700;
+    margin-bottom: 4px;
+  }
+
+  .recipient-handle {
+    font-size: 15px;
+    color: #ffffff88;
+    font-weight: 500;
+  }
+
+  .details {
+    width: 100%;
+    border-top: 1px solid #1a1a1a;
+    padding-top: 20px;
+    margin-top: 8px;
+  }
+
+  .detail-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 14px 0;
+  }
+
+  .detail-label {
+    font-size: 15px;
+    color: #ffffff88;
+    font-weight: 500;
+  }
+
+  .detail-value {
+    font-size: 15px;
+    font-weight: 600;
+    color: #fff;
+  }
+
+  .detail-value.green { color: #00D632; }
+
+  .bottom-section {
+    padding: 20px 24px 40px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .btn-primary {
+    width: 100%;
+    padding: 18px;
+    border-radius: 28px;
+    border: none;
+    font-size: 17px;
+    font-weight: 700;
+    cursor: pointer;
+    font-family: inherit;
+    letter-spacing: -0.2px;
+  }
+
+  .btn-green {
+    background: #00D632;
+    color: #000;
+  }
+
+  .btn-outline {
+    background: transparent;
+    color: #fff;
+    border: 1.5px solid #333;
+  }
+
+  .home-indicator {
+    width: 134px;
+    height: 5px;
+    background: #fff;
+    border-radius: 100px;
+    margin: 0 auto 8px;
+    opacity: 0.3;
+  }
+
+  .signal-bars {
+    display: flex;
+    align-items: flex-end;
+    gap: 1.5px;
+    height: 12px;
+  }
+
+  .signal-bars .bar {
+    width: 3px;
+    background: #fff;
+    border-radius: 1px;
+  }
+
+  .signal-bars .bar:nth-child(1) { height: 4px; }
+  .signal-bars .bar:nth-child(2) { height: 6px; }
+  .signal-bars .bar:nth-child(3) { height: 9px; }
+  .signal-bars .bar:nth-child(4) { height: 12px; }
+
+  @media (max-width: 420px) {
+    .phone-frame {
+      width: 100%;
+      min-height: 100vh;
+      border-radius: 0;
+    }
+  }
+</style>
+</head>
+<body>
+
+<div class="phone-frame">
+  <div class="status-bar">
+    <span class="time">9:41</span>
+    <div class="status-icons">
+      <div class="signal-bars">
+        <span class="bar"></span>
+        <span class="bar"></span>
+        <span class="bar"></span>
+        <span class="bar"></span>
+      </div>
+      <svg viewBox="0 0 24 24"><path d="M1 9l2 2c4.97-4.97 13.03-4.97 18 0l2-2C16.93 2.93 7.08 2.93 1 9zm8 8l3 3 3-3c-1.65-1.66-4.34-1.66-6 0zm-4-4l2 2c2.76-2.76 7.24-2.76 10 0l2-2C15.14 9.14 8.87 9.14 5 13z"/></svg>
+      <div class="battery"><div class="battery-fill"></div></div>
+    </div>
+  </div>
+
+  <div class="top-nav">
+    <div class="back-btn">
+      <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+        <polyline points="15 18 9 12 15 6"/>
+      </svg>
+    </div>
+    <div class="nav-dots">
+      <svg viewBox="0 0 24 24" fill="#fff">
+        <circle cx="12" cy="5" r="2"/>
+        <circle cx="12" cy="12" r="2"/>
+        <circle cx="12" cy="19" r="2"/>
+      </svg>
+    </div>
+  </div>
+
+  <div class="content">
+    <div class="amount">$1,400</div>
+
+    <div class="status-label">
+      <div class="check-circle">
+        <svg viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="20 6 9 17 4 12"/>
+        </svg>
+      </div>
+      <span class="status-text">Completed</span>
+    </div>
+
+    <div class="recipient-section">
+      <div class="avatar">R</div>
+      <div class="recipient-name">$russgub</div>
+      <div class="recipient-handle">Payment to $russgub</div>
+    </div>
+
+    <div class="details">
+      <div class="detail-row">
+        <span class="detail-label">To</span>
+        <span class="detail-value">$russgub</span>
+      </div>
+      <div class="detail-row">
+        <span class="detail-label">Status</span>
+        <span class="detail-value green">Completed</span>
+      </div>
+      <div class="detail-row">
+        <span class="detail-label">Date</span>
+        <span class="detail-value">Mar 5 at 9:41 AM</span>
+      </div>
+      <div class="detail-row">
+        <span class="detail-label">From</span>
+        <span class="detail-value">Cash balance</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="bottom-section">
+    <button class="btn-primary btn-green">Refund</button>
+    <button class="btn-primary btn-outline">Web Receipt</button>
+    <div class="home-indicator"></div>
+  </div>
+</div>
+
+</body>
+</html>
