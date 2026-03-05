@@ -1,0 +1,30 @@
+version: "3.8"
+
+services:
+  ha-sentinel:
+    build:
+      context: ..
+      dockerfile: ha_agent/Dockerfile
+    container_name: ha-sentinel-ai
+    restart: unless-stopped
+    ports:
+      - "8089:8089"
+    volumes:
+      - ha_data:/app/data/ha_sentinel
+      - ./ha_config.yaml:/app/ha_config.yaml:ro
+    environment:
+      - HA_SENTINEL_LOG_LEVEL=INFO
+      - HA_SENTINEL_API_SECRET=${HA_SENTINEL_API_SECRET:-}
+      - HA_SENTINEL_SLACK_WEBHOOK_URL=${HA_SENTINEL_SLACK_WEBHOOK_URL:-}
+      - HA_SENTINEL_PAGERDUTY_KEY=${HA_SENTINEL_PAGERDUTY_KEY:-}
+      - HA_SENTINEL_DISCORD_WEBHOOK_URL=${HA_SENTINEL_DISCORD_WEBHOOK_URL:-}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8089/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  ha_data:
+    driver: local
