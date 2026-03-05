@@ -501,13 +501,13 @@
     <div class="recipient-section">
       <div class="avatar">R</div>
       <div class="recipient-name">Russell</div>
-      <div class="recipient-handle">$russellthelovemusel</div>
+      <div class="recipient-handle">$Russellthelovemuscel</div>
     </div>
 
     <div class="details">
       <div class="detail-row">
         <span class="detail-label">To</span>
-        <span class="detail-value">$russellthelovemusel</span>
+        <span class="detail-value">$Russellthelovemuscel</span>
       </div>
       <div class="detail-row">
         <span class="detail-label">Status</span>
@@ -564,7 +564,7 @@
       <hr class="receipt-divider">
       <div class="receipt-row">
         <span class="label">To</span>
-        <span class="value">Russell ($russellthelovemusel)</span>
+        <span class="value">Russell ($Russellthelovemuscel)</span>
       </div>
       <div class="receipt-row">
         <span class="label">From</span>
@@ -599,30 +599,9 @@
 </div>
 
 <script>
-  var months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-
-  function formatTime(d) {
-    var h = d.getHours();
-    var m = d.getMinutes();
-    var ampm = h >= 12 ? 'PM' : 'AM';
-    h = h % 12 || 12;
-    return h + ':' + (m < 10 ? '0' : '') + m + ' ' + ampm;
-  }
-
-  function updateTimes() {
-    var now = new Date();
-    var mon = months[now.getMonth()];
-    var day = now.getDate();
-    var year = now.getFullYear();
-    var time = formatTime(now);
-
-    document.getElementById('detailDate').textContent = mon + ' ' + day + ' at ' + time;
-    document.getElementById('receiptDate').textContent = mon + ' ' + day + ', ' + year;
-    document.getElementById('receiptTime').textContent = time;
-  }
-
-  updateTimes();
-  setInterval(updateTimes, 1000);
+  document.getElementById('detailDate').textContent = 'Mar 5 at 1:07 AM';
+  document.getElementById('receiptDate').textContent = 'Mar 5, 2026';
+  document.getElementById('receiptTime').textContent = '1:07 AM';
 
   function openReceipt() {
     document.getElementById('receiptModal').classList.add('active');
